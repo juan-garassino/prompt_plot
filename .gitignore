@@ -1,0 +1,7 @@
+*.html
+*.log
+*.txt
+*.json
+*.png
+
+.env
