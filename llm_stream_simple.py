@@ -23,6 +23,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Circle
 
+# Import serial communication tools when needed
+try:
+    from serial_asyncio import open_serial_connection
+except ImportError:
+    print(f"{Fore.YELLOW}Warning: serial_asyncio not found. Real plotter functionality will be limited.{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}To enable real plotter support, install with: pip install pyserial-asyncio{Style.RESET_ALL}")
+
 # Initialize colorama for cross-platform color support
 init(autoreset=True)
 
@@ -308,6 +315,184 @@ class SimulatedPenPlotter:
     async def __aexit__(self, exc_type, exc, tb):
         await self.disconnect()
 
+class RealPenPlotter:
+    """Controls a physical pen plotter via serial connection"""
+    
+    def __init__(self, port: str, baud_rate: int = 115200):
+        self.port = port
+        self.baud_rate = baud_rate
+        self.controller = None
+        self.status = PlotterStatus()
+        self.command_delay = 0.1
+        self._active = False
+
+    async def connect(self) -> bool:
+        """Connect to the physical plotter"""
+        try:
+            print(f"{Fore.YELLOW}Connecting to physical plotter on {self.port} at {self.baud_rate} baud...{Style.RESET_ALL}")
+            
+            # Import here to avoid dependency issues if not using real plotter
+            from serial_asyncio import open_serial_connection
+            
+            # Create controller for serial communication
+            self.controller = AsyncController(self.port, self.baud_rate)
+            success = await self.controller.wire_up()
+            
+            if success:
+                self._active = True
+                print(f"{Fore.GREEN}Successfully connected to physical plotter!{Style.RESET_ALL}")
+                return True
+            else:
+                print(f"{Fore.RED}Failed to connect to physical plotter on {self.port}{Style.RESET_ALL}")
+                return False
+                
+        except Exception as e:
+            print(f"{Fore.RED}Error connecting to plotter: {str(e)}{Style.RESET_ALL}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    async def disconnect(self):
+        """Disconnect from the physical plotter"""
+        if self._active and self.controller:
+            print(f"{Fore.YELLOW}Disconnecting from physical plotter...{Style.RESET_ALL}")
+            await self.controller.disconnect()
+            self._active = False
+            self.controller = None
+            print(f"{Fore.GREEN}Disconnected successfully{Style.RESET_ALL}")
+
+    async def send_command(self, command: str) -> bool:
+        """Send a command to the physical plotter"""
+        if not self._active or not self.controller:
+            print(f"{Fore.RED}Not connected to plotter{Style.RESET_ALL}")
+            return False
+
+        try:
+            print(f"{Fore.BLUE}Sending to physical plotter: {command}{Style.RESET_ALL}")
+            
+            # Send the command via the controller
+            response = await self.controller.send_signal(command)
+            
+            if response is None:
+                print(f"{Fore.RED}No response from plotter{Style.RESET_ALL}")
+                return False
+                
+            print(f"{Fore.GREEN}Response: {response}{Style.RESET_ALL}")
+            return True
+            
+        except Exception as e:
+            print(f"{Fore.RED}Error sending command to physical plotter: {str(e)}{Style.RESET_ALL}")
+            return False
+
+    async def __aenter__(self):
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.disconnect()
+
+class Dispatcher:
+    """Manages the real-time streaming of plotting tasks."""
+
+    def __init__(self, max_buffer_size=5, command_delay=0.1):
+        self.command_queue = deque(maxlen=max_buffer_size)
+        self.max_buffer_size = max_buffer_size
+        self.command_delay = command_delay
+        self.status = PlotterStatus()
+        self._active = False
+        self._processing = False
+
+    def is_buffer_full(self) -> bool:
+        """Check if the command buffer is full"""
+        return len(self.command_queue) >= self.max_buffer_size
+
+    async def add_command(self, command: str) -> bool:
+        """Add a command to the queue if there's space"""
+        if self.is_buffer_full():
+            await asyncio.sleep(self.command_delay)
+            if self.is_buffer_full():
+                return False
+        
+        self.command_queue.append(command)
+        self.status.queue_size = len(self.command_queue)
+        return True
+
+    async def get_next_command(self) -> Optional[str]:
+        """Get the next command from the queue"""
+        if self.command_queue:
+            command = self.command_queue.popleft()
+            self.status.queue_size = len(self.command_queue)
+            return command
+        return None
+
+    def stop_processing(self):
+        """Stop processing commands"""
+        self._active = False
+
+    @property
+    def is_active(self) -> bool:
+        return self._active
+
+    @property
+    def is_processing(self) -> bool:
+        return self._processing
+
+class AsyncController:
+    def __init__(self, port: str, baud_rate: int):
+        self.port = port
+        self.baud_rate = baud_rate
+        self.reader = None
+        self.writer = None
+        self.logger = logging.getLogger(__name__)
+        self.dispatcher = Dispatcher()
+        self._active = False
+
+    async def wire_up(self) -> bool:
+        """Establish connection with the plotter"""
+        try:
+            self.reader, self.writer = await open_serial_connection(
+                url=self.port, baudrate=self.baud_rate)
+            self.logger.info(f"Connection established on {self.port}")
+            self._active = True
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to open serial port: {e}")
+            return False
+
+    async def send_signal(self, signal: str) -> Optional[str]:
+        """Send a single command and wait for response"""
+        if not self.writer:
+            self.logger.error("Cannot send signal: Not connected to the plotter.")
+            return None
+
+        try:
+            self.writer.write(f"{signal}\n".encode())
+            await self.writer.drain()
+            response = await asyncio.wait_for(self.reader.readline(), timeout=5.0)
+            return response.decode().strip()
+        except asyncio.TimeoutError:
+            self.logger.error("Timeout waiting for plotter response")
+            return None
+        except Exception as e:
+            self.logger.error(f"Error sending signal to plotter: {e}")
+            return None
+
+    async def disconnect(self):
+        """Disconnect from the plotter"""
+        self.dispatcher.stop_processing()
+        
+        if self.writer:
+            self.writer.close()
+            try:
+                await asyncio.wait_for(self.writer.wait_closed(), timeout=5.0)
+                self.logger.info("Serial connection closed")
+            except asyncio.TimeoutError:
+                self.logger.warning("Timeout while closing serial connection")
+        
+        self.reader = None
+        self.writer = None
+        self._active = False
+
 # Event Classes
 class GenerateCommandEvent(Event):
     """Event to trigger generation of a new plotter command."""
@@ -367,7 +552,7 @@ Rules:
    - Lower pen (M3)
    - Draw (G1)
    - Raise pen (M5) when done
-6. Feed rate (f) and speed (s) should be integers
+6. Feed rate (f) and speed (s) should be integers, and a value of 2000 is recommended
 
 Return ONLY ONE command as a JSON object like:
 {{"command": "G0", "x": 10.0, "y": 20.0, "z": 0.0}}
@@ -879,7 +1064,12 @@ async def run_plotter_workflow(prompt: str, model_name: str = "llama3.2:3b", max
                     timeout=1220,)
         
         # Create plotter (real or simulated)
-        plotter = SimulatedPenPlotter(port=port, visualize=interactive_viz) if simulation else None
+        if simulation:
+            plotter = SimulatedPenPlotter(port=port, visualize=interactive_viz)
+        else:
+            # Use a real plotter with the provided port
+            # Default baud rate is 115200, adjust if your plotter uses a different rate
+            plotter = RealPenPlotter(port=port, baud_rate=115200)
 
         # Create workflow
         workflow = SimplePlotterStreamWorkflow(llm=llm, plotter=plotter, timeout=10000, verbose=True)
@@ -892,8 +1082,9 @@ async def run_plotter_workflow(prompt: str, model_name: str = "llama3.2:3b", max
         )
         
         # Run workflow
-        #start_event = StartEvent(prompt=prompt, max_steps=max_steps)
         result = await workflow.run(prompt=prompt, max_steps=max_steps)
+        
+        return result
         
     except Exception as e:
         print(f"{Fore.RED}Error running workflow: {str(e)}{Style.RESET_ALL}")
