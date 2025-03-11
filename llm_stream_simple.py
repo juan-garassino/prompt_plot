@@ -1109,6 +1109,8 @@ async def main():
     parser.add_argument('--port', type=str, default='/dev/ttyUSB0',
                         help='Serial port for real plotter (only used if --no-simulation is set)')
     
+    # python llm_stream_simple.py --no-simulation --port /dev/tty.usbserial-14220 --max-steps 300
+    
     args = parser.parse_args()
     
     # Print configuration
