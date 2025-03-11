@@ -1,264 +1,342 @@
 #!/usr/bin/env python3
-import asyncio
-import logging
+#
+# GRBL-based Pen Plotter G-code Streamer
+#
 import argparse
 import os
 import tempfile
-from serial_asyncio import open_serial_connection
-import logging
-from colorama import Fore, Style, init
-from dataclasses import dataclass
-from typing import Optional, List
 import time
-from collections import deque
+import sys
 
-init(autoreset=True)
+try:
+    import serial
+except ImportError:
+    print("Error: The 'pyserial' package is required. Install it with 'pip install pyserial'")
+    sys.exit(1)
 
-@dataclass
-class PlotterStatus:
-    """Tracks the current status of the plotter"""
-    is_busy: bool = False
-    current_command: Optional[str] = None
-    last_response: Optional[str] = None
-    queue_size: int = 0
-    last_update: float = time.time()
+# Terminal colors
+class Colors:
+    GREEN = '\033[92m'
+    CYAN = '\033[96m'
+    RED = '\033[91m'
+    YELLOW = '\033[93m'
+    RESET = '\033[0m'
 
-class Dispatcher:
-    """Manages the real-time streaming of plotting tasks."""
+# Tree symbols for structured logging
+class TreeSymbols:
+    BRANCH = "├── "
+    LAST = "└── "
+    PIPE = "│   "
+    SPACE = "    "
+    
+    # Status indicators
+    ACTION = "[*]"
+    SUCCESS = "[+]"
+    ERROR = "[!]"
+    INFO = "[?]"
+    WARNING = "[W]"
 
-    def __init__(self, max_buffer_size=5, command_delay=0.1):
-        self.command_queue = deque(maxlen=max_buffer_size)
-        self.max_buffer_size = max_buffer_size
-        self.command_delay = command_delay
-        self.status = PlotterStatus()
-        self.logger = logging.getLogger(__name__)
-        self._active = False
-        self._processing = False
+# Global debug flag
+debug_mode = False
+# Current indentation level
+indent_level = 0
+# Track if current item is last in its group
+is_last_item = False
 
-    def is_buffer_full(self) -> bool:
-        """Check if the command buffer is full"""
-        return len(self.command_queue) >= self.max_buffer_size
+def print_tree(message, symbol=TreeSymbols.ACTION, is_last=False, level=0, status_color=Colors.CYAN):
+    """Print a message in tree format with the specified indentation level"""
+    prefix = ""
+    
+    # Build the prefix based on indentation level
+    for i in range(level):
+        if i == level - 1 and is_last:
+            prefix += TreeSymbols.LAST
+        elif i == level - 1:
+            prefix += TreeSymbols.BRANCH
+        else:
+            prefix += TreeSymbols.PIPE
+    
+    # Print the message with appropriate formatting
+    print(f"{prefix}{status_color}{symbol}{Colors.RESET} {message}")
 
-    async def add_command(self, command: str) -> bool:
-        """Add a command to the queue if there's space"""
-        if self.is_buffer_full():
-            await asyncio.sleep(self.command_delay)
-            if self.is_buffer_full():
-                return False
-        
-        self.command_queue.append(command)
-        self.status.queue_size = len(self.command_queue)
-        return True
+def print_sub_message(message, symbol=TreeSymbols.INFO, is_last=True):
+    """Print a sub-message (explanation, detail) with proper indentation"""
+    global indent_level
+    prefix = ""
+    
+    # Build proper indentation prefix
+    for i in range(indent_level):
+        prefix += TreeSymbols.PIPE
+    
+    if is_last:
+        prefix += TreeSymbols.LAST
+    else:
+        prefix += TreeSymbols.BRANCH
+    
+    # Print with muted color for explanations
+    print(f"{prefix}{Colors.CYAN}{symbol}{Colors.RESET} {message}")
 
-    async def get_next_command(self) -> Optional[str]:
-        """Get the next command from the queue"""
-        if self.command_queue:
-            command = self.command_queue.popleft()
-            self.status.queue_size = len(self.command_queue)
-            return command
-        return None
-
-    async def process_file(self, filename: str) -> bool:
-        """Process a GCode file line by line without loading it entirely into memory"""
-        self._active = True
-        self._processing = True
-        
-        try:
-            with open(filename, 'r') as f:
-                while self._active:
-                    # Read a chunk of lines
-                    lines = []
-                    for _ in range(self.max_buffer_size * 2):  # Read ahead
-                        line = f.readline()
-                        if not line:
-                            break
-                        line = line.strip()
-                        if line and not line.startswith(';'):
-                            lines.append(line)
-                    
-                    if not lines:
-                        break  # End of file
-                    
-                    # Add lines to queue with backpressure
-                    for line in lines:
-                        while self._active:
-                            if await self.add_command(line):
-                                break
-                            await asyncio.sleep(self.command_delay)
-                    
-                    # Give time for processing
-                    await asyncio.sleep(self.command_delay)
-            
-            # Wait for queue to empty
-            while self._active and self.command_queue:
-                await asyncio.sleep(self.command_delay)
-            
-            return True
-        
-        except Exception as e:
-            self.logger.error(f"Error processing file: {str(e)}")
-            return False
-        finally:
-            self._processing = False
-            self._active = False
-
-    def stop_processing(self):
-        """Stop processing commands"""
-        self._active = False
-
-    @property
-    def is_active(self) -> bool:
-        return self._active
-
-    @property
-    def is_processing(self) -> bool:
-        return self._processing
-
-class AsyncController:
-    def __init__(self, port: str, baud_rate: int):
+class GrblPlotter:
+    """Standard GRBL-compatible pen plotter controller"""
+    
+    def __init__(self, port, baud_rate=115200, timeout=0.1):
         self.port = port
         self.baud_rate = baud_rate
-        self.reader = None
-        self.writer = None
-        self.logger = logging.getLogger(__name__)
-        self.dispatcher = Dispatcher()
-        self._active = False
-
-    async def wire_up(self) -> bool:
-        """Establish connection with the plotter"""
-        try:
-            self.reader, self.writer = await open_serial_connection(
-                url=self.port, baudrate=self.baud_rate)
-            self.logger.info(f"Connection established on {self.port}")
-            self._active = True
-            return True
-        except Exception as e:
-            self.logger.error(f"Failed to open serial port: {e}")
-            return False
-
-    async def send_signal(self, signal: str) -> Optional[str]:
-        """Send a single command and wait for response"""
-        if not self.writer:
-            self.logger.error("Cannot send signal: Not connected to the plotter.")
-            return None
-
-        try:
-            self.writer.write(f"{signal}\n".encode())
-            await self.writer.drain()
-            response = await asyncio.wait_for(self.reader.readline(), timeout=5.0)
-            return response.decode().strip()
-        except asyncio.TimeoutError:
-            self.logger.error("Timeout waiting for plotter response")
-            return None
-        except Exception as e:
-            self.logger.error(f"Error sending signal to plotter: {e}")
-            return None
-
-    async def stream_file(self, filename: str):
-        """Stream a GCode file through the dispatcher"""
-        if not self._active:
-            self.logger.error("Controller is not active")
-            return False
-
-        # Start file processing in background
-        process_task = asyncio.create_task(self.dispatcher.process_file(filename))
+        self.timeout = timeout
+        self.serial = None
+        self.connected = False
+    
+    def connect(self):
+        """Connect to the GRBL device"""
+        global indent_level
+        
+        print_tree("Connecting to plotter", level=indent_level)
+        indent_level += 1
         
         try:
-            while self.dispatcher.is_active or self.dispatcher.command_queue:
-                command = await self.dispatcher.get_next_command()
-                if command:
-                    self.logger.debug(f"Sending command: {command}")
-                    response = await self.send_signal(command)
-                    if response is None:  # Command failed
-                        self.dispatcher.stop_processing()
-                        return False
-                    
-                    # Update status
-                    self.dispatcher.status.last_response = response
-                    self.dispatcher.status.current_command = command
-                    self.dispatcher.status.last_update = time.time()
-                    
-                    # Visual feedback
-                    print(f"\r{Fore.CYAN}📡 Queue: {self.dispatcher.status.queue_size} | Last: {command[:30]}...{Style.RESET_ALL}", end='')
-                
-                await asyncio.sleep(self.dispatcher.command_delay)
+            print_tree("Opening serial port", level=indent_level)
+            self.serial = serial.Serial(
+                port=self.port,
+                baudrate=self.baud_rate,
+                timeout=self.timeout,
+                writeTimeout=self.timeout
+            )
             
-            print("\n")  # Clear the last status line
+            print_tree("Initializing connection", level=indent_level)
+            indent_level += 1
+            
+            # Clear startup text and wait for GRBL to initialize
+            time.sleep(2)
+            self.serial.flushInput()
+            
+            print_tree("Sending wake-up signal", level=indent_level)
+            # Send a newline to wake up GRBL
+            self.serial.write(b"\r\n\r\n")
+            time.sleep(2)
+            
+            # Check if we get a response
+            response = self.read_response()
+            if response:
+                print_sub_message(f"Received: {response}")
+            
+            # Get GRBL status
+            print_tree("Getting device info", level=indent_level, is_last=True)
+            response = self.send_command('$I', display_tree=False)
+            if response:
+                print_sub_message(f"Device info: {response}")
+            
+            indent_level -= 1
+            
+            self.connected = True
+            print_tree("Connection established", symbol=TreeSymbols.SUCCESS, level=indent_level, is_last=True, status_color=Colors.GREEN)
+            indent_level -= 1
             return True
-
+        
         except Exception as e:
-            self.logger.error(f"Error during streaming: {e}")
-            self.dispatcher.stop_processing()
+            print_tree(f"Connection failed: {e}", symbol=TreeSymbols.ERROR, level=indent_level, is_last=True, status_color=Colors.RED)
+            indent_level -= 1
+            
+            if self.serial:
+                self.serial.close()
+                self.serial = None
             return False
-        finally:
-            # Ensure process task is completed
-            if not process_task.done():
-                process_task.cancel()
-                try:
-                    await process_task
-                except asyncio.CancelledError:
-                    pass
-
-    async def disconnect(self):
-        """Disconnect from the plotter"""
-        self._active = False
-        self.dispatcher.stop_processing()
-        
-        if self.writer:
-            self.writer.close()
+    
+    def disconnect(self):
+        """Disconnect from the GRBL device"""
+        if self.serial:
+            global indent_level
+            print_tree("Disconnecting from plotter", level=indent_level)
+            indent_level += 1
+            
+            # Send the plotter back to origin
             try:
-                await asyncio.wait_for(self.writer.wait_closed(), timeout=5.0)
-                self.logger.info("Serial connection closed")
-            except asyncio.TimeoutError:
-                self.logger.warning("Timeout while closing serial connection")
+                print_tree("Sending to home position", level=indent_level)
+                self.send_command("G0 X0 Y0", display_tree=False)
+                print_tree("Turning off spindle", level=indent_level, is_last=True)
+                self.send_command("M5", display_tree=False)  # Turn off spindle (pen up for some plotters)
+            except:
+                pass
+            
+            self.serial.close()
+            self.serial = None
+            self.connected = False
+            
+            print_tree("Disconnected successfully", symbol=TreeSymbols.SUCCESS, is_last=True, level=indent_level-1, status_color=Colors.GREEN)
+            indent_level -= 1
+    
+    def read_response(self, timeout=1.0):
+        """Read response from GRBL, with timeout"""
+        if not self.serial:
+            return None
         
-        self.reader = None
-        self.writer = None
-
-    async def __aenter__(self):
-        await self.wire_up()
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        await self.disconnect()
-
+        response = ""
+        start_time = time.time()
+        
+        while (time.time() - start_time) < timeout:
+            if self.serial.in_waiting > 0:
+                line = self.serial.readline().decode('utf-8').strip()
+                if line:
+                    response += line + "\n"
+                    if line == "ok" or line.startswith("error:"):
+                        break
+            time.sleep(0.01)
+        
+        return response.strip()
+    
+    def send_command(self, command, wait_for_ok=True, display_tree=True):
+        """Send a command to GRBL and wait for response"""
+        if not self.serial:
+            if display_tree:
+                print_tree("Not connected to plotter", symbol=TreeSymbols.ERROR, status_color=Colors.RED)
+            return None
+        
+        # Log the command if needed
+        if display_tree and debug_mode:
+            print_tree(f"CMD: {command}", symbol=TreeSymbols.ACTION)
+        
+        # Send the command
+        self.serial.write(f"{command}\n".encode())
+        self.serial.flush()
+        
+        # Wait for response
+        if wait_for_ok:
+            response = self.read_response()
+            if display_tree and debug_mode:
+                if response and response.startswith("error:"):
+                    print_tree(f"Error: {response}", symbol=TreeSymbols.WARNING, status_color=Colors.YELLOW)
+                elif debug_mode:
+                    print_sub_message(f"Response: {response}")
+            return response
+        return None
+    
+    def stream_file(self, filename):
+        """Stream a G-code file to the plotter"""
+        global indent_level
+        
+        if not self.connected or not self.serial:
+            print_tree("Not connected to plotter", symbol=TreeSymbols.ERROR, status_color=Colors.RED)
+            return False
+        
+        print_tree("Streaming G-code file", level=indent_level)
+        indent_level += 1
+        
+        try:
+            # Open the G-code file
+            with open(filename, 'r') as f:
+                # Preview the first few commands
+                print_tree("Analyzing G-code content", level=indent_level)
+                indent_level += 1
+                
+                first_lines = []
+                for i, line in enumerate(f):
+                    if i >= 5:  # Limit to first 5 commands for preview
+                        break
+                    line = line.strip()
+                    if line and not line.startswith('%') and not line.startswith('(') and not line.startswith(';'):
+                        first_lines.append(line)
+                
+                if first_lines:
+                    print_tree("First few commands", level=indent_level, is_last=True)
+                    for i, line in enumerate(first_lines):
+                        is_last = (i == len(first_lines) - 1)
+                        print_sub_message(line, is_last=is_last)
+                
+                indent_level -= 1
+                
+                # Reset file pointer to beginning
+                f.seek(0)
+                
+                # Initialize progress tracking
+                line_count = sum(1 for _ in f)
+                f.seek(0)
+                
+                print_tree("Executing G-code commands", level=indent_level)
+                indent_level += 1
+                
+                # Send commands line by line
+                line_number = 0
+                error_count = 0
+                
+                for line in f:
+                    line = line.strip()
+                    
+                    # Skip empty lines and comments
+                    if not line or line.startswith('%') or line.startswith('(') or line.startswith(';'):
+                        continue
+                    
+                    # Special handling for program number
+                    if line.startswith('O'):
+                        continue
+                    
+                    # Send the command and wait for response
+                    response = self.send_command(line, display_tree=False)
+                    if response and response.startswith("error:"):
+                        error_count += 1
+                        if debug_mode:
+                            print_tree(f"Error ({line}): {response}", symbol=TreeSymbols.WARNING, level=indent_level, status_color=Colors.YELLOW)
+                    
+                    # Update progress
+                    line_number += 1
+                    progress = line_number / line_count * 100
+                    print(f"\r{Colors.CYAN}Progress: {progress:.1f}% | Current: {line[:30]}...{Colors.RESET}", end='')
+                    
+                    # Give GRBL time to process
+                    time.sleep(0.05)
+                
+                print()  # Clear the progress line
+                
+                if error_count > 0:
+                    print_tree(f"Completed with {error_count} errors", symbol=TreeSymbols.WARNING, level=indent_level, is_last=True, status_color=Colors.YELLOW)
+                else:
+                    print_tree("All commands executed successfully", symbol=TreeSymbols.SUCCESS, level=indent_level, is_last=True, status_color=Colors.GREEN)
+                
+                indent_level -= 1
+                print_tree("File streaming complete", symbol=TreeSymbols.SUCCESS, level=indent_level, is_last=True, status_color=Colors.GREEN)
+                indent_level -= 1
+                
+            return True
+            
+        except Exception as e:
+            print_tree(f"Error streaming file: {e}", symbol=TreeSymbols.ERROR, level=indent_level, is_last=True, status_color=Colors.RED)
+            indent_level -= 1
+            return False
 
 def generate_square_gcode(x_start=10, y_start=10, size=50, file_path=None):
-    """Generate GCode for drawing a square
+    """Generate GCode for drawing a square"""
+    global indent_level
     
-    Args:
-        x_start: Starting X coordinate
-        y_start: Starting Y coordinate
-        size: Size of the square
-        file_path: Path to save the GCode file (if None, a temporary file is created)
-        
-    Returns:
-        Path to the generated GCode file
-    """
+    print_tree("Generating square G-code", level=indent_level)
+    indent_level += 1
+    
     if file_path is None:
+        print_tree("Creating temporary file", level=indent_level)
         fd, file_path = tempfile.mkstemp(suffix='.gcode')
         os.close(fd)
+    else:
+        print_tree(f"Using output file: {file_path}", level=indent_level)
+    
+    print_tree("Writing G-code content", level=indent_level)
     
     with open(file_path, 'w') as f:
         # GCode header
-        f.write("; GCode for drawing a square\n")
-        f.write("; Generated by Pen Plotter Square Script\n")
+        f.write("; GCode for drawing a square - GRBL compatible\n")
         f.write("\n")
         
-        # Setup - home and set speed
+        # Setup
         f.write("G21 ; Set units to millimeters\n")
         f.write("G90 ; Set absolute positioning\n")
-        f.write("G92 X0 Y0 ; Set current position as origin\n")
         f.write("G1 F3000 ; Set feed rate (speed)\n")
         
-        # Lift pen (Z up) - assuming Z controls pen up/down
-        f.write("G1 Z5 ; Lift pen\n")
+        # Pen up
+        f.write("M3 S0 ; Pen up\n")
+        f.write("G4 P0.5 ; Wait for pen to move\n")
         
         # Move to starting position
-        f.write(f"G1 X{x_start} Y{y_start} ; Move to starting position\n")
+        f.write(f"G0 X{x_start} Y{y_start} ; Move to starting position\n")
         
-        # Lower pen (Z down)
-        f.write("G1 Z0 ; Lower pen\n")
+        # Pen down
+        f.write("M3 S1000 ; Pen down\n")
+        f.write("G4 P0.5 ; Wait for pen to move\n")
         
         # Draw square
         f.write(f"G1 X{x_start + size} Y{y_start} ; Draw bottom line\n")
@@ -266,63 +344,123 @@ def generate_square_gcode(x_start=10, y_start=10, size=50, file_path=None):
         f.write(f"G1 X{x_start} Y{y_start + size} ; Draw top line\n")
         f.write(f"G1 X{x_start} Y{y_start} ; Draw left line (complete square)\n")
         
-        # Lift pen again
-        f.write("G1 Z5 ; Lift pen\n")
+        # Pen up
+        f.write("M3 S0 ; Pen up\n")
+        f.write("G4 P0.5 ; Wait for pen to move\n")
         
         # Return to home
-        f.write("G1 X0 Y0 ; Return to home position\n")
+        f.write("G0 X0 Y0 ; Return to home position\n")
     
-    print(f"GCode for square generated and saved to {file_path}")
+    print_tree(f"G-code file created: {file_path}", symbol=TreeSymbols.SUCCESS, level=indent_level, is_last=True, status_color=Colors.GREEN)
+    indent_level -= 1
+    
     return file_path
 
-
-async def main():
-    # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
+def main():
+    global debug_mode, indent_level
+    
+    # Print compact title
+    print(f"{Colors.CYAN}GRBL Pen Plotter G-code Streamer{Colors.RESET}")
+    print()
+    
+    # Start workflow tree
+    print_tree("Initialize Workflow")
+    indent_level = 1
     
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Stream GCode for a square to pen plotter')
-    parser.add_argument('--port', default='/dev/ttyUSB0', help='Serial port connected to plotter')
+    print_tree("Processing command line arguments", level=indent_level)
+    indent_level += 1
+    
+    parser = argparse.ArgumentParser(description='GRBL-based Pen Plotter G-code Streamer')
+    parser.add_argument('--port', required=True, help='Serial port connected to plotter')
     parser.add_argument('--baud', type=int, default=115200, help='Baud rate for serial connection')
     parser.add_argument('--size', type=int, default=50, help='Size of square in mm')
     parser.add_argument('--x', type=int, default=10, help='X starting position in mm')
     parser.add_argument('--y', type=int, default=10, help='Y starting position in mm')
     parser.add_argument('--output', help='Output path for GCode file (optional)')
+    parser.add_argument('--file', help='Path to existing .gcode or .nc file to stream')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode with verbose logging')
     args = parser.parse_args()
     
-    # Generate GCode for a square
-    gcode_file = generate_square_gcode(
-        x_start=args.x,
-        y_start=args.y,
-        size=args.size,
-        file_path=args.output
-    )
+    # Set debug mode based on flag
+    debug_mode = args.debug
+    if debug_mode:
+        print_sub_message("Debug mode enabled")
     
-    print(f"{Fore.GREEN}Connecting to plotter on {args.port} at {args.baud} baud...{Style.RESET_ALL}")
+    print_tree("Configuration loaded", symbol=TreeSymbols.SUCCESS, level=indent_level, is_last=True, status_color=Colors.GREEN)
+    indent_level -= 1
     
-    # Create controller and connect to plotter
-    async with AsyncController(args.port, args.baud) as controller:
-        if controller._active:
-            print(f"{Fore.GREEN}Connected! Starting to stream GCode...{Style.RESET_ALL}")
-            result = await controller.stream_file(gcode_file)
+    # Start file processing
+    print_tree("Prepare G-code file", level=indent_level)
+    indent_level += 1
+    
+    # Determine which file to stream
+    if args.file:
+        # User provided an existing file to stream
+        if not os.path.exists(args.file):
+            print_tree(f"File not found: {args.file}", symbol=TreeSymbols.ERROR, level=indent_level, is_last=True, status_color=Colors.RED)
+            return
+        
+        file_ext = os.path.splitext(args.file)[1].lower()
+        if file_ext not in ['.gcode', '.nc']:
+            print_tree(f"Unusual file extension: {file_ext}", symbol=TreeSymbols.WARNING, level=indent_level, status_color=Colors.YELLOW)
+            print_sub_message("Will attempt to process as G-code anyway")
+        
+        gcode_file = args.file
+        print_tree(f"Using existing file: {os.path.basename(gcode_file)}", symbol=TreeSymbols.SUCCESS, level=indent_level, is_last=True, status_color=Colors.GREEN)
+    else:
+        # Generate GCode for a square
+        print_tree(f"No file specified, generating square pattern", level=indent_level)
+        print_sub_message(f"Size: {args.size}mm × {args.size}mm at ({args.x}, {args.y})")
+        
+        gcode_file = generate_square_gcode(
+            x_start=args.x,
+            y_start=args.y,
+            size=args.size,
+            file_path=args.output
+        )
+        
+        print_tree("Square G-code ready", symbol=TreeSymbols.SUCCESS, level=indent_level, is_last=True, status_color=Colors.GREEN)
+    
+    indent_level -= 1
+    
+    # Start plotter control workflow
+    print_tree("Begin plotter operation", level=indent_level)
+    indent_level += 1
+    
+    print_sub_message(f"Port: {args.port}, Baud rate: {args.baud}")
+    
+    # Create plotter controller and connect
+    plotter = GrblPlotter(args.port, args.baud)
+    try:
+        if plotter.connect():
+            # Try to unlock GRBL if needed
+            print_tree("Unlocking controller", level=indent_level)
+            plotter.send_command("$X", display_tree=False)
+            
+            # Stream the file
+            result = plotter.stream_file(gcode_file)
             
             if result:
-                print(f"{Fore.GREEN}✅ Square drawing completed successfully!{Style.RESET_ALL}")
+                print_tree("Drawing completed successfully", symbol=TreeSymbols.SUCCESS, level=indent_level, is_last=True, status_color=Colors.GREEN)
             else:
-                print(f"{Fore.RED}❌ Failed to complete the drawing.{Style.RESET_ALL}")
+                print_tree("Drawing failed", symbol=TreeSymbols.ERROR, level=indent_level, is_last=True, status_color=Colors.RED)
         else:
-            print(f"{Fore.RED}❌ Failed to connect to the plotter.{Style.RESET_ALL}")
+            print_tree("Connection failed", symbol=TreeSymbols.ERROR, level=indent_level, is_last=True, status_color=Colors.RED)
+    finally:
+        plotter.disconnect()
     
-    # Clean up temp file if we created one
-    if args.output is None:
+    indent_level -= 1
+    
+    # Clean up temp file if we created one and it's not a user-provided file
+    if args.output is None and not args.file:
+        print_tree("Cleaning up temporary files", level=indent_level, is_last=True)
         try:
             os.remove(gcode_file)
         except:
             pass
-
+    
+    print_tree("Workflow complete", symbol=TreeSymbols.SUCCESS, level=0, is_last=True, status_color=Colors.GREEN)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
