@@ -1,0 +1,30 @@
+# Testing dependencies for PromptPlot v2.0
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.0.0
+pytest-mock>=3.10.0
+pytest-xdist>=3.0.0
+pytest-benchmark>=4.0.0
+
+# Mocking and test utilities
+unittest-mock>=1.0.0
+factory-boy>=3.2.0
+faker>=18.0.0
+
+# Coverage and quality
+coverage>=7.0.0
+pytest-html>=3.1.0
+pytest-json-report>=1.5.0
+
+# Performance testing
+pytest-benchmark>=4.0.0
+memory-profiler>=0.60.0
+
+# Visual testing (for image comparison)
+Pillow>=9.0.0
+opencv-python>=4.7.0
+numpy>=1.24.0
+
+# File format testing
+lxml>=4.9.0  # For XML/SVG parsing
+ezdxf>=1.0.0  # For DXF file testing

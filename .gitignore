@@ -1,7 +1,72 @@
-*.html
-*.log
-*.txt
-*.json
-*.png
-
+# Environment files
 .env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+
+# Results and outputs (keep structure but ignore contents)
+results/gcode/*.gcode
+results/gcode/*.nc
+results/gcode/*.txt
+results/images/*.png
+results/images/*.jpg
+results/images/*.jpeg
+results/visualizations/*.png
+results/visualizations/*.html
+results/reports/*.pdf
+results/reports/*.html
+results/logs/*.log
+results/logs/*.txt
+
+# Temporary files
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json

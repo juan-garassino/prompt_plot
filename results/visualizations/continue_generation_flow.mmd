@@ -1,0 +1,35 @@
+graph TD
+    StopEvent("StopEvent") --> _done["_done"]
+
+    continue_generation["continue_generation"] --> GenerateNextCommandEvent("GenerateNextCommandEvent")
+    ContinueGenerationEvent("ContinueGenerationEvent") --> continue_generation
+
+    finalize_program["finalize_program"] --> StopEvent
+    ProgramCompleteEvent("ProgramCompleteEvent") --> finalize_program
+
+    generate_next_command["generate_next_command"] --> CommandExtractionDone("CommandExtractionDone")
+    GenerateNextCommandEvent("GenerateNextCommandEvent") --> generate_next_command
+    CommandValidationErrorEvent("CommandValidationErrorEvent") --> generate_next_command
+
+    process_command["process_command"] --> ContinueGenerationEvent
+    process_command --> ProgramCompleteEvent
+    ValidatedCommandEvent("ValidatedCommandEvent") --> process_command
+
+    start["start"] --> GenerateNextCommandEvent
+    StartEvent("StartEvent") --> start
+
+    validate_command["validate_command"] --> CommandValidationErrorEvent
+    validate_command --> ValidatedCommandEvent
+    CommandExtractionDone --> validate_command
+
+    classDef fn fill:#ADD8E6,stroke:#333,stroke-width:2px
+    class _done,continue_generation,finalize_program,generate_next_command,process_command,start,validate_command fn
+
+    classDef ev fill:#90EE90,stroke:#333,stroke-width:2px
+    class ContinueGenerationEvent,ProgramCompleteEvent,GenerateNextCommandEvent,CommandValidationErrorEvent,ValidatedCommandEvent,CommandExtractionDone ev
+
+    classDef stop fill:#FFA07A,stroke:#333,stroke-width:2px
+    class StopEvent stop
+
+    classDef start fill:#E27AFF,stroke:#333,stroke-width:2px
+    class StartEvent start

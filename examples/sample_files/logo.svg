@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
+    <!-- Simple logo design for testing -->
+    
+    <!-- Outer border -->
+    <rect x="5" y="5" width="90" height="90" 
+          fill="none" stroke="black" stroke-width="2" 
+          rx="5" ry="5"/>
+    
+    <!-- Inner frame -->
+    <rect x="15" y="15" width="70" height="70" 
+          fill="none" stroke="black" stroke-width="1"/>
+    
+    <!-- Central circle -->
+    <circle cx="50" cy="50" r="20" 
+            fill="none" stroke="black" stroke-width="2"/>
+    
+    <!-- Inner circle -->
+    <circle cx="50" cy="50" r="10" 
+            fill="none" stroke="black" stroke-width="1"/>
+    
+    <!-- Decorative lines -->
+    <line x1="30" y1="30" x2="70" y2="30" 
+          stroke="black" stroke-width="1"/>
+    <line x1="30" y1="70" x2="70" y2="70" 
+          stroke="black" stroke-width="1"/>
+    <line x1="30" y1="30" x2="30" y2="70" 
+          stroke="black" stroke-width="1"/>
+    <line x1="70" y1="30" x2="70" y2="70" 
+          stroke="black" stroke-width="1"/>
+    
+    <!-- Corner decorations -->
+    <circle cx="25" cy="25" r="3" fill="none" stroke="black" stroke-width="1"/>
+    <circle cx="75" cy="25" r="3" fill="none" stroke="black" stroke-width="1"/>
+    <circle cx="25" cy="75" r="3" fill="none" stroke="black" stroke-width="1"/>
+    <circle cx="75" cy="75" r="3" fill="none" stroke="black" stroke-width="1"/>
+    
+    <!-- Text (will be converted to paths) -->
+    <text x="50" y="55" text-anchor="middle" 
+          font-family="Arial" font-size="8" 
+          fill="none" stroke="black" stroke-width="0.5">LOGO</text>
+</svg>

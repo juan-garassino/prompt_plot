@@ -1,0 +1,21 @@
+graph TD
+    StopEvent("StopEvent") --> _done["_done"]
+    end_node["end"] --> StopEvent
+    ValidatedGCodeEvent("ValidatedGCodeEvent") --> end_node
+    generate_gcode["generate_gcode"] --> GCodeExtractionDone("GCodeExtractionDone")
+    GenerateGCodeEvent("GenerateGCodeEvent") --> generate_gcode
+    GCodeValidationErrorEvent("GCodeValidationErrorEvent") --> generate_gcode
+    start["start"] --> GenerateGCodeEvent
+    StartEvent("StartEvent") --> start
+    validate_gcode["validate_gcode"] --> GCodeValidationErrorEvent
+    validate_gcode["validate_gcode"] --> ValidatedGCodeEvent
+    GCodeExtractionDone("GCodeExtractionDone") --> validate_gcode
+
+    classDef fn fill:#ADD8E6,stroke:#333,stroke-width:2px
+    class _done,end_node,generate_gcode,start,validate_gcode fn
+    classDef ev fill:#90EE90,stroke:#333,stroke-width:2px
+    class ValidatedGCodeEvent,GenerateGCodeEvent,GCodeValidationErrorEvent,GCodeExtractionDone ev
+    classDef stop fill:#FFA07A,stroke:#333,stroke-width:2px
+    class StopEvent stop
+    classDef start fill:#E27AFF,stroke:#333,stroke-width:2px
+    class StartEvent start

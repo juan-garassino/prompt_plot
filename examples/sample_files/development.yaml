@@ -1,0 +1,112 @@
+# PromptPlot Development Configuration
+# Optimized for development and testing
+
+profile:
+  name: development
+  description: Development configuration with simulated plotter and enhanced debugging
+
+# LLM Configuration
+llm:
+  provider: ollama
+  model: llama3.2:3b
+  timeout: 60
+  max_retries: 3
+  temperature: 0.1
+  
+  # Ollama specific settings
+  ollama:
+    base_url: http://localhost:11434
+    request_timeout: 30
+
+# Plotter Configuration
+plotter:
+  type: simulated
+  visualization: true
+  canvas_size: [200, 200]
+  pen_color: blue
+  background_color: white
+  save_images: true
+  real_time: true
+  
+  # Simulated plotter settings
+  simulated:
+    pen_up_height: 5
+    pen_down_height: 0
+    travel_speed: 3000
+    draw_speed: 1000
+
+# Workflow Configuration
+workflow:
+  max_steps: 50
+  max_retries: 3
+  validation_enabled: true
+  reflection_enabled: true
+  progress_monitoring: true
+  
+  # Development specific
+  debug_mode: true
+  verbose_logging: true
+
+# Strategy Configuration
+strategy:
+  auto_select: true
+  orthogonal_threshold: 0.8
+  curve_resolution: 0.1
+  optimization_level: medium
+
+# Visualization Configuration
+visualization:
+  enabled: true
+  real_time: true
+  save_images: true
+  output_directory: results/dev_visualizations
+  image_format: png
+  dpi: 150
+  
+  # Development specific
+  show_grid: true
+  show_coordinates: true
+  show_progress: true
+
+# File Conversion Configuration
+conversion:
+  svg:
+    resolution: 0.1
+    scale_factor: 1.0
+    optimize_order: true
+    simplify_paths: true
+  
+  dxf:
+    units: mm
+    arc_resolution: 0.1
+    text_to_paths: true
+  
+  gcode:
+    validate_syntax: true
+    optimize_paths: true
+
+# Logging Configuration
+logging:
+  level: DEBUG
+  file: logs/promptplot_dev.log
+  console: true
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  
+  # Development specific
+  log_gcode_commands: true
+  log_llm_requests: true
+  log_conversion_steps: true
+
+# Output Configuration
+output:
+  base_directory: results
+  subdirectories:
+    gcode: gcode
+    images: images
+    logs: logs
+    reports: reports
+    visualizations: visualizations
+  
+  # Development specific
+  keep_intermediate_files: true
+  timestamp_files: true

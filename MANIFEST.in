@@ -1,0 +1,13 @@
+include README.md
+include LICENSE
+include requirements.txt
+recursive-include promptplot *.py
+recursive-include boilerplates *.py *.md
+recursive-include results *.md .gitkeep
+exclude results/gcode/*
+exclude results/images/*
+exclude results/visualizations/*
+exclude results/reports/*
+exclude results/logs/*
+global-exclude __pycache__
+global-exclude *.py[co]

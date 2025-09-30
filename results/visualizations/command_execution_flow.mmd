@@ -1,0 +1,35 @@
+graph TD
+    StopEvent("StopEvent") --> _done["_done"]
+    end_node["end"] --> StopEvent
+    PlotterCompleteEvent("PlotterCompleteEvent") --> end_node
+
+    execute_command["execute_command"] --> CommandExecutedEvent("CommandExecutedEvent")
+    ValidatedCommandEvent("ValidatedCommandEvent") --> execute_command
+
+    generate_command["generate_command"] --> CommandExtractionDone("CommandExtractionDone")
+    GenerateCommandEvent("GenerateCommandEvent") --> generate_command
+
+    process_result["process_result"] --> GenerateCommandEvent
+    process_result --> PlotterCompleteEvent
+    CommandExecutedEvent --> process_result
+
+    start["start"] --> GenerateCommandEvent
+    start --> StopEvent
+    StartEvent("StartEvent") --> start
+
+    validate_command["validate_command"] --> CommandValidationErrorEvent("CommandValidationErrorEvent")
+    validate_command --> ValidatedCommandEvent
+    CommandExtractionDone --> validate_command
+    CommandValidationErrorEvent --> validate_command
+
+    classDef fn fill:#ADD8E6,stroke:#333,stroke-width:2px
+    class _done,end_node,execute_command,generate_command,process_result,start,validate_command fn
+
+    classDef ev fill:#90EE90,stroke:#333,stroke-width:2px
+    class PlotterCompleteEvent,ValidatedCommandEvent,GenerateCommandEvent,CommandExecutedEvent,CommandExtractionDone,CommandValidationErrorEvent ev
+
+    classDef stop fill:#FFA07A,stroke:#333,stroke-width:2px
+    class StopEvent stop
+
+    classDef start fill:#E27AFF,stroke:#333,stroke-width:2px
+    class StartEvent start

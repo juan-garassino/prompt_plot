@@ -1,0 +1,18 @@
+graph TD
+    StopEvent("StopEvent") --> _done["_done"]
+    end_node["end"] --> StopEvent
+    CommandStreamingCompleteEvent("CommandStreamingCompleteEvent") --> end_node
+    start["start"] --> StreamCommandsEvent("StreamCommandsEvent")
+    start["start"] --> StopEvent
+    StartEvent("StartEvent") --> start
+    stream_commands["stream_commands"] --> CommandStreamingCompleteEvent
+    StreamCommandsEvent("StreamCommandsEvent") --> stream_commands
+
+    classDef fn fill:#ADD8E6,stroke:#333,stroke-width:2px
+    class _done,end_node,start,stream_commands fn
+    classDef ev fill:#90EE90,stroke:#333,stroke-width:2px
+    class CommandStreamingCompleteEvent,StreamCommandsEvent ev
+    classDef stop fill:#FFA07A,stroke:#333,stroke-width:2px
+    class StopEvent stop
+    classDef start fill:#E27AFF,stroke:#333,stroke-width:2px
+    class StartEvent start
