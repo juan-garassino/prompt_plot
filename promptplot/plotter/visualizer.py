@@ -194,9 +194,9 @@ class PlotterVisualizer:
         # Setup enhanced grid system
         self._setup_grid_overlay()
         
-        # Draw drawing area boundary
+        # Draw drawing area boundary (very subtle)
         boundary = Rectangle((0, 0), self.drawing_area[0], self.drawing_area[1],
-                           linewidth=2, edgecolor='gray', facecolor='none', alpha=0.5)
+                           linewidth=0.5, edgecolor='lightgray', facecolor='none', alpha=0.2)
         self.ax.add_patch(boundary)
         
         # Mark home position with enhanced origin marker
@@ -420,16 +420,16 @@ class PlotterVisualizer:
                     self.ax.plot([line.start_x, line.end_x], [line.start_y, line.end_y],
                                color=color, linewidth=2, alpha=0.8)
             else:
-                # Single color for all drawing lines
+                # Single color for all drawing lines - BLUE for drawing
                 for line in drawing_lines:
                     self.ax.plot([line.start_x, line.end_x], [line.start_y, line.end_y],
-                               'g-', linewidth=2, alpha=0.8)
+                               'b-', linewidth=2, alpha=0.8)
         
-        # Plot movement lines (pen up)
+        # Plot movement lines (pen up) - GRAY for movements
         if show_movements and movement_lines:
             for line in movement_lines:
                 self.ax.plot([line.start_x, line.end_x], [line.start_y, line.end_y],
-                           'b--', linewidth=1, alpha=0.3)
+                           '--', color='lightgray', linewidth=1, alpha=0.5)
         
         # Mark start and end points
         if self.points:
@@ -535,10 +535,10 @@ class PlotterVisualizer:
                 line = sorted_lines[i]
                 if line.is_drawing:
                     self.ax.plot([line.start_x, line.end_x], [line.start_y, line.end_y],
-                               'g-', linewidth=2, alpha=0.8)
+                               'b-', linewidth=2, alpha=0.8)
                 else:
                     self.ax.plot([line.start_x, line.end_x], [line.start_y, line.end_y],
-                               'b--', linewidth=1, alpha=0.3)
+                               '--', color='lightgray', linewidth=1, alpha=0.5)
             
             # Show current position
             if frame < len(sorted_lines):
@@ -825,6 +825,161 @@ class PlotterVisualizer:
         stats["plot_states_captured"] = len(self._plot_state_history)
         
         return stats
+    
+    def save_frame(self, frame_number: int, output_dir: str = "results/frames") -> str:
+        """Save current visualization state as PNG frame
+        
+        Args:
+            frame_number: Frame number for filename
+            output_dir: Directory to save frames
+            
+        Returns:
+            Path to saved frame
+        """
+        try:
+            output_path = Path(output_dir)
+            output_path.mkdir(parents=True, exist_ok=True)
+            
+            frame_filename = f"frame_{frame_number:04d}.png"
+            frame_path = output_path / frame_filename
+            
+            if self.fig and self.ax:
+                # Clear the axes but keep the figure
+                self.ax.clear()
+                
+                # Redraw the basic setup
+                self.ax.set_xlim(-5, self.drawing_area[0] + 5)
+                self.ax.set_ylim(-5, self.drawing_area[1] + 5)
+                self.ax.set_aspect('equal')
+                self.ax.grid(True, alpha=0.3)
+                self.ax.set_xlabel('X (mm)')
+                self.ax.set_ylabel('Y (mm)')
+                self.ax.set_title(f'Frame {frame_number}')
+                
+                # Draw all lines accumulated so far
+                for line in self.lines:
+                    if line.is_drawing:
+                        # Drawing lines in BLUE
+                        self.ax.plot([line.start_x, line.end_x], [line.start_y, line.end_y],
+                                   'b-', linewidth=2.5, solid_capstyle='round')
+                    else:
+                        # Movement lines in light gray
+                        self.ax.plot([line.start_x, line.end_x], [line.start_y, line.end_y],
+                                   '--', color='lightgray', linewidth=1, alpha=0.4)
+                
+                # Draw current position marker
+                if self.lines:
+                    last_line = self.lines[-1]
+                    self.ax.plot(last_line.end_x, last_line.end_y, 'ro', markersize=8)
+                
+                # Force canvas update and save
+                self.fig.canvas.draw()
+                self.fig.savefig(frame_path, dpi=100, bbox_inches='tight')
+                self.logger.debug(f"Saved frame {frame_number}: {frame_path}")
+            
+            return str(frame_path)
+            
+        except Exception as e:
+            self.logger.error(f"Failed to save frame {frame_number}: {str(e)}")
+            return ""
+    
+    def create_animation_from_frames(self, frames_dir: str, output_path: str, 
+                                   duration: float = 0.5) -> bool:
+        """Create animated GIF from saved frames
+        
+        Args:
+            frames_dir: Directory containing frame PNG files
+            output_path: Output path for GIF
+            duration: Duration per frame in seconds
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            from PIL import Image
+            import glob
+            
+            # Get all frame files
+            frame_pattern = str(Path(frames_dir) / "frame_*.png")
+            frame_files = sorted(glob.glob(frame_pattern))
+            
+            if not frame_files:
+                self.logger.warning(f"No frame files found in {frames_dir}")
+                return False
+            
+            # Load images
+            images = []
+            for frame_file in frame_files:
+                img = Image.open(frame_file)
+                images.append(img)
+            
+            # Save as animated GIF
+            if images:
+                images[0].save(
+                    output_path,
+                    save_all=True,
+                    append_images=images[1:],
+                    duration=int(duration * 1000),  # Convert to milliseconds
+                    loop=0
+                )
+                self.logger.info(f"Created animation: {output_path}")
+                return True
+            
+        except ImportError:
+            self.logger.error("PIL (Pillow) not available for GIF creation")
+        except Exception as e:
+            self.logger.error(f"Failed to create animation: {str(e)}")
+        
+        return False
+    
+    def generate_final_png(self, output_path: str, title: str = None, 
+                          execution_stats: dict = None) -> bool:
+        """Generate final PNG with title and statistics
+        
+        Args:
+            output_path: Output path for PNG
+            title: Optional title for the plot
+            execution_stats: Optional execution statistics
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            if not self.fig or not self.ax:
+                self.logger.error("No figure available for PNG generation")
+                return False
+            
+            # Update title with statistics if provided
+            if title or execution_stats:
+                plot_title = title or "Plotter Drawing"
+                if execution_stats:
+                    plot_title += f"\nTime: {execution_stats.get('total_time', 0):.1f}s, "
+                    plot_title += f"Distance: {execution_stats.get('drawing_distance', 0):.1f}mm"
+                
+                self.ax.set_title(plot_title, fontsize=12, pad=20)
+            
+            # Add start and end markers if we have drawing data
+            if self.lines:
+                # Find first and last drawing positions
+                drawing_lines = [l for l in self.lines if l.is_drawing]
+                if drawing_lines:
+                    first_line = drawing_lines[0]
+                    last_line = drawing_lines[-1]
+                    
+                    self.ax.plot(first_line.start_x, first_line.start_y, 'go', 
+                               markersize=8, label='Start', zorder=10)
+                    self.ax.plot(last_line.end_x, last_line.end_y, 'ro', 
+                               markersize=8, label='End', zorder=10)
+                    self.ax.legend()
+            
+            # Save the figure
+            self.fig.savefig(output_path, dpi=150, bbox_inches='tight')
+            self.logger.info(f"Generated final PNG: {output_path}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Failed to generate final PNG: {str(e)}")
+            return False
     
     def __enter__(self):
         """Context manager entry"""

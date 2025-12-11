@@ -9,7 +9,7 @@ This directory contains comprehensive examples and demos for using PromptPlot v2
 | `demo_quick_start.py` | Basic introduction to PromptPlot components | None |
 | `demo_plotter_connection.py` | Test plotter connections (simulated & serial) | Optional: serial plotter |
 | `demo_llm_generation.py` | Generate G-code using LLM (no plotter) | OpenAI, Gemini, Azure, or Ollama |
-| `demo_llm_to_plotter.py` | **Generate G-code AND send to real plotter** | LLM + serial plotter |
+| `demo_llm_to_plotter.py` | **Generate G-code AND send to real plotter with interactive visualization** | LLM + serial plotter + matplotlib |
 | `demo_llm_streaming.py` | Real-time streaming G-code generation | OpenAI, Gemini, Azure, or Ollama |
 | `demo_visualization.py` | Visual reporting and progress monitoring | matplotlib |
 | `demo_cli.py` | Command-line interface demonstration | None |
@@ -102,6 +102,56 @@ M3 S0                    ; Pen up
 
 ---
 
+## Interactive Visualization Features
+
+The enhanced `demo_llm_to_plotter.py` now includes comprehensive visualization capabilities:
+
+### Real-Time Interactive Visualization
+- **Live drawing preview** - Watch your plotter draw in real-time
+- **Zoom and pan** - Explore the drawing area interactively
+- **Pen state indicators** - See when the pen is up/down
+- **Progress tracking** - Visual progress bar and statistics
+
+### Progress Monitoring
+- **Phase detection** - Homing, moving, drawing, completed
+- **Performance metrics** - Speed, distance, efficiency
+- **Time tracking** - Total time, drawing time, idle time
+- **Command statistics** - Success rate, error tracking
+
+### Comprehensive Reporting
+- **Multiple formats** - HTML (interactive), PDF, PNG, JSON
+- **Visual summaries** - Before/after comparisons, accuracy analysis
+- **Performance insights** - Optimization recommendations
+- **Export capabilities** - Save visualizations and data
+
+### Usage Examples
+
+```bash
+# Visualization demo (no plotter required)
+uv run python examples/demo_llm_to_plotter.py --demo
+
+# Interactive visualization during plotting
+uv run python examples/demo_llm_to_plotter.py /dev/cu.usbserial-14220 --interactive --prompt "draw a star"
+
+# Full visualization suite (interactive + progress + reports)
+uv run python examples/demo_llm_to_plotter.py /dev/cu.usbserial-14220 --full-viz --prompt "draw a house"
+
+# Progress monitoring only
+uv run python examples/demo_llm_to_plotter.py /dev/cu.usbserial-14220 --progress --prompt "draw a circle"
+
+# Generate reports without plotting
+uv run python examples/demo_llm_to_plotter.py /dev/cu.usbserial-14220 --dry-run --report --prompt "complex drawing"
+```
+
+### Visualization Features
+- **Interactive matplotlib window** with zoom, pan, and selection
+- **Real-time path visualization** showing planned vs actual drawing
+- **Progress metrics dashboard** with live statistics
+- **Multi-format report generation** for analysis and sharing
+- **Drawing session recording** for playback and analysis
+
+---
+
 ## Quick Start
 
 ### 1. Basic Demo (No Dependencies)
@@ -171,6 +221,7 @@ examples/
 ├── demo_plotter_connection.py   # Plotter connection testing
 ├── demo_llm_generation.py       # LLM G-code generation
 ├── demo_llm_streaming.py        # Real-time streaming
+├── demo_llm_to_plotter.py       # LLM + plotter + interactive visualization
 ├── demo_visualization.py        # Visual reporting
 ├── demo_cli.py                  # CLI demonstration
 ├── demo_comprehensive.py        # Complete test suite
