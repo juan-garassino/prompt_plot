@@ -1,0 +1,43 @@
+{
+  "session_info": {
+    "timestamp": "2025-12-11 18:11:25",
+    "prompt": "draw a circle",
+    "llm_provider": "openai",
+    "session_id": "20251211_181125"
+  },
+  "gcode_info": {
+    "total_lines": 13,
+    "gcode_preview": [
+      "G0 X0.000 Y0.000",
+      "M3",
+      "G1 X10.000 Y0.000 F1000",
+      "G1 X7.070 Y7.070",
+      "G1 X0.000 Y10.000",
+      "G1 X-7.070 Y7.070",
+      "G1 X-10.000 Y0.000",
+      "G1 X-7.070 Y-7.070",
+      "G1 X0.000 Y-10.000",
+      "G1 X7.070 Y-7.070"
+    ]
+  },
+  "execution_stats": {
+    "start_time": 1765473071.414421,
+    "total_commands": 13,
+    "successful_commands": 12,
+    "failed_commands": 1,
+    "total_distance": 81.22472703083291,
+    "drawing_distance": 0.0,
+    "movement_distance": 81.22472703083291,
+    "pen_up_count": 1,
+    "pen_down_count": 0,
+    "end_time": 1765473085.006494,
+    "total_time": 13.5920729637146,
+    "efficiency": 92.3076923076923,
+    "average_command_time": 1.1326727469762166
+  },
+  "output_files": {
+    "frames_directory": "results/frames_20251211_181111",
+    "gif_animation": "results/animation_20251211_181125.gif",
+    "final_png": "results/final_drawing_20251211_181125.png"
+  }
+}

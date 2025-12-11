@@ -3,6 +3,12 @@ LLM Provider Abstraction Layer
 
 This module provides a unified interface for different LLM providers,
 extracted from the existing workflow patterns in the boilerplate files.
+
+Supported providers:
+- OpenAI (GPT-4, GPT-4o-mini, etc.)
+- Gemini (gemini-1.5-flash, gemini-1.5-pro, etc.)
+- Azure OpenAI
+- Ollama (local models)
 """
 
 import os
@@ -10,8 +16,31 @@ import asyncio
 from abc import ABC, abstractmethod
 from typing import Any, Optional, Dict, Union
 from llama_index.llms.ollama import Ollama
-from llama_index.llms.azure_openai import AzureOpenAI
 from llama_index.core.llms import CompletionResponse, ChatResponse
+
+# Azure OpenAI
+try:
+    from llama_index.llms.azure_openai import AzureOpenAI
+    AZURE_OPENAI_AVAILABLE = True
+except ImportError:
+    AZURE_OPENAI_AVAILABLE = False
+    AzureOpenAI = None
+
+# OpenAI
+try:
+    from llama_index.llms.openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+    OpenAI = None
+
+# Gemini
+try:
+    from llama_index.llms.gemini import Gemini
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+    Gemini = None
 
 
 class LLMProviderError(Exception):
@@ -189,8 +218,14 @@ class AzureOpenAIProvider(LLMProvider):
     def provider_name(self) -> str:
         return "azure_openai"
     
-    def _create_llm_instance(self) -> AzureOpenAI:
+    def _create_llm_instance(self):
         """Create Azure OpenAI LLM instance"""
+        if not AZURE_OPENAI_AVAILABLE:
+            raise LLMProviderError(
+                "Azure OpenAI not available. Install with: pip install llama-index-llms-azure-openai",
+                self.provider_name
+            )
+        
         try:
             return AzureOpenAI(
                 model=self.model,
@@ -359,6 +394,160 @@ class OllamaProvider(LLMProvider):
             self._handle_error(e, "sync completion")
 
 
+class OpenAIProvider(LLMProvider):
+    """
+    OpenAI provider implementation.
+    
+    Uses the standard OpenAI API (not Azure).
+    Supports GPT-4, GPT-4o-mini, GPT-3.5-turbo, etc.
+    """
+    
+    def __init__(
+        self,
+        model: str = "gpt-4o-mini",
+        api_key: Optional[str] = None,
+        timeout: int = 120
+    ):
+        """
+        Initialize OpenAI provider.
+        
+        Args:
+            model: Model name (e.g., "gpt-4o-mini", "gpt-4o", "gpt-4")
+            api_key: API key (defaults to OPENAI_API_KEY env var)
+            timeout: Request timeout in seconds
+        """
+        super().__init__(timeout)
+        self.model = model
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        
+        if not self.api_key:
+            raise LLMProviderError(
+                "Missing OpenAI API key. Set OPENAI_API_KEY env var or pass api_key parameter.",
+                self.provider_name,
+                {"missing_config": ["api_key (or OPENAI_API_KEY env var)"]}
+            )
+    
+    @property
+    def provider_name(self) -> str:
+        return "openai"
+    
+    def _create_llm_instance(self):
+        """Create OpenAI LLM instance"""
+        if not OPENAI_AVAILABLE:
+            raise LLMProviderError(
+                "OpenAI not available. Install with: pip install llama-index-llms-openai",
+                self.provider_name
+            )
+        
+        try:
+            return OpenAI(
+                model=self.model,
+                api_key=self.api_key,
+                timeout=self.timeout
+            )
+        except Exception as e:
+            raise LLMProviderError(
+                f"Failed to create OpenAI instance: {str(e)}",
+                self.provider_name,
+                {"config": {"model": self.model, "timeout": self.timeout}}
+            )
+    
+    async def acomplete(self, prompt: str) -> str:
+        """Async completion using OpenAI."""
+        try:
+            response = await asyncio.wait_for(
+                self.llm.acomplete(prompt),
+                timeout=self.timeout
+            )
+            return response.text if isinstance(response, CompletionResponse) else str(response)
+        except Exception as e:
+            self._handle_error(e, "async completion")
+    
+    def complete(self, prompt: str) -> str:
+        """Sync completion using OpenAI."""
+        try:
+            response = self.llm.complete(prompt)
+            return response.text if isinstance(response, CompletionResponse) else str(response)
+        except Exception as e:
+            self._handle_error(e, "sync completion")
+
+
+class GeminiProvider(LLMProvider):
+    """
+    Google Gemini provider implementation.
+    
+    Supports Gemini 1.5 Flash, Gemini 1.5 Pro, etc.
+    """
+    
+    def __init__(
+        self,
+        model: str = "models/gemini-1.5-flash",
+        api_key: Optional[str] = None,
+        timeout: int = 120
+    ):
+        """
+        Initialize Gemini provider.
+        
+        Args:
+            model: Model name (e.g., "models/gemini-1.5-flash", "models/gemini-1.5-pro")
+            api_key: API key (defaults to GOOGLE_API_KEY env var)
+            timeout: Request timeout in seconds
+        """
+        super().__init__(timeout)
+        self.model = model
+        self.api_key = api_key or os.environ.get("GOOGLE_API_KEY")
+        
+        if not self.api_key:
+            raise LLMProviderError(
+                "Missing Google API key. Set GOOGLE_API_KEY env var or pass api_key parameter.",
+                self.provider_name,
+                {"missing_config": ["api_key (or GOOGLE_API_KEY env var)"]}
+            )
+    
+    @property
+    def provider_name(self) -> str:
+        return "gemini"
+    
+    def _create_llm_instance(self):
+        """Create Gemini LLM instance"""
+        if not GEMINI_AVAILABLE:
+            raise LLMProviderError(
+                "Gemini not available. Install with: pip install llama-index-llms-gemini",
+                self.provider_name
+            )
+        
+        try:
+            return Gemini(
+                model=self.model,
+                api_key=self.api_key,
+            )
+        except Exception as e:
+            raise LLMProviderError(
+                f"Failed to create Gemini instance: {str(e)}",
+                self.provider_name,
+                {"config": {"model": self.model}}
+            )
+    
+    async def acomplete(self, prompt: str) -> str:
+        """Async completion using Gemini."""
+        try:
+            response = await asyncio.wait_for(
+                self.llm.acomplete(prompt),
+                timeout=self.timeout
+            )
+            return response.text if isinstance(response, CompletionResponse) else str(response)
+        except Exception as e:
+            self._handle_error(e, "async completion")
+    
+    def complete(self, prompt: str) -> str:
+        """Sync completion using Gemini."""
+        try:
+            response = self.llm.complete(prompt)
+            return response.text if isinstance(response, CompletionResponse) else str(response)
+        except Exception as e:
+            self._handle_error(e, "sync completion")
+
+
 def create_llm_provider(
     provider_type: str,
     **kwargs
@@ -367,7 +556,7 @@ def create_llm_provider(
     Factory function to create LLM providers.
     
     Args:
-        provider_type: Type of provider ("azure_openai" or "ollama")
+        provider_type: Type of provider ("openai", "gemini", "azure_openai", or "ollama")
         **kwargs: Provider-specific configuration
         
     Returns:
@@ -378,6 +567,8 @@ def create_llm_provider(
         LLMProviderError: If provider creation fails
     """
     providers = {
+        "openai": OpenAIProvider,
+        "gemini": GeminiProvider,
         "azure_openai": AzureOpenAIProvider,
         "ollama": OllamaProvider
     }
@@ -431,8 +622,20 @@ def get_llm_provider(llm_config) -> LLMProvider:
             request_timeout=llm_config.ollama_timeout,
             base_url=llm_config.ollama_base_url
         )
+    elif provider_type == "openai":
+        return OpenAIProvider(
+            model=getattr(llm_config, 'openai_model', 'gpt-4o-mini'),
+            api_key=getattr(llm_config, 'openai_api_key', None),
+            timeout=getattr(llm_config, 'openai_timeout', 120)
+        )
+    elif provider_type == "gemini":
+        return GeminiProvider(
+            model=getattr(llm_config, 'gemini_model', 'models/gemini-1.5-flash'),
+            api_key=getattr(llm_config, 'gemini_api_key', None),
+            timeout=getattr(llm_config, 'gemini_timeout', 120)
+        )
     else:
         raise LLMProviderError(
-            f"Unknown provider type: {provider_type}",
+            f"Unknown provider type: {provider_type}. Supported: openai, gemini, azure_openai, ollama",
             provider_type
         )

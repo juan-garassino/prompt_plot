@@ -1,0 +1,123 @@
+{
+  "title": "PromptPlot v2.0 Comprehensive Drawing Report",
+  "description": "Complete analysis of optimized rectangle drawing with rounded corners",
+  "timestamp": 1765468667.743704,
+  "generated_at": "2025-12-11 16:57:50",
+  "program_info": {
+    "total_commands": 14,
+    "command_types": {
+      "G28": 2,
+      "G90": 1,
+      "G1": 5,
+      "M3": 1,
+      "G2": 4,
+      "M5": 1
+    }
+  },
+  "execution_stats": {
+    "total_time": 285.6,
+    "total_distance": 248.3,
+    "drawing_distance": 160.8,
+    "movement_distance": 87.5,
+    "efficiency": 92.3,
+    "command_count": 14,
+    "average_command_time": 0.18,
+    "pen_up_count": 1,
+    "pen_down_count": 1
+  },
+  "progress_summary": {
+    "total_snapshots": 20,
+    "start_time": 1765468367.743575,
+    "end_time": 1765468652.743575,
+    "final_percentage": 95.0,
+    "phases": [
+      "moving",
+      "completed",
+      "homing",
+      "drawing"
+    ]
+  },
+  "visualizer_data": {
+    "lines": [
+      {
+        "start_x": 10,
+        "start_y": 10,
+        "end_x": 48,
+        "end_y": 10,
+        "is_drawing": true,
+        "timestamp": 1765468667.743693
+      },
+      {
+        "start_x": 48,
+        "start_y": 10,
+        "end_x": 50,
+        "end_y": 12,
+        "is_drawing": true,
+        "timestamp": 1765468667.743693
+      },
+      {
+        "start_x": 50,
+        "start_y": 12,
+        "end_x": 50,
+        "end_y": 48,
+        "is_drawing": true,
+        "timestamp": 1765468667.743694
+      },
+      {
+        "start_x": 50,
+        "start_y": 48,
+        "end_x": 48,
+        "end_y": 50,
+        "is_drawing": true,
+        "timestamp": 1765468667.743694
+      },
+      {
+        "start_x": 48,
+        "start_y": 50,
+        "end_x": 12,
+        "end_y": 50,
+        "is_drawing": true,
+        "timestamp": 1765468667.743694
+      },
+      {
+        "start_x": 12,
+        "start_y": 50,
+        "end_x": 10,
+        "end_y": 48,
+        "is_drawing": true,
+        "timestamp": 1765468667.743695
+      },
+      {
+        "start_x": 10,
+        "start_y": 48,
+        "end_x": 10,
+        "end_y": 12,
+        "is_drawing": true,
+        "timestamp": 1765468667.743695
+      },
+      {
+        "start_x": 10,
+        "start_y": 12,
+        "end_x": 10,
+        "end_y": 10,
+        "is_drawing": true,
+        "timestamp": 1765468667.743696
+      }
+    ],
+    "statistics": {
+      "total_time": 285.6,
+      "total_distance": 248.3,
+      "drawing_distance": 160.8,
+      "movement_distance": 87.5,
+      "efficiency": 92.3,
+      "command_count": 14,
+      "average_command_time": 0.18,
+      "pen_up_count": 1,
+      "pen_down_count": 1
+    },
+    "drawing_area": [
+      100.0,
+      80.0
+    ]
+  }
+}

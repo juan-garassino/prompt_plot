@@ -76,8 +76,10 @@ class GCodeCommand(BaseModel):
         if v == "COMPLETE":
             return v
             
-        # Standard G-code validation
-        if not v.startswith(('G', 'M')):
+        # Standard G-code validation - extract base command (e.g., "M3" from "M3 S1000")
+        base_command = v.split()[0] if ' ' in v else v
+        
+        if not base_command.startswith(('G', 'M')):
             raise ValueError(f"Command must start with G or M, got {v}")
             
         # Enhanced validation with specific allowed commands
@@ -86,8 +88,8 @@ class GCodeCommand(BaseModel):
             'G0', 'G1', 'G2', 'G3', 'G4', 'G17', 'G18', 'G19', 'G20', 'G21', 
             'G28', 'G90', 'G91', 'G92', 'M3', 'M5', 'M17', 'M18', 'M30', 'COMPLETE'
         ]
-        if v not in valid_commands:
-            raise ValueError(f"Command must be one of {valid_commands}, got {v}")
+        if base_command not in valid_commands:
+            raise ValueError(f"Command must be one of {valid_commands}, got {base_command}")
             
         return v
 

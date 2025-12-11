@@ -1,0 +1,31 @@
+{
+  "title": "File Conversion Report: sample_drawing.svg",
+  "description": "Conversion from .SVG to G-code",
+  "timestamp": 1765468671.324054,
+  "generated_at": "2025-12-11 16:57:51",
+  "program_info": {
+    "total_commands": 19,
+    "command_types": {
+      "G28": 2,
+      "G90": 1,
+      "G1": 14,
+      "M3": 1,
+      "M5": 1
+    }
+  },
+  "execution_stats": {
+    "source_file": "examples/sample_drawing.svg",
+    "source_format": "SVG",
+    "target_format": "G-code",
+    "conversion_time": 2.3,
+    "original_elements": 2,
+    "converted_commands": 19,
+    "accuracy_score": 94.5,
+    "fidelity_score": 91.2,
+    "optimization_level": "standard",
+    "total_distance": 156.8,
+    "drawing_distance": 98.4
+  },
+  "progress_summary": {},
+  "visualizer_data": {}
+}

@@ -15,8 +15,14 @@ from llama_index.core.workflow import (
 )
 from typing import List, Optional, Union, Dict, Any
 import json
-from colorama import Fore, Style, init
 from datetime import datetime
+from rich.console import Console
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+from rich.table import Table
+from rich.text import Text
+from rich.tree import Tree
+from rich import box
 
 from ..core.base_workflow import BasePromptPlotWorkflow
 from ..core.models import GCodeCommand, GCodeProgram
@@ -24,9 +30,11 @@ from ..core.exceptions import WorkflowException
 from ..strategies import StrategySelector, PromptComplexity
 from ..config import get_config
 from ..llm import LLMProvider
+from ..utils.rich_logger import WorkflowLogger
 
-# Initialize colorama for cross-platform color support
-init(autoreset=True)
+# Initialize Rich console and logger
+console = Console()
+logger = WorkflowLogger(console)
 
 # Prompt templates
 GCODE_PROGRAM_TEMPLATE = """
@@ -145,42 +153,42 @@ class SimpleGCodeWorkflow(BasePromptPlotWorkflow):
         Returns:
             GenerateGCodeEvent to trigger G-code generation
         """
-        print(f"{Fore.CYAN}╔══════════════════════════════════════╗{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}║   G-Code Generation Workflow Start   ║{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}╚══════════════════════════════════════╝{Style.RESET_ALL}")
+        # Get prompt
+        prompt = getattr(ev, "prompt", "draw a simple square")
         
-        print(f"{Fore.CYAN}[*] Initialize Workflow{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}├── [*] Setting up workflow context{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}│   └── [?] The context stores workflow state that persists across steps{Style.RESET_ALL}")
+        # Display workflow start
+        logger.workflow_start("G-Code Generation Workflow", prompt)
+        
+        # Initialize workflow
+        logger.step_start("Initialize Workflow", "Setting up context and configuration")
         
         # Store max retries in context
         await ctx.store.set("max_retries", self.max_retries)
-        print(f"{Fore.CYAN}├── [*] Configuring retry settings{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}│   └── [?] Setting max_retries={self.max_retries} to handle potential LLM generation failures{Style.RESET_ALL}")
+        await ctx.store.set("prompt", prompt)
         
-        # Store the drawing prompt
-        print(f"{Fore.CYAN}├── [*] Processing drawing prompt{Style.RESET_ALL}")
-        if not hasattr(ev, "prompt"):
-            print(f"{Fore.RED}│   ├── [!] No drawing prompt specified - using default{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}│   └── [?] Fallback to default prompt ensures workflow can continue even without input{Style.RESET_ALL}")
-            await ctx.store.set("prompt", "draw a simple square")
-        else:
-            print(f"{Fore.GREEN}│   ├── [+] Drawing prompt received{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}│   └── [?] Using user-provided prompt for G-code generation{Style.RESET_ALL}")
-            await ctx.store.set("prompt", ev.prompt)
-            
-        prompt = await ctx.store.get("prompt")
+        logger.step_info("Configuration loaded", {
+            "Max retries": self.max_retries,
+            "Max steps": self.max_steps,
+            "Prompt": prompt
+        })
         
         # Analyze prompt complexity using strategy selector
-        print(f"{Fore.CYAN}├── [*] Analyzing prompt complexity{Style.RESET_ALL}")
         complexity = self.strategy_selector.analyze_prompt_complexity(prompt)
         await ctx.store.set("complexity", complexity)
-        print(f"{Fore.GREEN}│   ├── [+] Complexity level: {complexity.complexity_level.value}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}│   ├── [+] Requires curves: {complexity.requires_curves}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}│   └── [+] Estimated commands: {complexity.estimated_commands}{Style.RESET_ALL}")
         
-        print(f"{Fore.GREEN}├── [+] Workflow initialized{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}└── [+] Drawing prompt: {prompt}{Style.RESET_ALL}")
+        # Display strategy analysis
+        strategy = self.strategy_selector.select_strategy(prompt)
+        logger.strategy_analysis(
+            strategy.__class__.__name__,
+            {
+                'complexity_level': complexity.complexity_level.value,
+                'requires_curves': complexity.requires_curves,
+                'estimated_commands': complexity.estimated_commands,
+                'confidence_score': complexity.confidence_score
+            }
+        )
+        
+        logger.step_success("Workflow initialized successfully")
         
         return GenerateGCodeEvent(prompt=prompt)
     
@@ -195,23 +203,20 @@ class SimpleGCodeWorkflow(BasePromptPlotWorkflow):
         Returns:
             GCodeExtractionDone with raw LLM output
         """
-        print(f"{Fore.CYAN}[*] G-Code Generation Step{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}├── [?] This step uses the LLM to generate G-code based on the drawing prompt{Style.RESET_ALL}")
+        # Start G-code generation step
+        logger.step_start("G-Code Generation", "Using LLM to generate G-code from prompt")
         
         # Track retries for this generation
         task_key = "gcode_generation_retries"
         current_retries = await ctx.store.get(task_key, default=0)
         max_retries = await ctx.store.get("max_retries")
         
-        print(f"{Fore.CYAN}├── [*] Generating G-code for prompt: {ev.prompt}{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}│   └── [?] The prompt describes what the plotter should draw{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}├── [*] Attempt {current_retries + 1}/{max_retries}{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}│   └── [?] Tracking retry attempts to prevent infinite loops{Style.RESET_ALL}")
-        
         # Check if max retries exceeded
         if current_retries >= max_retries:
-            print(f"{Fore.RED}├── [!] Maximum retries exceeded{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}│   └── [?] After {max_retries} failed attempts, using fallback G-code{Style.RESET_ALL}")
+            logger.step_error("Maximum retries exceeded", {
+                "Attempts": f"{current_retries}/{max_retries}",
+                "Action": "Using fallback G-code"
+            })
             
             # Return a fallback empty program
             fallback_result = json.dumps({
@@ -221,8 +226,6 @@ class SimpleGCodeWorkflow(BasePromptPlotWorkflow):
                 ]
             })
             
-            print(f"{Fore.CYAN}└── [*] Returning fallback G-code{Style.RESET_ALL}")
-            
             return GCodeExtractionDone(
                 output=fallback_result,
                 prompt=ev.prompt
@@ -230,13 +233,16 @@ class SimpleGCodeWorkflow(BasePromptPlotWorkflow):
         
         # Increment retry counter
         await ctx.store.set(task_key, current_retries + 1)
-        print(f"{Fore.CYAN}├── [*] Updated retry counter: {current_retries + 1}{Style.RESET_ALL}")
         
+        # Show retry attempt if this is a retry
+        if isinstance(ev, GCodeValidationErrorEvent):
+            logger.retry_attempt(current_retries, max_retries, "Previous validation failed")
         # Build prompt based on whether this is initial generation or retry after validation error
         if isinstance(ev, GCodeValidationErrorEvent):
-            print(f"{Fore.YELLOW}├── [!] Previous generation failed validation{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}│   └── [?] Using reflection prompt to help LLM correct previous errors{Style.RESET_ALL}")
-            print(f"{Fore.RED}├── [!] Error: {ev.error}{Style.RESET_ALL}")
+            logger.step_info("Using reflection prompt", {
+                "Reason": "Previous validation failed",
+                "Error": ev.error[:100] + "..." if len(ev.error) > 100 else ev.error
+            })
             
             # Include reflection prompt for retry
             prompt = REFLECTION_PROMPT.format(
@@ -244,18 +250,18 @@ class SimpleGCodeWorkflow(BasePromptPlotWorkflow):
                 error=ev.error
             )
         else:
-            print(f"{Fore.CYAN}├── [*] First generation attempt{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}│   └── [?] Using standard template for initial G-code generation{Style.RESET_ALL}")
+            logger.step_info("Using standard G-code template")
             prompt = GCODE_PROGRAM_TEMPLATE.format(
                 prompt=ev.prompt
             )
         
         # Generate G-code using the LLM
-        print(f"{Fore.CYAN}├── [*] Calling LLM API{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}│   └── [?] Sending prompt to LLM and waiting for response{Style.RESET_ALL}")
+        llm_type = type(self.llm).__name__
+        logger.llm_call(llm_type, "", ev.prompt[:50])
+        
         response = await self.llm.acomplete(prompt)
         
-        print(f"{Fore.GREEN}└── [+] G-code generation complete{Style.RESET_ALL}")
+        logger.step_success("G-code generation completed")
         
         return GCodeExtractionDone(
             output=response.text,
@@ -273,16 +279,13 @@ class SimpleGCodeWorkflow(BasePromptPlotWorkflow):
         Returns:
             GCodeValidationErrorEvent if validation fails, ValidatedGCodeEvent if successful
         """
-        print(f"{Fore.CYAN}[*] G-Code Validation Step{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}├── [?] This step ensures the generated G-code is valid and can be executed by the plotter{Style.RESET_ALL}")
+        # Start validation step
+        logger.step_start("G-Code Validation", "Parsing and validating generated G-code")
         
-        # Check retry status to show proper messaging
+        # Check retry status
         task_key = "gcode_generation_retries"
         current_retries = await ctx.store.get(task_key, default=0)
         max_retries = await ctx.store.get("max_retries")
-        
-        print(f"{Fore.CYAN}├── [*] Validating G-code (Attempt {current_retries}/{max_retries}){Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}│   └── [?] Parsing LLM output to extract valid JSON and convert to G-code{Style.RESET_ALL}")
         
         try:
             # Use the base workflow validation method
@@ -290,34 +293,35 @@ class SimpleGCodeWorkflow(BasePromptPlotWorkflow):
             
             if isinstance(result, Exception):
                 # Validation failed
-                print(f"{Fore.RED}├── [!] G-code validation failed{Style.RESET_ALL}")
-                print(f"{Fore.RED}├── [!] Error: {str(result)}{Style.RESET_ALL}")
-                print(f"{Fore.YELLOW}│   └── [?] Validation errors trigger a retry with more specific instructions{Style.RESET_ALL}")
+                error_msg = str(result)
+                logger.validation_result(False, 0, [error_msg])
                 
-                # More detailed error information based on retry count
                 if current_retries >= max_retries:
-                    print(f"{Fore.RED}├── [!] Final attempt failed - Validation errors persist after {current_retries} attempts{Style.RESET_ALL}")
-                    print(f"{Fore.YELLOW}└── [?] Workflow will proceed with fallback G-code in the next step{Style.RESET_ALL}")
+                    logger.step_error("Final validation attempt failed", {
+                        "Attempts": f"{current_retries}/{max_retries}",
+                        "Action": "Will use fallback G-code"
+                    })
                 else:
-                    print(f"{Fore.YELLOW}├── [!] Retrying - Attempt {current_retries}/{max_retries} failed{Style.RESET_ALL}")
-                    print(f"{Fore.YELLOW}└── [?] Next step will regenerate G-code with error feedback{Style.RESET_ALL}")
+                    logger.step_warning("Validation failed, will retry", {
+                        "Attempt": f"{current_retries}/{max_retries}",
+                        "Error": error_msg[:100] + "..." if len(error_msg) > 100 else error_msg
+                    })
                 
                 return GCodeValidationErrorEvent(
-                    error=str(result),
+                    error=error_msg,
                     issues=ev.output,
                     prompt=ev.prompt
                 )
             
             # Validation successful - result is a GCodeProgram
             program = result
-            
-            # Generate the G-code text
-            print(f"{Fore.CYAN}├── [*] Converting to G-code text format{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}│   └── [?] Converting JSON representation to actual G-code commands{Style.RESET_ALL}")
             gcode_text = program.to_gcode()
             
-            print(f"{Fore.GREEN}├── [+] G-code validation successful{Style.RESET_ALL}")
-            print(f"{Fore.GREEN}└── [+] Generated {len(program.commands)} commands{Style.RESET_ALL}")
+            logger.validation_result(True, len(program.commands))
+            logger.step_success("G-code validation completed", {
+                "Commands": len(program.commands),
+                "Program size": f"{len(gcode_text)} characters"
+            })
             
             return ValidatedGCodeEvent(
                 program=program,
@@ -326,11 +330,11 @@ class SimpleGCodeWorkflow(BasePromptPlotWorkflow):
             )
             
         except Exception as e:
-            print(f"{Fore.RED}├── [!] Unexpected validation error{Style.RESET_ALL}")
-            print(f"{Fore.RED}├── [!] Error: {str(e)}{Style.RESET_ALL}")
+            error_msg = str(e)
+            logger.step_error("Unexpected validation error", {"Error": error_msg})
             
             return GCodeValidationErrorEvent(
-                error=str(e),
+                error=error_msg,
                 issues=ev.output,
                 prompt=ev.prompt
             )
@@ -346,27 +350,17 @@ class SimpleGCodeWorkflow(BasePromptPlotWorkflow):
         Returns:
             StopEvent with the G-code program
         """
-        print(f"{Fore.CYAN}╔══════════════════════════════════════╗{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}║  G-Code Generation Workflow Complete ║{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}╚══════════════════════════════════════╝{Style.RESET_ALL}")
+        # Prepare G-code preview
+        gcode_lines = ev.gcode_text.split('\n')
         
-        print(f"{Fore.CYAN}[*] Workflow Completion Step{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}├── [?] This final step prepares the results and terminates the workflow{Style.RESET_ALL}")
-        
-        print(f"{Fore.GREEN}├── [+] Drawing prompt: {ev.prompt}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}├── [+] Commands generated: {len(ev.program.commands)}{Style.RESET_ALL}")
-        
-        # Show some of the G-code
-        preview_lines = min(5, len(ev.program.commands))
-        print(f"{Fore.CYAN}├── [*] G-code preview (first {preview_lines} lines):{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}│   └── [?] Showing a sample of the generated commands for quick verification{Style.RESET_ALL}")
-        for i in range(preview_lines):
-            cmd = ev.program.commands[i]
-            print(f"{Fore.BLUE}│       {cmd.to_gcode()}{Style.RESET_ALL}")
+        # Display workflow completion
+        logger.workflow_complete(
+            success=True,
+            commands_count=len(ev.program.commands),
+            gcode_preview=gcode_lines
+        )
         
         # Return final result
-        print(f"{Fore.CYAN}├── [*] Preparing final result{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}│   └── [?] Packaging all generated data into a structured result object{Style.RESET_ALL}")
         result = {
             "prompt": ev.prompt,
             "commands_count": len(ev.program.commands),
@@ -374,8 +368,6 @@ class SimpleGCodeWorkflow(BasePromptPlotWorkflow):
             "program": ev.program.model_dump(),
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
-        
-        print(f"{Fore.GREEN}└── [+] Workflow completed successfully{Style.RESET_ALL}")
         
         return StopEvent(result=result)
 
@@ -412,9 +404,9 @@ async def main():
                 SimpleGCodeWorkflow, filename="results/visualizations/gcode_workflow_simple.html"
             )
             
-            print(f"{Fore.GREEN}[+] Workflow visualization saved to results/visualizations/gcode_workflow_simple.html{Style.RESET_ALL}")
+            logger.step_success("Workflow visualization saved", {"File": "results/visualizations/gcode_workflow_simple.html"})
         except ImportError:
-            print(f"{Fore.YELLOW}[!] Workflow visualization not available - llama_index.utils.workflow not found{Style.RESET_ALL}")
+            logger.step_warning("Workflow visualization not available", {"Reason": "llama_index.utils.workflow not found"})
         
         # Test with a prompt
         prompt = "draw a small house with a door and windows"
@@ -427,12 +419,12 @@ async def main():
             filename = f"results/gcode/simple_batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
             with open(filename, 'w') as f:
                 f.write(result.get("gcode", ""))
-            print(f"{Fore.GREEN}[+] G-code saved to {filename}{Style.RESET_ALL}")
+            logger.step_success("G-code saved", {"File": filename})
     
     except KeyboardInterrupt:
-        print(f"\n{Fore.YELLOW}Operation interrupted by user{Style.RESET_ALL}")
+        logger.step_warning("Operation interrupted by user")
     except Exception as e:
-        print(f"{Fore.RED}Error: {str(e)}{Style.RESET_ALL}")
+        logger.step_error("Workflow execution failed", {"Error": str(e)})
 
 
 if __name__ == "__main__":

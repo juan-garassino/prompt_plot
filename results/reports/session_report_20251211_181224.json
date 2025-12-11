@@ -1,0 +1,39 @@
+{
+  "session_info": {
+    "timestamp": "2025-12-11 18:12:24",
+    "prompt": "draw a triangle",
+    "llm_provider": "openai",
+    "session_id": "20251211_181224"
+  },
+  "gcode_info": {
+    "total_lines": 6,
+    "gcode_preview": [
+      "G0 X0.000 Y0.000",
+      "M3",
+      "G1 X10.000 Y0.000 F1000",
+      "G1 X5.000 Y8.660 F1000",
+      "G1 X0.000 Y0.000 F1000",
+      "M5"
+    ]
+  },
+  "execution_stats": {
+    "start_time": 1765473132.559801,
+    "total_commands": 6,
+    "successful_commands": 5,
+    "failed_commands": 1,
+    "total_distance": 29.999559995159892,
+    "drawing_distance": 0.0,
+    "movement_distance": 29.999559995159892,
+    "pen_up_count": 1,
+    "pen_down_count": 0,
+    "end_time": 1765473144.208029,
+    "total_time": 11.64822793006897,
+    "efficiency": 83.33333333333334,
+    "average_command_time": 2.329645586013794
+  },
+  "output_files": {
+    "frames_directory": "results/frames_20251211_181212",
+    "gif_animation": "results/animation_20251211_181224.gif",
+    "final_png": "results/final_drawing_20251211_181224.png"
+  }
+}
