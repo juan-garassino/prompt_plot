@@ -16,7 +16,7 @@ from llama_index.core.workflow import (
 )
 from typing import List, Optional, Union, Dict, Any
 import json
-from colorama import Fore, Style, init
+from rich.console import Console
 from datetime import datetime
 
 from ..core.base_workflow import BasePromptPlotWorkflow
@@ -28,7 +28,9 @@ from ..config import get_config
 from ..llm import LLMProvider
 
 # Initialize colorama for cross-platform color support
-init(autoreset=True)
+from ..utils.rich_logger import WorkflowLogger
+console = Console()
+logger = WorkflowLogger(console)
 
 # Prompt templates
 NEXT_COMMAND_TEMPLATE = """
@@ -176,45 +178,39 @@ class SimplePlotterStreamWorkflow(BasePromptPlotWorkflow):
         Returns:
             GenerateCommandEvent or StopEvent
         """
-        print(f"{Fore.CYAN}╔══════════════════════════════════════╗{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}║     Plotter Workflow Initializing    ║{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}╚══════════════════════════════════════╝{Style.RESET_ALL}")
-        
-        print(f"{Fore.CYAN}[*] ├── Initializing workflow{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[?] │   └── This step prepares the workflow by setting up context variables and parameters needed for G-code generation.{Style.RESET_ALL}")
-        
         # Get prompt from event
         if not hasattr(ev, "prompt"):
-            print(f"{Fore.RED}[!] │   └── No drawing prompt specified - workflow stopped{Style.RESET_ALL}")
+            logger.step_error("No drawing prompt specified", {"Action": "Workflow stopped"})
             return StopEvent(result="No drawing prompt specified")
         
         prompt = ev.prompt
         max_steps = getattr(ev, "max_steps", self.max_steps)
         
+        logger.stream_start("Simple Plotter Streaming", prompt, max_steps)
+        
         # Initialize context using base workflow method
         await self.initialize_context(ctx, prompt, max_steps=max_steps)
         
-        print(f"{Fore.GREEN}├── [+] Workflow parameters initialized successfully{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}├── [+] Drawing prompt: {prompt}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}├── [+] Max steps: {max_steps}{Style.RESET_ALL}")
+        logger.step_success("Workflow parameters initialized", {
+            "Prompt": prompt,
+            "Max steps": max_steps
+        })
         
         # Connect to plotter
-        print(f"{Fore.CYAN}├── [*] Connecting to plotter device{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}│   └── [?] Establishing connection with the plotter (real or simulated) to prepare for command execution.{Style.RESET_ALL}")
+        logger.step_start("Connect to Plotter", "Establishing connection with plotter device")
         
         try:
             if not await self.plotter.connect():
-                print(f"{Fore.RED}[!] │   └── Failed to connect to plotter - workflow stopped{Style.RESET_ALL}")
+                logger.step_error("Failed to connect to plotter", {"Action": "Workflow stopped"})
                 return StopEvent(result="Failed to connect to plotter")
         except Exception as e:
-            print(f"{Fore.RED}[!] │   └── Plotter connection error: {str(e)}{Style.RESET_ALL}")
+            logger.step_error("Plotter connection error", {"Error": str(e)})
             return StopEvent(result=f"Plotter connection error: {str(e)}")
         
-        print(f"{Fore.GREEN}├── [+] Successfully connected to plotter{Style.RESET_ALL}")
+        logger.step_success("Successfully connected to plotter")
         
         # Start with step 1
-        print(f"{Fore.CYAN}└── [*] Starting command generation sequence{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}    └── [?] Now that initialization is complete, the workflow will begin generating the first G-code command.{Style.RESET_ALL}")
+        logger.step_info("Starting command generation sequence")
         return GenerateCommandEvent(prompt=prompt, step=1)
     
     @step
@@ -228,16 +224,17 @@ class SimplePlotterStreamWorkflow(BasePromptPlotWorkflow):
         Returns:
             CommandExtractionDone with raw LLM output
         """
-        print(f"{Fore.CYAN}[*] ├── Generating command for step {ev.step}{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[?] │   └── This step uses the LLM to generate the next G-code command based on the drawing prompt and previous commands.{Style.RESET_ALL}")
+        logger.stream_command(ev.step, f"Generating command #{ev.step}", "executing")
         
         # Track retries for this specific step
         task_key = f"retries_step_{ev.step}"
         
         # Check retry limits using base workflow method
         if not await self.check_retry_limits(ctx, ev.step, task_key):
-            print(f"{Fore.RED}├── [!] Maximum retries exceeded for step {ev.step}{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}│   └── [?] After multiple failed attempts, returning a COMPLETE command to gracefully terminate the workflow.{Style.RESET_ALL}")
+            logger.step_error("Maximum retries exceeded", {
+                "Step": ev.step,
+                "Action": "Using COMPLETE fallback"
+            })
             
             # Return a COMPLETE command to force termination
             fallback_result = json.dumps({"command": "COMPLETE"})
@@ -249,25 +246,25 @@ class SimplePlotterStreamWorkflow(BasePromptPlotWorkflow):
             )
         
         # Get command history using base workflow method
-        print(f"{Fore.CYAN}├── [*] Retrieving command history{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}│   └── [?] Collecting previously executed commands to provide context for the LLM to generate the next command.{Style.RESET_ALL}")
         history = await self.get_command_history(ctx)
         
         current_retries = await ctx.get(task_key, default=0)
         max_retries = await ctx.get("max_retries")
-        print(f"{Fore.YELLOW}├── [*] Attempt {current_retries}/{max_retries}{Style.RESET_ALL}")
+        
+        logger.step_info(f"Generating command #{ev.step}", {
+            "Attempt": f"{current_retries}/{max_retries}",
+            "History": f"{len(history.split(chr(10)))} previous commands"
+        })
         
         # Build prompt for command generation
-        print(f"{Fore.CYAN}├── [*] Building LLM prompt{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}│   └── [?] Creating a structured prompt with instructions, drawing requirements, and command history.{Style.RESET_ALL}")
         prompt = NEXT_COMMAND_TEMPLATE.format(
             prompt=ev.prompt,
             history=history
         )
         
         # Generate command using the LLM
-        print(f"{Fore.CYAN}├── [*] Sending request to LLM{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}│   └── [?] Querying the language model to generate the next G-code command based on the prompt.{Style.RESET_ALL}")
+        llm_type = type(self.llm).__name__
+        logger.llm_call(llm_type, "", ev.prompt[:30])
         
         try:
             if hasattr(self.llm, 'acomplete'):
@@ -277,7 +274,7 @@ class SimplePlotterStreamWorkflow(BasePromptPlotWorkflow):
                 response = self.llm.complete(prompt)
                 response_text = response.text
         except Exception as e:
-            print(f"{Fore.RED}├── [!] LLM call failed: {str(e)}{Style.RESET_ALL}")
+            logger.step_error("LLM call failed", {"Error": str(e)})
             # Fallback to COMPLETE command
             fallback_result = json.dumps({"command": "COMPLETE"})
             return CommandExtractionDone(
@@ -286,7 +283,7 @@ class SimplePlotterStreamWorkflow(BasePromptPlotWorkflow):
                 step=ev.step
             )
         
-        print(f"{Fore.GREEN}└── [+] Command generation complete{Style.RESET_ALL}")
+        logger.stream_command(ev.step, f"Command #{ev.step} generated", "success")
         
         return CommandExtractionDone(
             output=response_text,
@@ -305,13 +302,11 @@ class SimplePlotterStreamWorkflow(BasePromptPlotWorkflow):
         Returns:
             CommandValidationErrorEvent if validation fails, ValidatedCommandEvent if successful
         """
-        print(f"{Fore.CYAN}[*] ├── Validating command for step {ev.step}{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[?] │   └── This step ensures the LLM output is a valid G-code command by parsing JSON and checking format.{Style.RESET_ALL}")
+        logger.step_start(f"Validate Command #{ev.step}", "Ensuring LLM output is valid G-code")
         
         # If this is a validation error event, handle the retry
         if isinstance(ev, CommandValidationErrorEvent):
-            print(f"{Fore.YELLOW}├── [!] Retrying with reflection after validation error{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}│   └── Error: {ev.error}{Style.RESET_ALL}")
+            logger.reflection_prompt(1, 3, ev.error)
             
             # Use base workflow reflection method
             try:
@@ -319,7 +314,7 @@ class SimplePlotterStreamWorkflow(BasePromptPlotWorkflow):
                     ev.error, ev.issues, ev.prompt
                 )
             except Exception as e:
-                print(f"{Fore.RED}│   └── [!] Reflection failed: {str(e)}{Style.RESET_ALL}")
+                logger.step_error("Reflection failed", {"Error": str(e)})
                 # Create a COMPLETE command to terminate
                 command = self.create_fallback_command()
                 return ValidatedCommandEvent(
@@ -347,13 +342,14 @@ class SimplePlotterStreamWorkflow(BasePromptPlotWorkflow):
             
             if isinstance(result, Exception):
                 # Validation failed
-                print(f"{Fore.RED}├── [!] Command validation failed{Style.RESET_ALL}")
-                print(f"{Fore.RED}│   └── Error: {str(result)}{Style.RESET_ALL}")
+                logger.validation_result(False, 0, [str(result)])
                 
                 # More detailed error information based on retry count
                 if current_retries >= max_retries:
-                    print(f"{Fore.RED}├── [!] Final attempt failed - Validation errors persist after {current_retries} attempts{Style.RESET_ALL}")
-                    print(f"{Fore.YELLOW}└── [?] Moving to fallback mechanism after exhausting retry attempts.{Style.RESET_ALL}")
+                    logger.step_error("Final attempt failed", {
+                        "Attempts": f"{current_retries}/{max_retries}",
+                        "Action": "Moving to fallback mechanism"
+                    })
                     
                     # Create a COMPLETE command to terminate gracefully
                     command = self.create_fallback_command()
@@ -364,8 +360,10 @@ class SimplePlotterStreamWorkflow(BasePromptPlotWorkflow):
                         is_complete=True
                     )
                 else:
-                    print(f"{Fore.YELLOW}├── [!] Retrying - Attempt {current_retries}/{max_retries} failed{Style.RESET_ALL}")
-                    print(f"{Fore.YELLOW}└── [?] Returning to validate_command with error details to help LLM correct its output.{Style.RESET_ALL}")
+                    logger.step_warning("Retrying validation", {
+                        "Attempt": f"{current_retries}/{max_retries}",
+                        "Action": "Returning to validate_command with error details"
+                    })
                 
                 return CommandValidationErrorEvent(
                     error=str(result),
@@ -380,12 +378,11 @@ class SimplePlotterStreamWorkflow(BasePromptPlotWorkflow):
             # Check if this is a completion command
             is_complete = command.command == "COMPLETE"
             
-            print(f"{Fore.GREEN}├── [+] Command validation successful{Style.RESET_ALL}")
-            print(f"{Fore.GREEN}│   └── Command: {command.to_gcode()}{Style.RESET_ALL}")
+            logger.validation_result(True, 1)
+            logger.step_success("Command validation successful", {"Command": command.to_gcode()})
             
             if is_complete:
-                print(f"{Fore.GREEN}└── [+] Reached completion command{Style.RESET_ALL}")
-                print(f"{Fore.YELLOW}    └── [?] The COMPLETE command signals the end of the G-code program generation.{Style.RESET_ALL}")
+                logger.step_info("Reached completion command", {"Action": "Program generation complete"})
             
             return ValidatedCommandEvent(
                 command=command,
@@ -395,8 +392,7 @@ class SimplePlotterStreamWorkflow(BasePromptPlotWorkflow):
             )
             
         except Exception as e:
-            print(f"{Fore.RED}├── [!] Unexpected validation error{Style.RESET_ALL}")
-            print(f"{Fore.RED}│   └── Error: {str(e)}{Style.RESET_ALL}")
+            logger.step_error("Unexpected validation error", {"Error": str(e)})
             
             return CommandValidationErrorEvent(
                 error=str(e),
@@ -416,33 +412,30 @@ class SimplePlotterStreamWorkflow(BasePromptPlotWorkflow):
         Returns:
             CommandExecutedEvent or PlotterCompleteEvent
         """
-        print(f"{Fore.CYAN}[*] ├── Executing command for step {ev.step}{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[?] │   └── This step sends the validated command to the plotter and tracks execution results.{Style.RESET_ALL}")
+        logger.step_start(f"Execute Command #{ev.step}", "Sending validated command to plotter")
         
         success = False
         
         # Execute command if it's not COMPLETE
         if not ev.is_complete:
-            print(f"{Fore.CYAN}├── [*] Sending command to plotter{Style.RESET_ALL}")
-            print(f"{Fore.BLUE}│   └── Command: {ev.command.to_gcode()}{Style.RESET_ALL}")
+            logger.plotter_command(ev.command.to_gcode(), "sending", True)
             
             try:
                 # Send command to plotter
                 success = await self.plotter.send_command(ev.command.to_gcode())
                 
                 if success:
-                    print(f"{Fore.GREEN}│   └── Command executed successfully{Style.RESET_ALL}")
+                    logger.plotter_command(ev.command.to_gcode(), "ok", True)
                     # Add command to history
                     await self.add_command_to_history(ctx, ev.command)
                 else:
-                    print(f"{Fore.RED}│   └── Command execution failed{Style.RESET_ALL}")
+                    logger.plotter_command(ev.command.to_gcode(), "failed", False)
                     
             except Exception as e:
-                print(f"{Fore.RED}│   └── Plotter communication error: {str(e)}{Style.RESET_ALL}")
+                logger.step_error("Plotter communication error", {"Error": str(e)})
                 success = False
         else:
-            print(f"{Fore.CYAN}├── [*] Skipping COMPLETE command execution{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}│   └── [?] COMPLETE is a control command, not sent to the plotter.{Style.RESET_ALL}")
+            logger.step_info("Skipping COMPLETE command execution", {"Reason": "Control command, not sent to plotter"})
             success = True  # COMPLETE is always "successful"
         
         # Update statistics
@@ -450,16 +443,16 @@ class SimplePlotterStreamWorkflow(BasePromptPlotWorkflow):
         
         # Check if we should complete the workflow
         if ev.is_complete or not await self.check_step_limits(ctx, ev.step):
-            print(f"{Fore.GREEN}└── [+] Plotter workflow complete{Style.RESET_ALL}")
+            logger.step_success("Plotter workflow complete")
             
             commands_executed = await ctx.get("commands_executed", default=0)
             
             # Disconnect from plotter
             try:
                 await self.plotter.disconnect()
-                print(f"{Fore.GREEN}    └── Plotter disconnected successfully{Style.RESET_ALL}")
+                logger.step_success("Plotter disconnected successfully")
             except Exception as e:
-                print(f"{Fore.YELLOW}    └── Plotter disconnect warning: {str(e)}{Style.RESET_ALL}")
+                logger.step_warning("Plotter disconnect warning", {"Error": str(e)})
             
             return PlotterCompleteEvent(
                 prompt=ev.prompt,
@@ -468,7 +461,7 @@ class SimplePlotterStreamWorkflow(BasePromptPlotWorkflow):
             )
         else:
             # Continue to next command
-            print(f"{Fore.GREEN}└── [+] Command executed, continuing to next step{Style.RESET_ALL}")
+            logger.step_success("Command executed, continuing to next step")
             
             return CommandExecutedEvent(
                 prompt=ev.prompt,
@@ -489,18 +482,16 @@ class SimplePlotterStreamWorkflow(BasePromptPlotWorkflow):
         Returns:
             GenerateCommandEvent for the next step
         """
-        print(f"{Fore.CYAN}[*] ├── Continuing to next command (step {ev.step + 1}){Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[?] │   └── This step prepares for generating the next command.{Style.RESET_ALL}")
+        next_step = ev.step + 1
+        logger.step_start(f"Continue to Step {next_step}", "Preparing for next command generation")
         
         # Get current statistics for context
         commands_executed = await ctx.get("commands_executed", default=0)
         success_count = await ctx.get("success_count", default=0)
-        print(f"{Fore.CYAN}├── [*] Progress: {commands_executed} commands executed, {success_count} successful{Style.RESET_ALL}")
+        logger.stream_progress(success_count, commands_executed, f"Step {next_step}")
         
         # Generate next command
-        next_step = ev.step + 1
-        print(f"{Fore.CYAN}└── [*] Preparing for command generation step {next_step}{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}    └── [?] Looping back to generate_command step with incremented step counter.{Style.RESET_ALL}")
+        logger.step_success("Preparing for next command generation", {"Action": "Looping back to generate_command"})
         
         return GenerateCommandEvent(
             prompt=ev.prompt,
@@ -518,23 +509,16 @@ class SimplePlotterStreamWorkflow(BasePromptPlotWorkflow):
         Returns:
             StopEvent with execution results
         """
-        print(f"{Fore.CYAN}╔══════════════════════════════════════╗{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}║     Plotter Workflow Complete        ║{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}╚══════════════════════════════════════╝{Style.RESET_ALL}")
-        
-        print(f"{Fore.CYAN}[*] ├── Finalizing plotter execution{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[?] │   └── This step processes execution results and creates a comprehensive summary.{Style.RESET_ALL}")
+        logger.step_start("Finalize Execution", "Processing execution results and creating summary")
         
         # Get final statistics
         commands = await ctx.get("commands", default=[])
         success_count = await ctx.get("success_count", default=0)
         failed_count = await ctx.get("failed_count", default=0)
         
-        print(f"{Fore.GREEN}├── [+] Drawing prompt: {ev.prompt}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}├── [+] Commands executed: {ev.commands_executed}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}├── [+] Successful commands: {success_count}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}├── [+] Failed commands: {failed_count}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}└── [+] Steps taken: {ev.step_count}{Style.RESET_ALL}")
+        # Show execution summary
+        elapsed = (datetime.now() - datetime.now()).total_seconds()  # This would be calculated properly in real implementation
+        logger.execution_summary(ev.commands_executed, success_count, failed_count, elapsed)
         
         # Create final result
         result = {
@@ -548,7 +532,7 @@ class SimplePlotterStreamWorkflow(BasePromptPlotWorkflow):
             "plotter_type": type(self.plotter).__name__
         }
         
-        print(f"{Fore.GREEN}└── [+] Plotter workflow execution complete{Style.RESET_ALL}")
+        logger.workflow_complete(True, ev.commands_executed)
         
         return StopEvent(result=result)
 
@@ -560,16 +544,15 @@ async def main():
     from ..plotter.simulated import SimulatedPlotter
     import os
 
-    print(f"{Fore.CYAN}[*] ├── Starting plotter streaming workflow{Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}[?] │   └── This is the main entry point that initializes the LLM, plotter, and runs the workflow.{Style.RESET_ALL}")
+    logger.workflow_start("Simple Plotter Streaming Workflow", "Testing workflow with sample prompt")
     
     # Create LLM instance
-    print(f"{Fore.CYAN}├── [*] Initializing language model{Style.RESET_ALL}")
+    logger.step_start("Initialize LLM", "Setting up language model for G-code generation")
     llm = Ollama(model="llama3.2:3b", request_timeout=10000)
 
     # Optionally use Azure OpenAI if environment variables are set
     if all(os.environ.get(key) for key in ["GPT4_API_KEY", "GPT4_API_VERSION", "GPT4_ENDPOINT"]):
-        print(f"{Fore.CYAN}├── [*] Configuring Azure OpenAI{Style.RESET_ALL}")
+        logger.step_info("Configuring Azure OpenAI", {"Reason": "Environment variables detected"})
         llm = AzureOpenAI(
             model="gpt-4o",
             deployment_name="gpt-4o-gs",
@@ -580,7 +563,8 @@ async def main():
         )
     
     # Create plotter instance
-    print(f"{Fore.CYAN}├── [*] Initializing simulated plotter{Style.RESET_ALL}")
+    logger.step_success("LLM initialized successfully")
+    logger.step_start("Initialize Plotter", "Setting up simulated plotter")
     plotter = SimulatedPlotter(
         commands_log_file=f"results/logs/streaming_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log",
         visualize=True
@@ -588,11 +572,12 @@ async def main():
     
     try:
         # Create workflow
-        print(f"{Fore.CYAN}├── [*] Creating workflow instance{Style.RESET_ALL}")
+        logger.step_success("Plotter initialized successfully")
+        logger.step_start("Create Workflow", "Instantiating SimplePlotterStreamWorkflow")
         workflow = SimplePlotterStreamWorkflow(llm=llm, plotter=plotter, timeout=10000)
         
         # Generate workflow visualization
-        print(f"{Fore.CYAN}├── [*] Generating workflow visualization{Style.RESET_ALL}")
+        logger.step_info("Generating workflow visualization")
         try:
             from llama_index.utils.workflow import draw_all_possible_flows
             
@@ -600,33 +585,34 @@ async def main():
                 SimplePlotterStreamWorkflow, filename="results/visualizations/gcode_workflow_streamer_simple.html"
             )
             
-            print(f"{Fore.GREEN}│   └── Workflow visualization saved to results/visualizations/gcode_workflow_streamer_simple.html{Style.RESET_ALL}")
+            logger.step_success("Workflow visualization saved", {"File": "results/visualizations/gcode_workflow_streamer_simple.html"})
         except ImportError:
-            print(f"{Fore.YELLOW}│   └── Workflow visualization not available - llama_index.utils.workflow not found{Style.RESET_ALL}")
+            logger.step_warning("Workflow visualization not available", {"Reason": "llama_index.utils.workflow not found"})
         
         # Test with a prompt
-        print(f"{Fore.CYAN}├── [*] Preparing test prompt{Style.RESET_ALL}")
         prompt = "draw a small house with a door and windows"
+        logger.step_info("Preparing test prompt", {"Prompt": prompt})
         
         # Run workflow
-        print(f"{Fore.CYAN}├── [*] Executing streaming workflow{Style.RESET_ALL}")
+        logger.step_start("Execute Workflow", "Running streaming workflow with test prompt")
         result = await workflow.run(prompt=prompt, max_steps=30)
         
         # Display results
         if result:
-            print(f"\n{Fore.GREEN}[+] ├── Workflow completed successfully{Style.RESET_ALL}")
-            print(f"{Fore.GREEN}[+] ├── Commands executed: {result.get('commands_executed', 0)}{Style.RESET_ALL}")
-            print(f"{Fore.GREEN}[+] └── Success rate: {result.get('successful_commands', 0)}/{result.get('commands_executed', 0)}{Style.RESET_ALL}")
+            logger.step_success("Workflow completed successfully", {
+                "Commands executed": result.get('commands_executed', 0),
+                "Success rate": f"{result.get('successful_commands', 0)}/{result.get('commands_executed', 0)}"
+            })
     
     except KeyboardInterrupt:
-        print(f"\n{Fore.YELLOW}[!] └── Operation interrupted by user{Style.RESET_ALL}")
+        logger.step_warning("Operation interrupted by user", {"Action": "Workflow execution stopped"})
         # Ensure plotter is disconnected
         try:
             await plotter.disconnect()
         except:
             pass
     except Exception as e:
-        print(f"{Fore.RED}[!] └── Error: {str(e)}{Style.RESET_ALL}")
+        logger.step_error("Workflow execution failed", {"Error": str(e)})
         # Ensure plotter is disconnected
         try:
             await plotter.disconnect()

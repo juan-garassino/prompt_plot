@@ -38,7 +38,7 @@ try:
     )
     from promptplot.strategies import StrategySelector
 except ImportError as e:
-    print(f"❌ Import error: {e}")
+    print(f"[ERR] Import error: {e}")
     print("Make sure PromptPlot is installed: pip install -e .")
     sys.exit(1)
 
@@ -77,23 +77,23 @@ def check_gemini_credentials():
 
 async def demo_with_ollama(prompt: str):
     """Demo using Ollama local LLM."""
-    print("🦙 Using Ollama Local LLM")
+    print("[>] Using Ollama Local LLM")
     print("-" * 30)
     
     # Check if Ollama is available
     available, models = check_ollama_available()
     if not available:
-        print("❌ Ollama not available. Please:")
+        print("[ERR] Ollama not available. Please:")
         print("   1. Install Ollama: https://ollama.ai/")
         print("   2. Start Ollama: ollama serve")
         print("   3. Pull a model: ollama pull llama3.2:3b")
         return False
     
-    print(f"✅ Ollama available with models: {', '.join(models[:3])}")
+    print(f"[OK] Ollama available with models: {', '.join(models[:3])}")
     
     # Use the first available model or default
     model = models[0] if models else "llama3.2:3b"
-    print(f"📝 Using model: {model}")
+    print(f"[i] Using model: {model}")
     
     try:
         # Create Ollama provider
@@ -115,17 +115,17 @@ async def demo_with_ollama(prompt: str):
             max_steps=10
         )
         
-        print(f"🎨 Generating G-code for: '{prompt}'")
-        print("⏳ This may take 10-30 seconds...")
+        print(f"[>] Generating G-code for: '{prompt}'")
+        print("[.] This may take 10-30 seconds...")
         
         # Execute the workflow
         result = await workflow.run(prompt=prompt)
         
         if result and result.get('commands_count', 0) > 0:
-            print(f"✅ Success! Generated {result['commands_count']} G-code commands")
+            print(f"[OK] Success! Generated {result['commands_count']} G-code commands")
             
             # Show G-code preview
-            print("\n📋 Generated G-code:")
+            print("\n[i] Generated G-code:")
             gcode_lines = result.get('gcode', '').split('\n')[:8]
             for i, line in enumerate(gcode_lines, 1):
                 print(f"   {i:2d}. {line}")
@@ -133,14 +133,14 @@ async def demo_with_ollama(prompt: str):
             if len(result.get('gcode', '').split('\n')) > 8:
                 print(f"   ... and more commands")
             
-            print("\n🖼️  Check the visualization window to see the drawing!")
+            print("\n[i] Check the visualization window to see the drawing!")
             
         else:
-            print("❌ No G-code generated. Check the LLM response.")
+            print("[ERR] No G-code generated. Check the LLM response.")
             return False
             
     except Exception as e:
-        print(f"❌ Error with Ollama: {e}")
+        print(f"[ERR] Error with Ollama: {e}")
         return False
     
     return True
@@ -148,23 +148,23 @@ async def demo_with_ollama(prompt: str):
 
 async def demo_with_openai(prompt: str):
     """Demo using OpenAI."""
-    print("🤖 Using OpenAI")
+    print("[>] Using OpenAI")
     print("-" * 25)
     
     # Check credentials
     available, missing = check_openai_credentials()
     if not available:
-        print(f"❌ Missing OpenAI API key")
+        print(f"[ERR] Missing OpenAI API key")
         print("Please set environment variable:")
         print("   export OPENAI_API_KEY='your-api-key'")
         return False
     
-    print("✅ OpenAI API key found")
+    print("[OK] OpenAI API key found")
     
     try:
         # Create OpenAI provider
         model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-        print(f"📝 Using model: {model}")
+        print(f"[i] Using model: {model}")
         
         llm_provider = OpenAIProvider(
             model=model,
@@ -184,17 +184,17 @@ async def demo_with_openai(prompt: str):
             max_steps=10
         )
         
-        print(f"🎨 Generating G-code for: '{prompt}'")
-        print("⏳ Calling OpenAI...")
+        print(f"[>] Generating G-code for: '{prompt}'")
+        print("[.] Calling OpenAI...")
         
         # Execute the workflow
         result = await workflow.run(prompt=prompt)
         
         if result and result.get('commands_count', 0) > 0:
-            print(f"✅ Success! Generated {result['commands_count']} G-code commands")
+            print(f"[OK] Success! Generated {result['commands_count']} G-code commands")
             
             # Show G-code preview
-            print("\n📋 Generated G-code:")
+            print("\n[i] Generated G-code:")
             gcode_lines = result.get('gcode', '').split('\n')[:8]
             for i, line in enumerate(gcode_lines, 1):
                 print(f"   {i:2d}. {line}")
@@ -202,14 +202,14 @@ async def demo_with_openai(prompt: str):
             if len(result.get('gcode', '').split('\n')) > 8:
                 print(f"   ... and more commands")
             
-            print("\n🖼️  Check the visualization window to see the drawing!")
+            print("\n[i] Check the visualization window to see the drawing!")
             
         else:
-            print("❌ No G-code generated. Check the LLM response.")
+            print("[ERR] No G-code generated. Check the LLM response.")
             return False
             
     except Exception as e:
-        print(f"❌ Error with OpenAI: {e}")
+        print(f"[ERR] Error with OpenAI: {e}")
         return False
     
     return True
@@ -217,23 +217,23 @@ async def demo_with_openai(prompt: str):
 
 async def demo_with_gemini(prompt: str):
     """Demo using Google Gemini."""
-    print("💎 Using Google Gemini")
+    print("[>] Using Google Gemini")
     print("-" * 25)
     
     # Check credentials
     available, missing = check_gemini_credentials()
     if not available:
-        print(f"❌ Missing Google API key")
+        print(f"[ERR] Missing Google API key")
         print("Please set environment variable:")
         print("   export GOOGLE_API_KEY='your-api-key'")
         return False
     
-    print("✅ Google API key found")
+    print("[OK] Google API key found")
     
     try:
         # Create Gemini provider
         model = os.getenv("GEMINI_MODEL", "models/gemini-1.5-flash")
-        print(f"📝 Using model: {model}")
+        print(f"[i] Using model: {model}")
         
         llm_provider = GeminiProvider(
             model=model,
@@ -253,17 +253,17 @@ async def demo_with_gemini(prompt: str):
             max_steps=10
         )
         
-        print(f"🎨 Generating G-code for: '{prompt}'")
-        print("⏳ Calling Gemini...")
+        print(f"[>] Generating G-code for: '{prompt}'")
+        print("[.] Calling Gemini...")
         
         # Execute the workflow
         result = await workflow.run(prompt=prompt)
         
         if result and result.get('commands_count', 0) > 0:
-            print(f"✅ Success! Generated {result['commands_count']} G-code commands")
+            print(f"[OK] Success! Generated {result['commands_count']} G-code commands")
             
             # Show G-code preview
-            print("\n📋 Generated G-code:")
+            print("\n[i] Generated G-code:")
             gcode_lines = result.get('gcode', '').split('\n')[:8]
             for i, line in enumerate(gcode_lines, 1):
                 print(f"   {i:2d}. {line}")
@@ -271,14 +271,14 @@ async def demo_with_gemini(prompt: str):
             if len(result.get('gcode', '').split('\n')) > 8:
                 print(f"   ... and more commands")
             
-            print("\n🖼️  Check the visualization window to see the drawing!")
+            print("\n[i] Check the visualization window to see the drawing!")
             
         else:
-            print("❌ No G-code generated. Check the LLM response.")
+            print("[ERR] No G-code generated. Check the LLM response.")
             return False
             
     except Exception as e:
-        print(f"❌ Error with Gemini: {e}")
+        print(f"[ERR] Error with Gemini: {e}")
         return False
     
     return True
@@ -286,20 +286,20 @@ async def demo_with_gemini(prompt: str):
 
 async def demo_with_azure(prompt: str):
     """Demo using Azure OpenAI."""
-    print("☁️  Using Azure OpenAI")
+    print("[>] Using Azure OpenAI")
     print("-" * 25)
     
     # Check credentials
     available, missing = check_azure_credentials()
     if not available:
-        print(f"❌ Missing Azure credentials: {', '.join(missing)}")
+        print(f"[ERR] Missing Azure credentials: {', '.join(missing)}")
         print("Please set environment variables:")
         print("   export GPT4_API_KEY='your-api-key'")
         print("   export GPT4_ENDPOINT='https://your-resource.openai.azure.com/'")
         print("   export GPT4_API_VERSION='2024-02-15-preview'")
         return False
     
-    print("✅ Azure OpenAI credentials found")
+    print("[OK] Azure OpenAI credentials found")
     
     try:
         # Create Azure OpenAI provider
@@ -322,17 +322,17 @@ async def demo_with_azure(prompt: str):
             max_steps=10
         )
         
-        print(f"🎨 Generating G-code for: '{prompt}'")
-        print("⏳ Calling Azure OpenAI...")
+        print(f"[>] Generating G-code for: '{prompt}'")
+        print("[.] Calling Azure OpenAI...")
         
         # Execute the workflow
         result = await workflow.run(prompt=prompt)
         
         if result and result.get('commands_count', 0) > 0:
-            print(f"✅ Success! Generated {result['commands_count']} G-code commands")
+            print(f"[OK] Success! Generated {result['commands_count']} G-code commands")
             
             # Show G-code preview
-            print("\n📋 Generated G-code:")
+            print("\n[i] Generated G-code:")
             gcode_lines = result.get('gcode', '').split('\n')[:8]
             for i, line in enumerate(gcode_lines, 1):
                 print(f"   {i:2d}. {line}")
@@ -340,14 +340,14 @@ async def demo_with_azure(prompt: str):
             if len(result.get('gcode', '').split('\n')) > 8:
                 print(f"   ... and more commands")
             
-            print("\n🖼️  Check the visualization window to see the drawing!")
+            print("\n[i] Check the visualization window to see the drawing!")
             
         else:
-            print("❌ No G-code generated. Check the LLM response.")
+            print("[ERR] No G-code generated. Check the LLM response.")
             return False
             
     except Exception as e:
-        print(f"❌ Error with Azure OpenAI: {e}")
+        print(f"[ERR] Error with Azure OpenAI: {e}")
         return False
     
     return True
@@ -355,25 +355,25 @@ async def demo_with_azure(prompt: str):
 
 async def demo_strategy_selection(prompt: str):
     """Demonstrate automatic strategy selection."""
-    print(f"\n🧠 Strategy Selection for: '{prompt}'")
+    print(f"\n[>] Strategy Selection for: '{prompt}'")
     print("-" * 40)
     
     try:
         selector = StrategySelector()
         strategy = selector.select_strategy(prompt)
         
-        print(f"📊 Selected strategy: {strategy.__class__.__name__}")
+        print(f"[i] Selected strategy: {strategy.__class__.__name__}")
         
         # Analyze the prompt
         analysis = selector.analyze_prompt_complexity(prompt)
-        print(f"📈 Complexity analysis:")
-        print(f"   • Requires curves: {analysis.requires_curves}")
-        print(f"   • Estimated commands: {analysis.estimated_commands}")
-        print(f"   • Complexity level: {analysis.complexity_level.value}")
-        print(f"   • Confidence score: {analysis.confidence_score:.2f}")
+        print(f"[i] Complexity analysis:")
+        print(f"   * Requires curves: {analysis.requires_curves}")
+        print(f"   * Estimated commands: {analysis.estimated_commands}")
+        print(f"   * Complexity level: {analysis.complexity_level.value}")
+        print(f"   * Confidence score: {analysis.confidence_score:.2f}")
         
     except Exception as e:
-        print(f"❌ Strategy selection error: {e}")
+        print(f"[ERR] Strategy selection error: {e}")
 
 
 def main():
@@ -398,7 +398,7 @@ def main():
     
     args = parser.parse_args()
     
-    print("🎨 PromptPlot v2.0 LLM Demo")
+    print("PromptPlot v2.0 LLM Demo")
     print("=" * 35)
     print(f"Prompt: '{args.prompt}'")
     print()
@@ -418,19 +418,19 @@ def main():
             ollama_available, _ = check_ollama_available()
             
             if openai_available:
-                print("🔍 Auto-detected: OpenAI API key found")
+                print("[>] Auto-detected: OpenAI API key found")
                 success = await demo_with_openai(args.prompt)
             elif gemini_available:
-                print("🔍 Auto-detected: Google API key found")
+                print("[>] Auto-detected: Google API key found")
                 success = await demo_with_gemini(args.prompt)
             elif azure_available:
-                print("🔍 Auto-detected: Azure OpenAI credentials found")
+                print("[>] Auto-detected: Azure OpenAI credentials found")
                 success = await demo_with_azure(args.prompt)
             elif ollama_available:
-                print("🔍 Auto-detected: Ollama is available")
+                print("[>] Auto-detected: Ollama is available")
                 success = await demo_with_ollama(args.prompt)
             else:
-                print("❌ No LLM provider available!")
+                print("[ERR] No LLM provider available!")
                 print("\nOptions:")
                 print("1. Set OPENAI_API_KEY for OpenAI")
                 print("2. Set GOOGLE_API_KEY for Gemini")
@@ -448,7 +448,7 @@ def main():
             success = await demo_with_ollama(args.prompt)
         
         if success:
-            print("\n🎉 Demo completed successfully!")
+            print("\n[OK] Demo completed successfully!")
             print("\nNext steps:")
             print("• Try different prompts with --prompt 'your prompt here'")
             print("• Try different providers with --provider openai/gemini/azure/ollama")
@@ -460,10 +460,10 @@ def main():
         success = asyncio.run(run_demo())
         sys.exit(0 if success else 1)
     except KeyboardInterrupt:
-        print("\n⏹️  Demo interrupted by user")
+        print("\n[!] Demo interrupted by user")
         sys.exit(0)
     except Exception as e:
-        print(f"\n💥 Demo failed: {e}")
+        print(f"\n[ERR] Demo failed: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

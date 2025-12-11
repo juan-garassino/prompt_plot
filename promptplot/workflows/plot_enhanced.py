@@ -27,7 +27,8 @@ from llama_index.core.workflow import (
     step,
     Context,
 )
-from colorama import Fore, Style, init
+from ..utils.rich_logger import WorkflowLogger
+from rich.console import Console
 
 from ..core.base_workflow import BasePromptPlotWorkflow
 from ..core.models import GCodeCommand, GCodeProgram, DrawingStrategy
@@ -38,8 +39,9 @@ from ..vision.plot_analyzer import PlotAnalyzer, PlotState, DrawingProgress
 from ..plotter.visualizer import PlotterVisualizer
 from ..strategies.selector import StrategySelector
 
-# Initialize colorama for cross-platform color support
-init(autoreset=True)
+# Initialize Rich console and logger
+console = Console()
+logger = WorkflowLogger(console)
 
 # Event Classes
 class InitializePlotContextEvent(Event):
@@ -172,13 +174,6 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
     @step
     async def start(self, ctx: Context, ev: StartEvent) -> InitializePlotContextEvent:
         """Start the workflow and initialize context"""
-        print(f"{Fore.CYAN}╔══════════════════════════════════════════════╗{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}║   Plot-Enhanced G-Code Workflow Start        ║{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}╚══════════════════════════════════════════════╝{Style.RESET_ALL}")
-        
-        print(f"{Fore.CYAN}[*] ├── Initializing plot-enhanced workflow{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[?] │   └── Setting up visual feedback system with matplotlib integration{Style.RESET_ALL}")
-        
         # Get parameters from event
         prompt = getattr(ev, "prompt", "draw a simple square")
         target_strategy = getattr(ev, "target_strategy", None)
@@ -192,25 +187,28 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
         await ctx.set("plot_history", [])
         await ctx.set("visual_analysis_count", 0)
         
-        print(f"{Fore.GREEN}├── [+] Workflow initialization complete{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}├── [+] Drawing prompt: {prompt}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}├── [+] Grid enabled: {self.enable_grid}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}├── [+] Coordinate bounds: {self.coordinate_bounds}{Style.RESET_ALL}")
+        logger.workflow_start("Plot-Enhanced G-Code Workflow", prompt)
+        
+        logger.step_success("Workflow initialization complete", {
+            "Prompt": prompt,
+            "Grid enabled": self.enable_grid,
+            "Coordinate bounds": str(self.coordinate_bounds)
+        })
         
         # Determine strategy if not provided
         if target_strategy is None:
-            print(f"{Fore.CYAN}├── [*] Analyzing prompt for strategy selection{Style.RESET_ALL}")
+            logger.step_start("Strategy Selection", "Analyzing prompt for optimal strategy")
             try:
                 complexity = self.strategy_selector.analyze_prompt_complexity(prompt)
                 target_strategy = self.strategy_selector.select_strategy(complexity)
                 await ctx.set("target_strategy", target_strategy)
-                print(f"{Fore.GREEN}│   └── Selected strategy: {target_strategy.value}{Style.RESET_ALL}")
+                logger.step_success("Strategy selected", {"Strategy": target_strategy.value})
             except Exception as e:
-                print(f"{Fore.YELLOW}│   └── Strategy selection failed, using AUTO: {str(e)}{Style.RESET_ALL}")
+                logger.step_warning("Strategy selection failed, using AUTO", {"Error": str(e)})
                 target_strategy = DrawingStrategy.AUTO
                 await ctx.set("target_strategy", target_strategy)
         
-        print(f"{Fore.CYAN}└── [*] Moving to plot context initialization{Style.RESET_ALL}")
+        logger.step_info("Moving to plot context initialization")
         return InitializePlotContextEvent(
             prompt=prompt,
             target_strategy=target_strategy,
@@ -220,17 +218,16 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
     @step
     async def initialize_plot_context(self, ctx: Context, ev: InitializePlotContextEvent) -> AnalyzePlotStateEvent:
         """Initialize plot context and visualization"""
-        print(f"{Fore.CYAN}[*] ├── Initializing plot context{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[?] │   └── Setting up matplotlib figure and coordinate system for visual feedback{Style.RESET_ALL}")
+        logger.step_start("Initialize Plot Context", "Setting up matplotlib figure and coordinate system for visual feedback")
         
         try:
             # Initialize matplotlib figure
-            print(f"{Fore.CYAN}├── [*] Creating matplotlib figure{Style.RESET_ALL}")
+            logger.step_info("Creating matplotlib figure")
             self._current_figure = self.visualizer.create_figure()
             
             # Set up coordinate system
             if ev.grid_enabled:
-                print(f"{Fore.CYAN}├── [*] Setting up grid coordinate system{Style.RESET_ALL}")
+                logger.step_info("Setting up grid coordinate system")
                 self.visualizer.setup_grid(
                     self._current_figure,
                     bounds=self.coordinate_bounds,
@@ -238,7 +235,7 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
                 )
             
             # Initialize plot context in LLM
-            print(f"{Fore.CYAN}├── [*] Initializing visual context in LLM{Style.RESET_ALL}")
+            logger.step_info("Initializing visual context in LLM")
             initial_context = self.plot_llm.add_plot_context(self._current_figure)
             
             # Store initial context
@@ -246,16 +243,17 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
             plot_history.append(initial_context)
             await ctx.set("plot_history", plot_history)
             
-            print(f"{Fore.GREEN}├── [+] Plot context initialized successfully{Style.RESET_ALL}")
-            print(f"{Fore.GREEN}│   └── Figure size: {self._current_figure.get_size_inches()}{Style.RESET_ALL}")
-            print(f"{Fore.GREEN}│   └── Grid elements: {len(initial_context.plot_state.elements)}{Style.RESET_ALL}")
+            logger.step_success("Plot context initialized successfully", {
+                "Figure size": str(self._current_figure.get_size_inches()),
+                "Grid elements": len(initial_context.plot_state.elements)
+            })
             
         except Exception as e:
-            print(f"{Fore.RED}├── [!] Plot context initialization failed: {str(e)}{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}│   └── Continuing without visual context{Style.RESET_ALL}")
+            logger.step_error("Plot context initialization failed", {"Error": str(e)})
+            logger.step_warning("Continuing without visual context")
             await ctx.set("visual_context_available", False)
         
-        print(f"{Fore.CYAN}└── [*] Moving to plot state analysis{Style.RESET_ALL}")
+        logger.step_info("Moving to plot state analysis")
         return AnalyzePlotStateEvent(
             prompt=ev.prompt,
             step=1,
@@ -265,14 +263,13 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
     @step
     async def analyze_plot_state(self, ctx: Context, ev: AnalyzePlotStateEvent) -> GenerateVisualCommandEvent:
         """Analyze current plot state and provide recommendations"""
-        print(f"{Fore.CYAN}[*] ├── Analyzing plot state for step {ev.step}{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[?] │   └── Using computer vision to analyze current drawing state and recommend next actions{Style.RESET_ALL}")
+        logger.step_start(f"Analyze Plot State #{ev.step}", "Using computer vision to analyze current drawing state")
         
         plot_analysis = {}
         
         try:
             if self._current_figure is not None:
-                print(f"{Fore.CYAN}├── [*] Performing visual analysis{Style.RESET_ALL}")
+                logger.step_info("Performing visual analysis")
                 
                 # Analyze current plot state
                 analysis_result = await self.plot_llm.analyze_plot_state(
@@ -286,16 +283,14 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
                 analysis_count = await ctx.get("visual_analysis_count", default=0)
                 await ctx.set("visual_analysis_count", analysis_count + 1)
                 
-                print(f"{Fore.GREEN}├── [+] Visual analysis complete{Style.RESET_ALL}")
-                print(f"{Fore.GREEN}│   └── Progress: {analysis_result.get('completion_estimate', 'Unknown')}{Style.RESET_ALL}")
-                print(f"{Fore.GREEN}│   └── Strategy: {analysis_result.get('strategy_recommendation', 'auto')}{Style.RESET_ALL}")
-                
-                # Log analysis summary
-                if 'current_state_summary' in analysis_result:
-                    print(f"{Fore.BLUE}│   └── State: {analysis_result['current_state_summary'][:60]}...{Style.RESET_ALL}")
+                logger.step_success("Visual analysis complete", {
+                    "Progress": analysis_result.get('completion_estimate', 'Unknown'),
+                    "Strategy": analysis_result.get('strategy_recommendation', 'auto'),
+                    "State": analysis_result.get('current_state_summary', '')[:60] + "..." if 'current_state_summary' in analysis_result else ""
+                })
                 
             else:
-                print(f"{Fore.YELLOW}├── [!] No visual context available{Style.RESET_ALL}")
+                logger.step_warning("No visual context available")
                 plot_analysis = {
                     "current_state_summary": "No visual context available",
                     "progress_assessment": "Unable to assess visually",
@@ -306,7 +301,7 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
                 }
                 
         except Exception as e:
-            print(f"{Fore.RED}├── [!] Plot analysis failed: {str(e)}{Style.RESET_ALL}")
+            logger.step_error("Plot analysis failed", {"Error": str(e)})
             plot_analysis = {
                 "error": str(e),
                 "current_state_summary": f"Analysis failed: {str(e)}",
@@ -317,7 +312,7 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
                 "completion_estimate": "Unknown"
             }
         
-        print(f"{Fore.CYAN}└── [*] Moving to visual command generation{Style.RESET_ALL}")
+        logger.step_info("Moving to visual command generation")
         return GenerateVisualCommandEvent(
             prompt=ev.prompt,
             step=ev.step,
@@ -328,16 +323,14 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
     @step
     async def generate_visual_command(self, ctx: Context, ev: Union[GenerateVisualCommandEvent, CommandValidationErrorEvent]) -> Union[CommandValidationErrorEvent, ValidatedVisualCommandEvent]:
         """Generate command using visual context and plot analysis"""
-        print(f"{Fore.CYAN}[*] ├── Generating visual command for step {ev.step}{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[?] │   └── Using LLM with visual context to generate next G-code command{Style.RESET_ALL}")
+        logger.step_start(f"Generate Visual Command #{ev.step}", "Using LLM with visual context to generate next G-code command")
         
         # Track retries for this specific step
         task_key = f"visual_retries_step_{ev.step}"
         
         # Check retry limits
         if not await self.check_retry_limits(ctx, ev.step, task_key):
-            print(f"{Fore.RED}├── [!] Maximum retries exceeded for step {ev.step}{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}│   └── Using fallback COMPLETE command{Style.RESET_ALL}")
+            logger.step_error("Maximum retries exceeded", {"Step": ev.step, "Action": "Using fallback COMPLETE command"})
             
             fallback_command = self.create_fallback_command()
             return ValidatedVisualCommandEvent(
@@ -350,11 +343,11 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
         
         current_retries = await ctx.get(task_key, default=0)
         max_retries = await ctx.get("max_retries")
-        print(f"{Fore.YELLOW}├── [*] Attempt {current_retries}/{max_retries}{Style.RESET_ALL}")
+        logger.step_info(f"Visual command generation attempt", {"Attempt": f"{current_retries}/{max_retries}"})
         
         try:
             # Generate command with visual context
-            print(f"{Fore.CYAN}├── [*] Calling plot-enhanced LLM{Style.RESET_ALL}")
+            logger.llm_call("PlotEnhancedLLM", "", ev.prompt[:30])
             
             figures = [self._current_figure] if self._current_figure is not None else None
             
@@ -365,16 +358,15 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
                 use_multimodal=True
             )
             
-            print(f"{Fore.GREEN}├── [+] Visual command generation complete{Style.RESET_ALL}")
+            logger.step_success("Visual command generation complete")
             
             # Validate the generated command
-            print(f"{Fore.CYAN}├── [*] Validating generated command{Style.RESET_ALL}")
+            logger.step_info("Validating generated command")
             result = await self.validate_gcode_command(response_text)
             
             if isinstance(result, Exception):
                 # Validation failed
-                print(f"{Fore.RED}├── [!] Command validation failed{Style.RESET_ALL}")
-                print(f"{Fore.RED}│   └── Error: {str(result)}{Style.RESET_ALL}")
+                logger.validation_result(False, 0, [str(result)])
                 
                 return CommandValidationErrorEvent(
                     error=str(result),
@@ -388,11 +380,11 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
             command = result
             is_complete = command.command == "COMPLETE"
             
-            print(f"{Fore.GREEN}├── [+] Command validation successful{Style.RESET_ALL}")
-            print(f"{Fore.GREEN}│   └── Command: {command.to_gcode()}{Style.RESET_ALL}")
+            logger.validation_result(True, 1)
+            logger.step_success("Command validation successful", {"Command": command.to_gcode()})
             
             if is_complete:
-                print(f"{Fore.GREEN}└── [+] Reached completion command{Style.RESET_ALL}")
+                logger.step_info("Reached completion command")
             
             return ValidatedVisualCommandEvent(
                 command=command,
@@ -403,7 +395,7 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
             )
             
         except Exception as e:
-            print(f"{Fore.RED}├── [!] Visual command generation failed: {str(e)}{Style.RESET_ALL}")
+            logger.step_error("Visual command generation failed", {"Error": str(e)})
             
             return CommandValidationErrorEvent(
                 error=str(e),
@@ -416,12 +408,11 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
     @step
     async def update_plot_state(self, ctx: Context, ev: ValidatedVisualCommandEvent) -> Union[ContinueVisualGenerationEvent, PlotEnhancedCompleteEvent]:
         """Update plot state after command execution"""
-        print(f"{Fore.CYAN}[*] ├── Updating plot state for step {ev.step}{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[?] │   └── Executing command in visualization and updating plot context{Style.RESET_ALL}")
+        logger.step_start(f"Update Plot State #{ev.step}", "Executing command in visualization and updating plot context")
         
         # Add command to history if not COMPLETE
         if not ev.is_complete:
-            print(f"{Fore.CYAN}├── [*] Adding command to program{Style.RESET_ALL}")
+            logger.step_info("Adding command to program")
             await self.add_command_to_history(ctx, ev.command)
             
             # Add command to plot LLM history
@@ -430,14 +421,14 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
             # Execute command in visualizer
             try:
                 if self._current_figure is not None:
-                    print(f"{Fore.CYAN}├── [*] Executing command in visualization{Style.RESET_ALL}")
+                    logger.step_info("Executing command in visualization")
                     success = await self.visualizer.execute_command(
                         ev.command,
                         self._current_figure
                     )
                     
                     if success:
-                        print(f"{Fore.GREEN}│   └── Command executed successfully{Style.RESET_ALL}")
+                        logger.step_success("Command executed successfully")
                         
                         # Update plot context
                         updated_context = self.plot_llm.add_plot_context(self._current_figure)
@@ -448,18 +439,18 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
                         await ctx.set("plot_history", plot_history)
                         
                     else:
-                        print(f"{Fore.YELLOW}│   └── Command execution failed in visualizer{Style.RESET_ALL}")
+                        logger.step_warning("Command execution failed in visualizer")
                         
             except Exception as e:
-                print(f"{Fore.RED}├── [!] Plot state update failed: {str(e)}{Style.RESET_ALL}")
+                logger.step_error("Plot state update failed", {"Error": str(e)})
         
         # Check completion conditions
-        print(f"{Fore.CYAN}├── [*] Checking completion conditions{Style.RESET_ALL}")
+        logger.step_info("Checking completion conditions")
         
         commands = await ctx.get("commands", default=[])
         
         if ev.is_complete:
-            print(f"{Fore.GREEN}└── [+] Program complete via COMPLETE command{Style.RESET_ALL}")
+            logger.step_success("Program complete via COMPLETE command")
             
             # Get final plot state
             final_plot_state = None
@@ -468,7 +459,7 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
                     final_context = self.plot_llm.add_plot_context(self._current_figure)
                     final_plot_state = final_context.plot_state
                 except Exception as e:
-                    print(f"{Fore.YELLOW}    └── Failed to capture final plot state: {str(e)}{Style.RESET_ALL}")
+                    logger.step_warning("Failed to capture final plot state", {"Error": str(e)})
             
             return PlotEnhancedCompleteEvent(
                 prompt=ev.prompt,
@@ -479,7 +470,7 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
             
         elif not await self.check_step_limits(ctx, ev.step):
             max_steps = await ctx.get("max_steps")
-            print(f"{Fore.YELLOW}└── [!] Program complete via max steps limit ({max_steps}){Style.RESET_ALL}")
+            logger.step_warning(f"Program complete via max steps limit ({max_steps})")
             
             # Get final plot state
             final_plot_state = None
@@ -488,7 +479,7 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
                     final_context = self.plot_llm.add_plot_context(self._current_figure)
                     final_plot_state = final_context.plot_state
                 except Exception as e:
-                    print(f"{Fore.YELLOW}    └── Failed to capture final plot state: {str(e)}{Style.RESET_ALL}")
+                    logger.step_warning("Failed to capture final plot state", {"Error": str(e)})
             
             return PlotEnhancedCompleteEvent(
                 prompt=ev.prompt,
@@ -499,7 +490,7 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
         else:
             # Continue to next step
             next_step = ev.step + 1
-            print(f"{Fore.GREEN}└── [+] Continuing to step {next_step}{Style.RESET_ALL}")
+            logger.step_success(f"Continuing to step {next_step}")
             return ContinueVisualGenerationEvent(
                 prompt=ev.prompt,
                 step=next_step
@@ -508,17 +499,18 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
     @step
     async def continue_visual_generation(self, ctx: Context, ev: ContinueVisualGenerationEvent) -> AnalyzePlotStateEvent:
         """Continue to next visual command generation"""
-        print(f"{Fore.CYAN}[*] ├── Continuing visual generation (step {ev.step}){Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[?] │   └── Preparing for next command with updated visual context{Style.RESET_ALL}")
+        logger.step_start(f"Continue Visual Generation #{ev.step}", "Preparing for next command with updated visual context")
         
         # Get current program state
         commands = await ctx.get("commands", default=[])
         target_strategy = await ctx.get("target_strategy")
         
-        print(f"{Fore.CYAN}├── [*] Current program state{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}│   └── Commands: {len(commands)}, Strategy: {target_strategy.value if target_strategy else 'auto'}{Style.RESET_ALL}")
+        logger.step_info("Current program state", {
+            "Commands": len(commands),
+            "Strategy": target_strategy.value if target_strategy else 'auto'
+        })
         
-        print(f"{Fore.CYAN}└── [*] Moving to plot state analysis{Style.RESET_ALL}")
+        logger.step_info("Moving to plot state analysis")
         return AnalyzePlotStateEvent(
             prompt=ev.prompt,
             step=ev.step,
@@ -528,37 +520,31 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
     @step
     async def finalize_plot_program(self, ctx: Context, ev: PlotEnhancedCompleteEvent) -> StopEvent:
         """Finalize the plot-enhanced G-code program"""
-        print(f"{Fore.CYAN}╔══════════════════════════════════════════════╗{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}║   Plot-Enhanced G-Code Workflow Complete     ║{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}╚══════════════════════════════════════════════╝{Style.RESET_ALL}")
+        logger.step_start("Finalize Plot-Enhanced Program", "Creating final program with visual analysis metadata")
         
-        print(f"{Fore.CYAN}[*] ├── Finalizing plot-enhanced program{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[?] │   └── Creating final program with visual analysis metadata{Style.RESET_ALL}")
-        
-        print(f"{Fore.GREEN}├── [+] Drawing prompt: {ev.prompt}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}├── [+] Commands generated: {len(ev.commands)}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}├── [+] Steps taken: {ev.step_count}{Style.RESET_ALL}")
+        logger.step_info("Program summary", {
+            "Prompt": ev.prompt,
+            "Commands": len(ev.commands),
+            "Steps": ev.step_count
+        })
         
         # Get visual analysis statistics
         analysis_count = await ctx.get("visual_analysis_count", default=0)
         plot_history = await ctx.get("plot_history", default=[])
         
-        print(f"{Fore.GREEN}├── [+] Visual analyses performed: {analysis_count}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}├── [+] Plot states captured: {len(plot_history)}{Style.RESET_ALL}")
+        logger.step_info("Visual analysis statistics", {
+            "Analyses performed": analysis_count,
+            "Plot states captured": len(plot_history)
+        })
         
         # Create final program
         program = GCodeProgram(commands=ev.commands)
         gcode_text = program.to_gcode()
         
         # Show program preview
-        print(f"{Fore.CYAN}├── [*] Program preview (first 5 commands):{Style.RESET_ALL}")
-        preview_lines = min(5, len(ev.commands))
-        for i in range(preview_lines):
-            cmd = ev.commands[i]
-            print(f"{Fore.BLUE}│       {cmd.to_gcode()}{Style.RESET_ALL}")
-        
-        if len(ev.commands) > preview_lines:
-            print(f"{Fore.BLUE}│       ... ({len(ev.commands) - preview_lines} more commands) ...{Style.RESET_ALL}")
+        if ev.commands:
+            gcode_lines = [cmd.to_gcode() for cmd in ev.commands]
+            logger.gcode_preview(gcode_lines, "Generated G-code Program")
         
         # Save visualization if available
         visualization_path = None
@@ -567,9 +553,9 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 visualization_path = f"results/visualizations/plot_enhanced_{timestamp}.png"
                 self._current_figure.savefig(visualization_path, dpi=150, bbox_inches='tight')
-                print(f"{Fore.GREEN}├── [+] Visualization saved: {visualization_path}{Style.RESET_ALL}")
+                logger.step_success("Visualization saved", {"Path": visualization_path})
             except Exception as e:
-                print(f"{Fore.YELLOW}├── [!] Failed to save visualization: {str(e)}{Style.RESET_ALL}")
+                logger.step_warning("Failed to save visualization", {"Error": str(e)})
         
         # Create enhanced metadata
         metadata = {
@@ -604,7 +590,7 @@ class PlotEnhancedWorkflow(BasePromptPlotWorkflow):
             }
         }
         
-        print(f"{Fore.GREEN}└── [+] Plot-enhanced workflow complete{Style.RESET_ALL}")
+        logger.workflow_complete(True, len(ev.commands), [cmd.to_gcode() for cmd in ev.commands[:5]] if ev.commands else None)
         return StopEvent(result=result)
     
     async def generate_gcode(self, prompt: str, **kwargs) -> Dict[str, Any]:
@@ -644,21 +630,20 @@ async def main():
     from ..llm.providers import OllamaProvider, AzureOpenAIProvider
     import os
 
-    print(f"{Fore.CYAN}[*] ├── Starting plot-enhanced G-code workflow{Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}[?] │   └── Testing visual feedback integration with matplotlib{Style.RESET_ALL}")
+    logger.workflow_start("Plot-Enhanced G-Code Workflow", "Testing visual feedback integration with matplotlib")
     
     # Create LLM provider
-    print(f"{Fore.CYAN}├── [*] Initializing LLM provider{Style.RESET_ALL}")
+    logger.step_start("Initialize LLM Provider", "Setting up language model for plot-enhanced generation")
     
     if all(os.environ.get(key) for key in ["GPT4_API_KEY", "GPT4_API_VERSION", "GPT4_ENDPOINT"]):
-        print(f"{Fore.CYAN}│   └── Using Azure OpenAI{Style.RESET_ALL}")
+        logger.step_info("Using Azure OpenAI", {"Reason": "Environment variables detected"})
         llm_provider = AzureOpenAIProvider(
             model="gpt-4o",
             deployment_name="gpt-4o-gs",
             timeout=1220
         )
     else:
-        print(f"{Fore.CYAN}│   └── Using Ollama{Style.RESET_ALL}")
+        logger.step_info("Using Ollama", {"Reason": "Default fallback"})
         llm_provider = OllamaProvider(
             model="llama3.2:3b",
             request_timeout=10000
@@ -666,7 +651,8 @@ async def main():
     
     try:
         # Create workflow
-        print(f"{Fore.CYAN}├── [*] Creating plot-enhanced workflow{Style.RESET_ALL}")
+        logger.step_success("LLM provider initialized successfully")
+        logger.step_start("Create Plot-Enhanced Workflow", "Instantiating PlotEnhancedWorkflow")
         workflow = PlotEnhancedWorkflow(
             llm_provider=llm_provider,
             enable_grid=True,
@@ -682,7 +668,7 @@ async def main():
         ]
         
         for i, prompt in enumerate(test_prompts, 1):
-            print(f"{Fore.CYAN}├── [*] Test {i}: {prompt}{Style.RESET_ALL}")
+            logger.step_start(f"Test {i}", f"Running plot-enhanced workflow with prompt: {prompt}")
             
             try:
                 # Run workflow
@@ -700,22 +686,24 @@ async def main():
                     with open(filename, 'w') as f:
                         f.write(result.get("gcode", ""))
                     
-                    print(f"{Fore.GREEN}│   └── G-code saved: {filename}{Style.RESET_ALL}")
-                    print(f"{Fore.GREEN}│   └── Commands: {result.get('commands_count', 0)}{Style.RESET_ALL}")
-                    print(f"{Fore.GREEN}│   └── Visual analyses: {result.get('visual_metadata', {}).get('visual_analysis_count', 0)}{Style.RESET_ALL}")
+                    logger.step_success(f"Test {i} completed successfully", {
+                        "G-code file": filename,
+                        "Commands": result.get('commands_count', 0),
+                        "Visual analyses": result.get('visual_metadata', {}).get('visual_analysis_count', 0)
+                    })
                 
             except Exception as e:
-                print(f"{Fore.RED}│   └── Test {i} failed: {str(e)}{Style.RESET_ALL}")
+                logger.step_error(f"Test {i} failed", {"Error": str(e)})
         
         # Save workflow context
         context_path = f"results/logs/plot_enhanced_context_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         workflow.save_context(context_path)
-        print(f"{Fore.GREEN}└── [+] Workflow context saved: {context_path}{Style.RESET_ALL}")
+        logger.step_success("Workflow context saved", {"Path": context_path})
         
     except KeyboardInterrupt:
-        print(f"\n{Fore.YELLOW}[!] └── Operation interrupted by user{Style.RESET_ALL}")
+        logger.step_warning("Operation interrupted by user")
     except Exception as e:
-        print(f"{Fore.RED}[!] └── Error: {str(e)}{Style.RESET_ALL}")
+        logger.step_error("Workflow execution failed", {"Error": str(e)})
 
 
 if __name__ == "__main__":

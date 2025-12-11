@@ -17,7 +17,7 @@ from llama_index.core.workflow import (
 from typing import List, Optional, Union, Dict, Any, AsyncGenerator
 import json
 import asyncio
-from colorama import Fore, Style, init
+from rich.console import Console
 from datetime import datetime
 
 from ..core.base_workflow import BasePromptPlotWorkflow
@@ -29,7 +29,9 @@ from ..config import get_config
 from ..llm import LLMProvider
 
 # Initialize colorama for cross-platform color support
-init(autoreset=True)
+from ..utils.rich_logger import WorkflowLogger
+console = Console()
+logger = WorkflowLogger(console)
 
 # Prompt templates
 NEXT_COMMAND_TEMPLATE = """
@@ -191,7 +193,7 @@ class CommandStreamPredictor:
                     # Validate with GCodeCommand
                     command = GCodeCommand(**command_data)
                     
-                    print(f"{Fore.CYAN}Generated command: {command.to_gcode()}{Style.RESET_ALL}")
+                    logger.stream_command(len(history_list) + 1, command.to_gcode(), "success")
                     
                     # Yield valid command
                     yield command
@@ -208,7 +210,7 @@ class CommandStreamPredictor:
                     
                 except (json.JSONDecodeError, ValueError) as e:
                     # Invalid JSON or validation error, move to next potential JSON object
-                    print(f"{Fore.YELLOW}Skipping invalid command: {e}{Style.RESET_ALL}")
+                    logger.step_warning("Skipping invalid command", {"Error": str(e)})
                     start_idx = start + 1
     
     def _parse_commands_from_text(self, text: str) -> List[GCodeCommand]:
@@ -322,51 +324,44 @@ class AdvancedPlotterStreamWorkflow(BasePromptPlotWorkflow):
         Returns:
             GenerateCommandEvent, StreamCommandsEvent, or StopEvent
         """
-        print(f"{Fore.CYAN}╔══════════════════════════════════════════════╗{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}║     Advanced Plotter Workflow Initializing   ║{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}╚══════════════════════════════════════════════╝{Style.RESET_ALL}")
-        
-        print(f"{Fore.CYAN}[*] ├── Initializing advanced workflow{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[?] │   └── This step prepares the advanced workflow with enhanced features and capabilities.{Style.RESET_ALL}")
-        
         # Get prompt from event
         if not hasattr(ev, "prompt"):
-            print(f"{Fore.RED}[!] │   └── No drawing prompt specified - workflow stopped{Style.RESET_ALL}")
+            logger.step_error("No drawing prompt specified", {"Action": "Workflow stopped"})
             return StopEvent(result="No drawing prompt specified")
         
         prompt = ev.prompt
         max_steps = getattr(ev, "max_steps", self.max_steps)
         
+        logger.stream_start("Advanced Plotter Streaming", prompt, max_steps)
+        
         # Initialize context using base workflow method
         await self.initialize_context(ctx, prompt, max_steps=max_steps, enable_streaming=self.enable_streaming)
         
-        print(f"{Fore.GREEN}├── [+] Advanced workflow parameters initialized{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}├── [+] Drawing prompt: {prompt}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}├── [+] Max steps: {max_steps}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}├── [+] Streaming enabled: {self.enable_streaming}{Style.RESET_ALL}")
+        logger.step_success("Advanced workflow parameters initialized", {
+            "Prompt": prompt,
+            "Max steps": max_steps,
+            "Streaming enabled": self.enable_streaming
+        })
         
         # Connect to plotter with enhanced error handling
-        print(f"{Fore.CYAN}├── [*] Connecting to plotter with advanced interface{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}│   └── [?] Establishing enhanced connection with better error recovery and monitoring.{Style.RESET_ALL}")
+        logger.step_start("Connect to Plotter", "Establishing enhanced connection with advanced interface")
         
         try:
             if not await self.plotter.connect():
-                print(f"{Fore.RED}[!] │   └── Failed to connect to plotter - workflow stopped{Style.RESET_ALL}")
+                logger.step_error("Failed to connect to plotter", {"Action": "Workflow stopped"})
                 return StopEvent(result="Failed to connect to plotter")
         except Exception as e:
-            print(f"{Fore.RED}[!] │   └── Plotter connection error: {str(e)}{Style.RESET_ALL}")
+            logger.step_error("Plotter connection error", {"Error": str(e)})
             return StopEvent(result=f"Plotter connection error: {str(e)}")
         
-        print(f"{Fore.GREEN}├── [+] Successfully connected to advanced plotter interface{Style.RESET_ALL}")
+        logger.step_success("Successfully connected to advanced plotter interface")
         
         # Choose workflow mode based on streaming capability
         if self.enable_streaming and self.stream_predictor:
-            print(f"{Fore.CYAN}└── [*] Starting streaming command generation{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}    └── [?] Using advanced streaming mode for real-time command generation.{Style.RESET_ALL}")
+            logger.step_info("Starting streaming command generation", {"Mode": "Advanced streaming"})
             return StreamCommandsEvent(prompt=prompt)
         else:
-            print(f"{Fore.CYAN}└── [*] Starting sequential command generation{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}    └── [?] Using sequential mode for step-by-step command generation.{Style.RESET_ALL}")
+            logger.step_info("Starting sequential command generation", {"Mode": "Sequential fallback"})
             return GenerateCommandEvent(prompt=prompt, step=1)
     
     @step
@@ -380,8 +375,7 @@ class AdvancedPlotterStreamWorkflow(BasePromptPlotWorkflow):
         Returns:
             CommandStreamingCompleteEvent with execution results
         """
-        print(f"{Fore.CYAN}[*] ├── Starting advanced command streaming{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[?] │   └── This step uses advanced streaming to generate and execute commands in real-time.{Style.RESET_ALL}")
+        logger.step_start("Advanced Command Streaming", "Using advanced streaming to generate and execute commands in real-time")
         
         executed_commands = []
         commands_executed = 0
@@ -393,20 +387,18 @@ class AdvancedPlotterStreamWorkflow(BasePromptPlotWorkflow):
             history = await self.get_command_history(ctx)
             history_list = history.split('\n') if history != "No previous commands" else []
             
-            print(f"{Fore.CYAN}├── [*] Streaming commands from LLM{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}│   └── [?] Generating commands in real-time and executing them as they arrive.{Style.RESET_ALL}")
+            logger.step_info("Streaming commands from LLM", {"Mode": "Real-time generation and execution"})
             
             # Stream commands from LLM
             async for command in self.stream_predictor.stream_commands(ev.prompt, history_list):
-                print(f"{Fore.BLUE}├── [*] Received streamed command: {command.to_gcode()}{Style.RESET_ALL}")
+                logger.stream_command(commands_executed + 1, command.to_gcode(), "executing")
                 
                 # Check if this is a completion command
                 if command.command == "COMPLETE":
-                    print(f"{Fore.GREEN}│   └── Received completion command - ending stream{Style.RESET_ALL}")
+                    logger.step_info("Received completion command", {"Action": "Ending stream"})
                     break
                 
                 # Execute command on plotter
-                print(f"{Fore.CYAN}│   ├── Executing command on plotter{Style.RESET_ALL}")
                 try:
                     success = await self.plotter.send_command(command.to_gcode())
                     commands_executed += 1
@@ -415,34 +407,30 @@ class AdvancedPlotterStreamWorkflow(BasePromptPlotWorkflow):
                         success_count += 1
                         executed_commands.append(command)
                         await self.add_command_to_history(ctx, command)
-                        print(f"{Fore.GREEN}│   │   └── Command executed successfully{Style.RESET_ALL}")
+                        logger.plotter_command(command.to_gcode(), "ok", True)
                     else:
                         failed_count += 1
-                        print(f"{Fore.RED}│   │   └── Command execution failed{Style.RESET_ALL}")
+                        logger.plotter_command(command.to_gcode(), "failed", False)
                         
                 except Exception as e:
                     failed_count += 1
-                    print(f"{Fore.RED}│   │   └── Plotter error: {str(e)}{Style.RESET_ALL}")
+                    logger.step_error("Plotter communication error", {"Error": str(e)})
                 
                 # Update statistics
                 await self.update_statistics(ctx, success)
                 
                 # Check step limits
                 if commands_executed >= await ctx.get("max_steps"):
-                    print(f"{Fore.YELLOW}│   └── Reached maximum steps limit - ending stream{Style.RESET_ALL}")
+                    logger.step_warning("Reached maximum steps limit", {"Action": "Ending stream"})
                     break
                 
                 # Small delay to prevent overwhelming the plotter
                 await asyncio.sleep(0.1)
             
-            print(f"{Fore.GREEN}├── [+] Command streaming completed{Style.RESET_ALL}")
-            print(f"{Fore.GREEN}│   ├── Commands executed: {commands_executed}{Style.RESET_ALL}")
-            print(f"{Fore.GREEN}│   ├── Successful: {success_count}{Style.RESET_ALL}")
-            print(f"{Fore.GREEN}│   └── Failed: {failed_count}{Style.RESET_ALL}")
+            logger.execution_summary(commands_executed, success_count, failed_count, 0.0)
             
         except Exception as e:
-            print(f"{Fore.RED}├── [!] Streaming error: {str(e)}{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}│   └── [?] Continuing with commands that were successfully executed.{Style.RESET_ALL}")
+            logger.step_error("Streaming error", {"Error": str(e), "Action": "Continuing with executed commands"})
         
         # Update context with final counts
         await ctx.set("commands_executed", commands_executed)
@@ -466,15 +454,17 @@ class AdvancedPlotterStreamWorkflow(BasePromptPlotWorkflow):
         Returns:
             CommandExtractionDone with raw LLM output
         """
-        print(f"{Fore.CYAN}[*] ├── Generating command for step {ev.step} (sequential mode){Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[?] │   └── Using sequential generation as fallback when streaming is not available.{Style.RESET_ALL}")
+        logger.step_start(f"Generate Command #{ev.step}", "Using sequential generation as fallback")
         
         # Track retries for this specific step
         task_key = f"retries_step_{ev.step}"
         
         # Check retry limits using base workflow method
         if not await self.check_retry_limits(ctx, ev.step, task_key):
-            print(f"{Fore.RED}├── [!] Maximum retries exceeded for step {ev.step}{Style.RESET_ALL}")
+            logger.step_error("Maximum retries exceeded", {
+                "Step": ev.step,
+                "Action": "Using COMPLETE fallback"
+            })
             
             # Return a COMPLETE command to force termination
             fallback_result = json.dumps({"command": "COMPLETE"})
@@ -495,6 +485,9 @@ class AdvancedPlotterStreamWorkflow(BasePromptPlotWorkflow):
         )
         
         # Generate command using the LLM
+        llm_type = type(self.llm).__name__
+        logger.llm_call(llm_type, "", ev.prompt[:30])
+        
         try:
             if hasattr(self.llm, 'acomplete'):
                 response = await self.llm.acomplete(prompt)
@@ -503,7 +496,7 @@ class AdvancedPlotterStreamWorkflow(BasePromptPlotWorkflow):
                 response = self.llm.complete(prompt)
                 response_text = response.text
         except Exception as e:
-            print(f"{Fore.RED}├── [!] LLM call failed: {str(e)}{Style.RESET_ALL}")
+            logger.step_error("LLM call failed", {"Error": str(e)})
             # Fallback to COMPLETE command
             fallback_result = json.dumps({"command": "COMPLETE"})
             return CommandExtractionDone(
@@ -529,40 +522,31 @@ class AdvancedPlotterStreamWorkflow(BasePromptPlotWorkflow):
         Returns:
             StopEvent with execution results
         """
-        print(f"{Fore.CYAN}╔══════════════════════════════════════════════╗{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}║     Advanced Plotter Workflow Complete       ║{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}╚══════════════════════════════════════════════╝{Style.RESET_ALL}")
-        
-        print(f"{Fore.CYAN}[*] ├── Finalizing advanced plotter execution{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[?] │   └── This step processes advanced execution results and creates comprehensive reports.{Style.RESET_ALL}")
+        logger.step_start("Finalize Advanced Execution", "Processing advanced execution results and creating comprehensive reports")
         
         # Get final statistics
         success_count = await ctx.get("success_count", default=0)
         failed_count = await ctx.get("failed_count", default=0)
         
-        print(f"{Fore.GREEN}├── [+] Drawing prompt: {ev.prompt}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}├── [+] Commands executed: {ev.commands_executed}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}├── [+] Successful commands: {success_count}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}├── [+] Failed commands: {failed_count}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}├── [+] Success rate: {(success_count/max(1, ev.commands_executed))*100:.1f}%{Style.RESET_ALL}")
+        # Show execution summary
+        elapsed = 0.0  # This would be calculated properly in real implementation
+        logger.execution_summary(ev.commands_executed, success_count, failed_count, elapsed)
         
         # Disconnect from plotter with enhanced cleanup
-        print(f"{Fore.CYAN}├── [*] Disconnecting from advanced plotter interface{Style.RESET_ALL}")
+        logger.step_info("Disconnecting from advanced plotter interface")
         try:
             await self.plotter.disconnect()
-            print(f"{Fore.GREEN}│   └── Advanced plotter disconnected successfully{Style.RESET_ALL}")
+            logger.step_success("Advanced plotter disconnected successfully")
         except Exception as e:
-            print(f"{Fore.YELLOW}│   └── Plotter disconnect warning: {str(e)}{Style.RESET_ALL}")
+            logger.step_warning("Plotter disconnect warning", {"Error": str(e)})
         
         # Generate enhanced statistics
         if hasattr(self.plotter, 'get_drawing_stats'):
             try:
                 drawing_stats = self.plotter.get_drawing_stats()
-                print(f"{Fore.CYAN}├── [*] Drawing statistics:{Style.RESET_ALL}")
-                for key, value in drawing_stats.items():
-                    print(f"{Fore.BLUE}│   ├── {key}: {value}{Style.RESET_ALL}")
+                logger.step_info("Drawing statistics retrieved", drawing_stats)
             except Exception as e:
-                print(f"{Fore.YELLOW}│   └── Could not retrieve drawing stats: {str(e)}{Style.RESET_ALL}")
+                logger.step_warning("Could not retrieve drawing stats", {"Error": str(e)})
         
         # Create comprehensive result
         result = {
@@ -582,7 +566,7 @@ class AdvancedPlotterStreamWorkflow(BasePromptPlotWorkflow):
             }
         }
         
-        print(f"{Fore.GREEN}└── [+] Advanced plotter workflow execution complete{Style.RESET_ALL}")
+        logger.workflow_complete(True, ev.commands_executed)
         
         return StopEvent(result=result)
 
@@ -594,16 +578,15 @@ async def main():
     from ..plotter.simulated import SimulatedPlotter
     import os
 
-    print(f"{Fore.CYAN}[*] ├── Starting advanced plotter streaming workflow{Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}[?] │   └── This demonstrates the advanced streaming workflow with enhanced features.{Style.RESET_ALL}")
+    logger.workflow_start("Advanced Plotter Streaming Workflow", "Testing advanced streaming with enhanced features")
     
     # Create LLM instance
-    print(f"{Fore.CYAN}├── [*] Initializing language model{Style.RESET_ALL}")
+    logger.step_start("Initialize LLM", "Setting up language model for advanced streaming")
     llm = Ollama(model="llama3.2:3b", request_timeout=10000)
 
     # Optionally use Azure OpenAI if environment variables are set
     if all(os.environ.get(key) for key in ["GPT4_API_KEY", "GPT4_API_VERSION", "GPT4_ENDPOINT"]):
-        print(f"{Fore.CYAN}├── [*] Configuring Azure OpenAI for advanced features{Style.RESET_ALL}")
+        logger.step_info("Configuring Azure OpenAI for advanced features", {"Reason": "Environment variables detected"})
         llm = AzureOpenAI(
             model="gpt-4o",
             deployment_name="gpt-4o-gs",
@@ -614,7 +597,8 @@ async def main():
         )
     
     # Create advanced plotter instance
-    print(f"{Fore.CYAN}├── [*] Initializing advanced simulated plotter{Style.RESET_ALL}")
+    logger.step_success("LLM initialized successfully")
+    logger.step_start("Initialize Advanced Plotter", "Setting up advanced simulated plotter")
     plotter = SimulatedPlotter(
         commands_log_file=f"results/logs/advanced_streaming_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log",
         visualize=True,
@@ -623,7 +607,8 @@ async def main():
     
     try:
         # Create advanced workflow
-        print(f"{Fore.CYAN}├── [*] Creating advanced workflow instance{Style.RESET_ALL}")
+        logger.step_success("Advanced plotter initialized successfully")
+        logger.step_start("Create Advanced Workflow", "Instantiating AdvancedPlotterStreamWorkflow")
         workflow = AdvancedPlotterStreamWorkflow(
             llm=llm, 
             plotter=plotter, 
@@ -632,7 +617,7 @@ async def main():
         )
         
         # Generate workflow visualization
-        print(f"{Fore.CYAN}├── [*] Generating advanced workflow visualization{Style.RESET_ALL}")
+        logger.step_info("Generating advanced workflow visualization")
         try:
             from llama_index.utils.workflow import draw_all_possible_flows
             
@@ -641,34 +626,35 @@ async def main():
                 filename="results/visualizations/gcode_workflow_streamer_advanced.html"
             )
             
-            print(f"{Fore.GREEN}│   └── Advanced workflow visualization saved{Style.RESET_ALL}")
+            logger.step_success("Advanced workflow visualization saved", {"File": "results/visualizations/gcode_workflow_streamer_advanced.html"})
         except ImportError:
-            print(f"{Fore.YELLOW}│   └── Workflow visualization not available{Style.RESET_ALL}")
+            logger.step_warning("Workflow visualization not available", {"Reason": "llama_index.utils.workflow not found"})
         
         # Test with a more complex prompt
-        print(f"{Fore.CYAN}├── [*] Preparing advanced test prompt{Style.RESET_ALL}")
         prompt = "draw a detailed house with windows, door, chimney, and a small garden with flowers"
+        logger.step_info("Preparing advanced test prompt", {"Prompt": prompt})
         
         # Run advanced workflow
-        print(f"{Fore.CYAN}├── [*] Executing advanced streaming workflow{Style.RESET_ALL}")
+        logger.step_start("Execute Advanced Workflow", "Running advanced streaming workflow")
         result = await workflow.run(prompt=prompt, max_steps=50)
         
         # Display enhanced results
         if result:
-            print(f"\n{Fore.GREEN}[+] ├── Advanced workflow completed successfully{Style.RESET_ALL}")
-            print(f"{Fore.GREEN}[+] ├── Commands executed: {result.get('commands_executed', 0)}{Style.RESET_ALL}")
-            print(f"{Fore.GREEN}[+] ├── Success rate: {result.get('success_rate', 0):.1f}%{Style.RESET_ALL}")
-            print(f"{Fore.GREEN}[+] └── Workflow mode: {result.get('workflow_mode', 'unknown')}{Style.RESET_ALL}")
+            logger.step_success("Advanced workflow completed successfully", {
+                "Commands executed": result.get('commands_executed', 0),
+                "Success rate": f"{result.get('success_rate', 0):.1f}%",
+                "Workflow mode": result.get('workflow_mode', 'unknown')
+            })
     
     except KeyboardInterrupt:
-        print(f"\n{Fore.YELLOW}[!] └── Operation interrupted by user{Style.RESET_ALL}")
+        logger.step_warning("Operation interrupted by user", {"Action": "Workflow execution stopped"})
         # Ensure plotter is disconnected
         try:
             await plotter.disconnect()
         except:
             pass
     except Exception as e:
-        print(f"{Fore.RED}[!] └── Error: {str(e)}{Style.RESET_ALL}")
+        logger.step_error("Advanced workflow execution failed", {"Error": str(e)})
         # Ensure plotter is disconnected
         try:
             await plotter.disconnect()
