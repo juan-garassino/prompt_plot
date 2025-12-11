@@ -37,7 +37,6 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9", 
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -49,7 +48,7 @@ classifiers = [
     "Topic :: Artistic Software",
     "Typing :: Typed",
 ]
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 dependencies = [
     # Core framework
     "pydantic>=2.0.0,<3.0.0",
@@ -59,8 +58,11 @@ dependencies = [
     # LLM integration
     "llama-index-core>=0.10.0",
     "llama-index-llms-openai>=0.1.0",
+    "llama-index-llms-azure-openai>=0.1.0",
     "llama-index-llms-ollama>=0.1.0",
+    "llama-index-llms-gemini>=0.1.0",
     "openai>=1.0.0",
+    "google-generativeai>=0.3.0",
     
     # Async and networking
     "aiohttp>=3.8.0",
@@ -259,7 +261,7 @@ include = [
 # Tool configurations
 [tool.black]
 line-length = 100
-target-version = ['py38', 'py39', 'py310', 'py311', 'py312']
+target-version = ['py39', 'py310', 'py311', 'py312']
 include = '\.pyi?$'
 extend-exclude = '''
 /(
@@ -301,7 +303,7 @@ disable = [
 max-line-length = 100
 
 [tool.mypy]
-python_version = "3.8"
+python_version = "3.9"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
@@ -385,7 +387,7 @@ exclude_dirs = ["tests", "boilerplates", "examples"]
 skips = ["B101", "B601"]
 
 [tool.ruff]
-target-version = "py38"
+target-version = "py39"
 line-length = 100
 select = [
     "E",  # pycodestyle errors

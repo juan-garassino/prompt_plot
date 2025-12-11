@@ -44,7 +44,17 @@ class ValidationLevel(str, Enum):
 class LLMConfig:
     """Configuration for LLM providers"""
     # Provider settings
-    default_provider: str = "ollama"
+    default_provider: str = "openai"
+    
+    # OpenAI settings (standard OpenAI API)
+    openai_model: str = "gpt-4o-mini"
+    openai_api_key: Optional[str] = None
+    openai_timeout: int = 120
+    
+    # Gemini settings (Google AI)
+    gemini_model: str = "models/gemini-1.5-flash"
+    gemini_api_key: Optional[str] = None
+    gemini_timeout: int = 120
     
     # Azure OpenAI settings
     azure_model: str = "gpt-4o"
@@ -54,7 +64,7 @@ class LLMConfig:
     azure_endpoint: Optional[str] = None
     azure_timeout: int = 1220
     
-    # Ollama settings
+    # Ollama settings (local models)
     ollama_model: str = "llama3.2:3b"
     ollama_base_url: Optional[str] = None
     ollama_timeout: int = 10000
@@ -66,7 +76,15 @@ class LLMConfig:
     
     def __post_init__(self):
         """Post-initialization validation and environment variable loading"""
-        # Load from environment variables if not set
+        # Load OpenAI from environment
+        if self.openai_api_key is None:
+            self.openai_api_key = os.environ.get("OPENAI_API_KEY")
+        
+        # Load Gemini from environment
+        if self.gemini_api_key is None:
+            self.gemini_api_key = os.environ.get("GOOGLE_API_KEY")
+        
+        # Load Azure OpenAI from environment
         if self.azure_api_key is None:
             self.azure_api_key = os.environ.get("GPT4_API_KEY")
         if self.azure_api_version is None:
@@ -75,7 +93,7 @@ class LLMConfig:
             self.azure_endpoint = os.environ.get("GPT4_ENDPOINT")
         
         # Validate provider
-        valid_providers = ["azure_openai", "ollama"]
+        valid_providers = ["openai", "gemini", "azure_openai", "ollama"]
         if self.default_provider not in valid_providers:
             raise ValueError(f"Invalid LLM provider: {self.default_provider}. Must be one of {valid_providers}")
 
@@ -236,6 +254,14 @@ class PlotterConfig:
     pen_change_position: tuple = (10.0, 10.0, 10.0)  # Position for pen changes
     pen_up_delay: float = 0.2          # Delay after pen up (seconds)
     pen_down_delay: float = 0.2        # Delay after pen down (seconds)
+    
+    # Pen control G-code commands (customize for your plotter)
+    # Common options:
+    #   Servo-based: pen_up_command="M3 S0", pen_down_command="M3 S1000"
+    #   Z-axis based: pen_up_command="G1 Z5 F1000", pen_down_command="G1 Z0 F1000"
+    #   Standard spindle: pen_up_command="M5", pen_down_command="M3"
+    pen_up_command: str = "M5"         # G-code command to lift pen
+    pen_down_command: str = "M3 S1000" # G-code command to lower pen (with servo value)
     
     def __post_init__(self):
         """Post-initialization validation"""

@@ -249,38 +249,40 @@ class FileWatcher:
             self.logger.info("Stopped file watching")
 
 
-class ConfigFileHandler(FileSystemEventHandler):
-    """Handler for configuration file system events"""
-    
-    def __init__(self, runtime_manager: 'RuntimeConfigManager', config_file: Path):
-        """
-        Initialize file handler
+# Only define ConfigFileHandler if watchdog is available
+if WATCHDOG_AVAILABLE:
+    class ConfigFileHandler(FileSystemEventHandler):
+        """Handler for configuration file system events"""
         
-        Args:
-            runtime_manager: Runtime configuration manager
-            config_file: Configuration file to monitor
-        """
-        self.runtime_manager = runtime_manager
-        self.config_file = config_file
-        self.logger = logging.getLogger(f"{self.__class__.__name__}")
-    
-    def on_modified(self, event):
-        """Handle file modification events"""
-        if not event.is_directory and Path(event.src_path) == self.config_file:
-            self.logger.info(f"Configuration file modified: {event.src_path}")
+        def __init__(self, runtime_manager: 'RuntimeConfigManager', config_file: Path):
+            """
+            Initialize file handler
             
-            # Debounce rapid changes
-            asyncio.create_task(self._handle_file_change())
-    
-    async def _handle_file_change(self) -> None:
-        """Handle configuration file change with debouncing"""
-        # Wait a bit to avoid rapid successive changes
-        await asyncio.sleep(0.5)
+            Args:
+                runtime_manager: Runtime configuration manager
+                config_file: Configuration file to monitor
+            """
+            self.runtime_manager = runtime_manager
+            self.config_file = config_file
+            self.logger = logging.getLogger(f"{self.__class__.__name__}")
         
-        try:
-            await self.runtime_manager.reload_from_file(self.config_file)
-        except Exception as e:
-            self.logger.error(f"Failed to reload configuration: {str(e)}")
+        def on_modified(self, event):
+            """Handle file modification events"""
+            if not event.is_directory and Path(event.src_path) == self.config_file:
+                self.logger.info(f"Configuration file modified: {event.src_path}")
+                
+                # Debounce rapid changes
+                asyncio.create_task(self._handle_file_change())
+        
+        async def _handle_file_change(self) -> None:
+            """Handle configuration file change with debouncing"""
+            # Wait a bit to avoid rapid successive changes
+            await asyncio.sleep(0.5)
+            
+            try:
+                await self.runtime_manager.reload_from_file(self.config_file)
+            except Exception as e:
+                self.logger.error(f"Failed to reload configuration: {str(e)}")
 
 
 class RuntimeConfigManager:
