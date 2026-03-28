@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "promptplot"
 dynamic = ["version"]
-description = "Advanced LLM-controlled pen plotter system with computer vision integration"
+description = "LLM-driven pen plotter GCode generator"
 readme = "README.md"
 license = {file = "LICENSE"}
 authors = [
@@ -50,158 +50,57 @@ classifiers = [
 ]
 requires-python = ">=3.9"
 dependencies = [
-    # Core framework
+    # Core
     "pydantic>=2.0.0,<3.0.0",
-    "typing-extensions>=4.0.0",
-    "dataclasses-json>=0.5.7",
-    
+
     # LLM integration
     "llama-index-core>=0.10.0",
-    "llama-index-llms-openai>=0.1.0",
-    "llama-index-llms-azure-openai>=0.1.0",
     "llama-index-llms-ollama>=0.1.0",
-    "llama-index-llms-gemini>=0.1.0",
-    "openai>=1.0.0",
-    "google-generativeai>=0.3.0",
-    
-    # Async and networking
-    "aiohttp>=3.8.0",
-    "aiofiles>=0.8.0",
-    "httpx>=0.24.0",
-    
-    # Visualization and image processing
-    "matplotlib>=3.5.0,<4.0.0",
-    "pillow>=9.0.0,<11.0.0",
-    "numpy>=1.21.0,<2.0.0",
-    
+
     # Serial communication
     "pyserial>=3.5,<4.0",
     "pyserial-asyncio>=0.6",
-    
-    # File format support
-    "svglib>=1.4.0",
-    "ezdxf>=0.17.0",
-    "reportlab>=3.6.0",
-    
-    # Configuration and CLI
-    "pyyaml>=6.0",
+
+    # CLI and display
     "click>=8.0.0",
     "rich>=13.0.0",
-    
-    # Utilities
-    "python-dateutil>=2.8.0",
-    "packaging>=21.0",
+    "pyfiglet>=0.8",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
-# Development dependencies
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0.0",
-    "pytest-mock>=3.10.0",
-    "pytest-benchmark>=4.0.0",
-    "pytest-xdist>=3.0.0",
-    "pytest-html>=3.1.0",
-    "pytest-watch>=4.2.0",
     "black>=22.0.0",
-    "isort>=5.10.0",
-    "flake8>=4.0.0",
-    "pylint>=2.15.0",
     "mypy>=1.0.0",
-    "bandit>=1.7.0",
-    "safety>=2.0.0",
-    "pre-commit>=2.20.0",
-    "bump2version>=1.0.0",
-    "twine>=4.0.0",
-    "build>=0.8.0",
+    "ruff>=0.1.0",
 ]
 
-# Documentation
-docs = [
-    "sphinx>=5.0.0",
-    "sphinx-rtd-theme>=1.2.0",
-    "sphinx-autodoc-typehints>=1.19.0",
-    "myst-parser>=0.18.0",
-    "sphinx-copybutton>=0.5.0",
+viz = [
+    "matplotlib>=3.5.0",
+    "numpy>=1.21.0",
 ]
 
-# Azure OpenAI support
+openai = [
+    "llama-index-llms-openai>=0.1.0",
+    "openai>=1.0.0",
+]
+
 azure = [
-    "azure-identity>=1.12.0",
-    "azure-keyvault-secrets>=4.6.0",
-    "azure-storage-blob>=12.14.0",
+    "llama-index-llms-azure-openai>=0.1.0",
 ]
 
-# Local LLM support
-ollama = [
-    "ollama>=0.1.0",
-    "requests>=2.28.0",
+gemini = [
+    "llama-index-llms-gemini>=0.1.0",
+    "google-generativeai>=0.3.0",
 ]
 
-# Computer vision enhancements
 vision = [
-    "opencv-python>=4.5.0",
-    "scikit-image>=0.19.0",
-    "imageio>=2.22.0",
-]
-
-# Performance optimizations
-performance = [
-    "numba>=0.56.0",
-    "cython>=0.29.0",
-    "psutil>=5.9.0",
-    "memory-profiler>=0.60.0",
-    "line-profiler>=4.0.0",
-]
-
-# Hardware integration (Raspberry Pi)
-hardware = [
-    "RPi.GPIO>=0.7.1; platform_machine=='armv7l'",
-    "gpiozero>=1.6.2; platform_machine=='armv7l'", 
-    "adafruit-circuitpython-motor>=3.4.0; platform_machine=='armv7l'",
-]
-
-# Web interface (future)
-web = [
-    "fastapi>=0.95.0",
-    "uvicorn[standard]>=0.20.0",
-    "websockets>=10.4",
-    "jinja2>=3.1.0",
-    "python-multipart>=0.0.6",
-]
-
-# Testing utilities
-test = [
-    "pytest>=7.0.0",
-    "pytest-asyncio>=0.21.0",
-    "pytest-cov>=4.0.0",
-    "pytest-mock>=3.10.0",
-    "pytest-benchmark>=4.0.0",
-    "pytest-xdist>=3.0.0",
-    "pytest-html>=3.1.0",
-    "factory-boy>=3.2.0",
-    "faker>=18.0.0",
-]
-
-# All optional dependencies (excluding platform-specific)
-all = [
-    # Include all extras except hardware and platform-specific ones
-    "azure-identity>=1.12.0",
-    "azure-keyvault-secrets>=4.6.0", 
-    "azure-storage-blob>=12.14.0",
-    "ollama>=0.1.0",
-    "requests>=2.28.0",
-    "opencv-python>=4.5.0",
-    "scikit-image>=0.19.0",
-    "imageio>=2.22.0",
-    "numba>=0.56.0",
-    "psutil>=5.9.0",
-    "memory-profiler>=0.60.0",
-    "fastapi>=0.95.0",
-    "uvicorn[standard]>=0.20.0",
-    "websockets>=10.4",
-    "jinja2>=3.1.0",
+    "llama-index-multi-modal-llms-openai>=0.1.0",
+    "llama-index-multi-modal-llms-gemini>=0.1.0",
+    "Pillow>=9.0.0",
 ]
 
 [project.urls]
@@ -214,15 +113,6 @@ Funding = "https://github.com/sponsors/promptplot"
 
 [project.scripts]
 promptplot = "promptplot.cli:main"
-promptplot-config = "promptplot.config.cli:main"
-promptplot-convert = "promptplot.converters.cli:main"
-
-[project.gui-scripts]
-promptplot-gui = "promptplot.gui:main"
-
-[project.entry-points."promptplot.plugins"]
-# Plugin system for extensibility
-example-plugin = "promptplot.plugins.example:ExamplePlugin"
 
 # Hatch configuration for version management
 [tool.hatch.version]
@@ -236,8 +126,7 @@ version-file = "promptplot/_version.py"
 packages = ["promptplot"]
 exclude = [
     "tests/",
-    "boilerplates/",
-    "examples/",
+    "archive/",
     "docs/",
     "*.md",
     "Makefile",
@@ -247,13 +136,10 @@ exclude = [
 include = [
     "promptplot/",
     "tests/",
-    "examples/",
     "docs/",
     "README.md",
     "LICENSE",
-    "CHANGELOG.md",
     "pyproject.toml",
-    "requirements*.txt",
     "Makefile",
 ]
 
@@ -273,7 +159,7 @@ extend-exclude = '''
   | \.venv
   | build
   | dist
-  | boilerplates
+  | archive
 )/
 '''
 
@@ -285,7 +171,7 @@ include_trailing_comma = true
 force_grid_wrap = 0
 use_parentheses = true
 ensure_newline_before_comments = true
-skip_glob = ["boilerplates/*"]
+skip_glob = ["archive/*"]
 
 [tool.pylint.messages_control]
 disable = [
@@ -361,8 +247,7 @@ asyncio_mode = "auto"
 source = ["promptplot"]
 omit = [
     "*/tests/*",
-    "*/boilerplates/*",
-    "*/examples/*",
+    "*/archive/*",
     "*/__pycache__/*",
     "*/.*",
 ]
@@ -382,7 +267,7 @@ exclude_lines = [
 ]
 
 [tool.bandit]
-exclude_dirs = ["tests", "boilerplates", "examples"]
+exclude_dirs = ["tests", "archive"]
 skips = ["B101", "B601"]
 
 [tool.ruff]
@@ -436,9 +321,6 @@ include = [
     "promptplot/**/*.yaml",
     "promptplot/**/*.json",
     "promptplot/**/*.txt",
-    "promptplot/config/defaults/*",
-    "promptplot/config/profiles/*",
-    "promptplot/templates/*",
 ]
 exclude = [
     "*.pyc",
@@ -467,11 +349,7 @@ dependencies = [
 ]
 
 [tool.hatch.envs.docs]
-dependencies = [
-    "sphinx>=5.0.0",
-    "sphinx-rtd-theme>=1.2.0",
-    "myst-parser>=0.18.0",
-]
+dependencies = []
 
 [tool.hatch.envs.lint]
 dependencies = [
