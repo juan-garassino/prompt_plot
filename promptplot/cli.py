@@ -54,8 +54,13 @@ def cli(ctx, config_path, debug):
 @click.option("--style", "style", default="artistic",
               type=click.Choice(["artistic", "precise", "sketch", "minimal"]),
               help="Drawing style preset")
+@click.option("--score", "show_score", is_flag=True, help="Show quality score")
+@click.option("--multipass", is_flag=True, help="Enable multi-pass generation")
+@click.option("--style-from", "style_from", default=None, type=click.Path(exists=True),
+              help="Reference GCode file for style transfer")
 @click.pass_context
-def generate(ctx, prompt, provider, model, output, visualize, simulate, reference, style):
+def generate(ctx, prompt, provider, model, output, visualize, simulate, reference, style,
+             show_score, multipass, style_from):
     """Generate GCode from a text prompt via LLM."""
     config = ctx.obj["config"]
 
@@ -66,6 +71,8 @@ def generate(ctx, prompt, provider, model, output, visualize, simulate, referenc
     if reference:
         config.vision.enabled = True
         config.vision.reference_image = reference
+    if multipass:
+        config.workflow.multipass.enabled = True
 
     logger.cli_header("3.0.0")
 
@@ -73,8 +80,20 @@ def generate(ctx, prompt, provider, model, output, visualize, simulate, referenc
         from .workflow import BatchGCodeWorkflow
         from .llm import get_llm_provider
 
+        # Style transfer from reference GCode
+        _style_profile = None
+        if style_from:
+            from .pipeline import FilePipeline
+            from .scoring import extract_style_profile
+            fp = FilePipeline(config)
+            ref_program = fp.load_gcode_file(style_from)
+            _style_profile = extract_style_profile(ref_program, config.paper)
+
         llm = get_llm_provider(config.llm)
-        wf = BatchGCodeWorkflow(llm=llm, config=config, style=style)
+        wf = BatchGCodeWorkflow(
+            llm=llm, config=config, style=style,
+            style_profile=_style_profile,
+        )
         result = await wf.run(prompt=prompt)
 
         gcode_text = result["gcode"]
@@ -91,17 +110,24 @@ def generate(ctx, prompt, provider, model, output, visualize, simulate, referenc
         Path(output).write_text(gcode_text)
         logger.step_success(f"GCode saved to {output}")
 
-        if visualize:
-            try:
-                from .visualizer import GCodeVisualizer
-                from .models import GCodeProgram
-                program = GCodeProgram(**result["program"])
-                viz = GCodeVisualizer(config)
-                preview_path = output.replace(".gcode", ".png")
-                viz.preview(program, preview_path)
-                logger.step_success(f"Preview saved to {preview_path}")
-            except ImportError:
-                logger.step_warning("matplotlib not available for visualization")
+        if visualize or show_score:
+            from .models import GCodeProgram
+            program = GCodeProgram(**result["program"])
+
+            if show_score:
+                from .scoring import score_gcode
+                report = score_gcode(program, config.paper)
+                _print_score(report)
+
+            if visualize:
+                try:
+                    from .visualizer import GCodeVisualizer
+                    viz = GCodeVisualizer(config)
+                    preview_path = output.replace(".gcode", ".png")
+                    viz.preview(program, preview_path)
+                    logger.step_success(f"Preview saved to {preview_path}")
+                except ImportError:
+                    logger.step_warning("matplotlib not available for visualization")
 
     asyncio.run(_run())
 
@@ -154,12 +180,45 @@ def plot(ctx, filepath, port, baud, simulate, brush, preview_only, output):
     asyncio.run(_run())
 
 
+def _print_score(report):
+    """Print a QualityReport as a formatted table."""
+    table = Table(title="Quality Score")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green")
+    d = report.to_dict()
+    for k, v in d.items():
+        label = k.replace("_", " ").title()
+        if k == "grade":
+            color = {"A": "bold green", "B": "green", "C": "yellow", "D": "red", "F": "bold red"}.get(v, "white")
+            table.add_row(label, f"[{color}]{v}[/{color}]")
+        elif isinstance(v, float):
+            table.add_row(label, f"{v:.3f}")
+        else:
+            table.add_row(label, str(v))
+    console.print(table)
+
+
+@cli.command()
+@click.argument("filepath")
+@click.pass_context
+def score(ctx, filepath):
+    """Score a GCode file for quality metrics."""
+    config = ctx.obj["config"]
+    from .pipeline import FilePipeline
+    from .scoring import score_gcode
+    pipeline = FilePipeline(config)
+    program = pipeline.load_gcode_file(filepath)
+    report = score_gcode(program, config.paper)
+    _print_score(report)
+
+
 @cli.command()
 @click.argument("filepath")
 @click.option("--output", "-o", default=None, help="Output PNG path")
 @click.option("--stats", is_flag=True, help="Show statistics")
+@click.option("--score", "show_score", is_flag=True, help="Show quality score")
 @click.pass_context
-def preview(ctx, filepath, output, stats):
+def preview(ctx, filepath, output, stats, show_score):
     """Preview/visualize a GCode file."""
     config = ctx.obj["config"]
 
@@ -189,8 +248,13 @@ def preview(ctx, filepath, output, stats):
                 table.add_row(k.replace("_", " ").title(), str(v))
         if "bounds" in s:
             b = s["bounds"]
-            table.add_row("Bounds", f"X[{b[0]:.1f}–{b[1]:.1f}] Y[{b[2]:.1f}–{b[3]:.1f}]")
+            table.add_row("Bounds", f"X[{b.get('min_x', 0):.1f}–{b.get('max_x', 0):.1f}] Y[{b.get('min_y', 0):.1f}–{b.get('max_y', 0):.1f}]")
         console.print(table)
+
+    if show_score:
+        from .scoring import score_gcode
+        report = score_gcode(program, config.paper)
+        _print_score(report)
 
 
 @cli.group(name="config")

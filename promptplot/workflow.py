@@ -25,6 +25,8 @@ from .llm import (
     GCODE_PROGRAM_TEMPLATE, REFLECTION_PROMPT,
 )
 from .postprocess import run_pipeline
+from .scoring import score_gcode, QualityReport
+from .memory import DrawingMemory
 from .logger import WorkflowLogger
 
 from rich.console import Console
@@ -130,6 +132,68 @@ def _check_bounds(program: GCodeProgram, config: PromptPlotConfig) -> Optional[s
 # BatchGCodeWorkflow
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Diagnostic retry (Phase 3)
+# ---------------------------------------------------------------------------
+
+def diagnose_failure(program: Optional[GCodeProgram], config: PromptPlotConfig,
+                     error: Optional[str] = None) -> str:
+    """Generate a targeted diagnosis message for failed GCode generation."""
+    hints = []
+
+    if error:
+        hints.append(f"Previous error: {error}")
+
+    if program is not None:
+        n = len(program.commands)
+        if n < 10:
+            hints.append(f"Generate at least 30 GCode commands. Your previous attempt had only {n}.")
+
+        drawing = [c for c in program.commands if c.command == "G1"]
+        if not drawing:
+            hints.append("Your output must contain G1 drawing commands, not just travel moves.")
+
+        # Check bounds
+        x0, y0, x1, y1 = config.paper.get_drawable_area()
+        oob = []
+        for cmd in program.commands:
+            if cmd.x is not None and (cmd.x < 0 or cmd.x > config.paper.width):
+                oob.append(f"X={cmd.x:.1f}")
+            if cmd.y is not None and (cmd.y < 0 or cmd.y > config.paper.height):
+                oob.append(f"Y={cmd.y:.1f}")
+        if oob:
+            hints.append(
+                f"Keep all coordinates within X:{x0:.1f}-{x1:.1f}, Y:{y0:.1f}-{y1:.1f}. "
+                f"Out-of-range values: {', '.join(oob[:5])}"
+            )
+
+        # Check pen lifts
+        has_m5 = any(c.command == "M5" for c in program.commands)
+        has_m3 = any(c.command == "M3" for c in program.commands)
+        if not has_m5 or not has_m3:
+            s_val = config.pen.pen_down_s_value
+            hints.append(
+                f"Add M5 (pen up) before G0 travel moves and M3 S{s_val} "
+                f"(pen down) before G1 draw moves."
+            )
+
+        # Check utilization
+        try:
+            report = score_gcode(program, config.paper)
+            if report.canvas_utilization < 0.2:
+                pct = int(report.canvas_utilization * 100)
+                hints.append(
+                    f"Use more of the canvas. Your drawing only covers {pct}% — aim for 60-80%."
+                )
+        except Exception:
+            pass
+
+    if not hints:
+        hints.append("Review the error and try again with valid GCode.")
+
+    return "\n".join(f"- {h}" for h in hints)
+
+
 class BatchGCodeWorkflow(Workflow):
     """Generate a full GCode program in one LLM call, validate, post-process."""
 
@@ -137,13 +201,16 @@ class BatchGCodeWorkflow(Workflow):
 
     def __init__(self, llm: Optional[LLMProvider] = None,
                  config: Optional[PromptPlotConfig] = None,
-                 max_retries: int = 3, style: str = "artistic", **kwargs):
+                 max_retries: int = 3, style: str = "artistic",
+                 style_profile: Optional[Any] = None, **kwargs):
         kwargs.setdefault("timeout", 10000)
         super().__init__(**kwargs)
         self.config = config or get_config()
         self.llm = llm or get_llm_provider(self.config.llm)
         self.max_retries = max_retries
         self.style = style
+        self.style_profile = style_profile
+        self.memory = DrawingMemory()
 
     @step
     async def start(self, ctx: Context, ev: StartEvent) -> GenerateGCodeEvent:
@@ -178,7 +245,17 @@ class BatchGCodeWorkflow(Workflow):
 
         if isinstance(ev, GCodeValidationErrorEvent):
             logger.retry_attempt(retries, max_r, "Validation failed")
+            # Use diagnostic retry instead of generic reflection
+            diag_program = None
+            try:
+                diag_result = _validate_output(ev.issues)
+                if isinstance(diag_result, GCodeProgram):
+                    diag_program = diag_result
+            except Exception:
+                pass
+            diagnosis = diagnose_failure(diag_program, self.config, ev.error)
             prompt = build_reflection_prompt(ev.issues, ev.error, self.config.paper)
+            prompt += f"\n\nSPECIFIC ISSUES:\n{diagnosis}\n"
         else:
             # Use multimodal if reference image is provided
             if (self.config.vision.enabled and self.config.vision.reference_image):
@@ -192,8 +269,19 @@ class BatchGCodeWorkflow(Workflow):
                 logger.step_success("LLM response received (multimodal)")
                 return GCodeExtractionDone(output=response, prompt=ev.prompt)
             else:
+                # Check memory for similar past drawing
+                memory_entry = None
+                try:
+                    similar = self.memory.find_similar(ev.prompt, top_k=1)
+                    if similar:
+                        memory_entry = similar[0]
+                except Exception:
+                    pass
+
                 prompt = build_gcode_prompt(
-                    ev.prompt, self.config.paper, self.config.pen, self.style
+                    ev.prompt, self.config.paper, self.config.pen, self.style,
+                    style_profile=self.style_profile,
+                    memory_entry=memory_entry,
                 )
 
         logger.llm_call(type(self.llm).__name__, "", ev.prompt[:50])
@@ -293,7 +381,38 @@ class BatchGCodeWorkflow(Workflow):
     @step
     async def end(self, ctx: Context, ev: ValidatedGCodeEvent) -> StopEvent:
         logger.step_start("Post-Processing")
-        optimized = run_pipeline(ev.program, self.config)
+
+        # Multi-pass generation
+        program = ev.program
+        if self.config.workflow.multipass.enabled:
+            try:
+                logger.step_info("Multi-pass: generating detail pass")
+                outline_gcode = program.to_gcode()
+                detail_prompt = build_gcode_prompt(
+                    ev.prompt, self.config.paper, self.config.pen,
+                    self.config.workflow.multipass.detail_style,
+                    style_profile=self.style_profile,
+                )
+                detail_prompt += (
+                    f"\n\nAn outline has already been drawn:\n{outline_gcode[:500]}\n\n"
+                    "Add detail, texture, and fill to complement this outline. "
+                    "Do NOT redraw the outline. Return complete JSON with 'commands' list."
+                )
+                response = await self.llm.acomplete(detail_prompt)
+                detail_result = _validate_output(response)
+                if isinstance(detail_result, GCodeProgram):
+                    # Merge: outline + detail
+                    merged_cmds = list(program.commands[:-1])  # drop final M5/G0
+                    merged_cmds.extend(detail_result.commands)
+                    program = GCodeProgram(
+                        commands=merged_cmds,
+                        metadata={**(program.metadata or {}), "multipass": True},
+                    )
+                    logger.step_success(f"Multi-pass merged: {len(program.commands)} commands")
+            except Exception as e:
+                logger.step_warning(f"Multi-pass detail failed, using outline only: {e}")
+
+        optimized = run_pipeline(program, self.config)
         gcode_text = optimized.to_gcode()
         gcode_lines = gcode_text.split("\n")
 
@@ -302,6 +421,22 @@ class BatchGCodeWorkflow(Workflow):
             "Final commands": len(optimized.commands),
         })
         logger.workflow_complete(True, len(optimized.commands), gcode_lines)
+
+        # Save to memory if grade is A or B
+        try:
+            report = score_gcode(optimized, self.config.paper)
+            if report.grade in ("A", "B"):
+                self.memory.save(
+                    prompt=ev.prompt,
+                    gcode=gcode_text,
+                    grade=report.grade,
+                    canvas_utilization=report.canvas_utilization,
+                    draw_travel_ratio=report.draw_travel_ratio,
+                    command_count=report.command_count,
+                )
+                logger.step_info(f"Drawing saved to memory (grade {report.grade})")
+        except Exception:
+            pass
 
         return StopEvent(result={
             "prompt": ev.prompt,

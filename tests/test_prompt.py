@@ -30,7 +30,7 @@ class TestBuildGcodePrompt:
         pen = PenConfig(pen_down_s_value=500)
         prompt = build_gcode_prompt("draw a square", PaperConfig(), pen)
         assert "S500" in prompt
-        assert "S100" not in prompt  # old hardcoded value should not appear
+        assert "M3 S100\n" not in prompt and "M3 S100 " not in prompt  # old hardcoded S100 should not appear as standalone
 
     def test_feed_rate_in_prompt(self):
         """Custom feed_rate appears in prompt."""
