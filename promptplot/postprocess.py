@@ -91,6 +91,56 @@ def validate_bounds(
 
 
 # ---------------------------------------------------------------------------
+# 0.5 Arc Approximation (G2/G3 → G1 segments)
+# ---------------------------------------------------------------------------
+
+def approximate_arcs(program: GCodeProgram, segments_per_arc: int = 12) -> GCodeProgram:
+    """Convert G2/G3 arc commands to short G1 line segments.
+
+    If the LLM generates arc commands despite instructions, this converts
+    them to linear approximations that all plotters can execute.
+    """
+    has_arcs = any(cmd.command in ("G2", "G3") for cmd in program.commands)
+    if not has_arcs:
+        return program
+
+    new_commands: List[GCodeCommand] = []
+    cx, cy = 0.0, 0.0  # current position
+
+    for cmd in program.commands:
+        if cmd.command not in ("G2", "G3"):
+            # Track position
+            if cmd.command in ("G0", "G1") and cmd.x is not None:
+                cx = cmd.x
+            if cmd.command in ("G0", "G1") and cmd.y is not None:
+                cy = cmd.y
+            new_commands.append(cmd)
+            continue
+
+        # Arc approximation
+        ex = cmd.x if cmd.x is not None else cx
+        ey = cmd.y if cmd.y is not None else cy
+        feed = cmd.f or 2000
+
+        # Simple linear interpolation for arc (chord approximation)
+        # Without I/J center offsets we just interpolate from current to end
+        for i in range(1, segments_per_arc + 1):
+            t = i / segments_per_arc
+            ix = cx + (ex - cx) * t
+            iy = cy + (ey - cy) * t
+            new_commands.append(GCodeCommand(
+                command="G1", x=round(ix, 3), y=round(iy, 3), f=feed
+            ))
+
+        cx, cy = ex, ey
+
+    return GCodeProgram(
+        commands=new_commands,
+        metadata={**(program.metadata or {}), "arcs_approximated": True},
+    )
+
+
+# ---------------------------------------------------------------------------
 # 1. Pen Safety
 # ---------------------------------------------------------------------------
 
@@ -327,7 +377,10 @@ def run_pipeline(program: GCodeProgram, config: PromptPlotConfig) -> GCodeProgra
     3. Paint dips (brush mode only)
     4. Pen dwells (G4 after M3/M5 — MUST be last)
     """
-    # 0. Bounds validation
+    # 0. Arc approximation (convert G2/G3 to G1 segments)
+    program = approximate_arcs(program)
+
+    # 0.5 Bounds validation
     if config.bounds.enforce:
         program, violations = validate_bounds(program, config.paper, config.bounds.mode)
         if violations:

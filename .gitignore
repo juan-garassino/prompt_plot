@@ -15,7 +15,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
 lib64/
 parts/
 sdist/
@@ -28,10 +27,9 @@ MANIFEST
 
 # Virtual environments
 venv/
+.venv/
 env/
 ENV/
-env.bak/
-venv.bak/
 
 # IDE
 .vscode/settings.json
@@ -40,19 +38,8 @@ venv.bak/
 *.swo
 *~
 
-# Results and outputs (keep structure but ignore contents)
-results/gcode/*.gcode
-results/gcode/*.nc
-results/gcode/*.txt
-results/images/*.png
-results/images/*.jpg
-results/images/*.jpeg
-results/visualizations/*.png
-results/visualizations/*.html
-results/reports/*.pdf
-results/reports/*.html
-results/logs/*.log
-results/logs/*.txt
+# Output (generated GCode, previews)
+output/
 
 # Temporary files
 *.tmp
@@ -65,8 +52,12 @@ Thumbs.db
 .coverage
 htmlcov/
 .tox/
+test-results/
 
 # MyPy
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+# Build artifacts
+*.egg-info/

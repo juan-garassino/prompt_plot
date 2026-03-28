@@ -60,6 +60,9 @@ try:
 except ImportError:
     AZURE_MULTIMODAL_AVAILABLE = False
 
+import json as _json
+from pathlib import Path as _Path
+
 from .config import LLMConfig, PaperConfig, PenConfig
 
 
@@ -390,7 +393,31 @@ FEW_SHOT_EXAMPLES = {
     },
 }
 
-# Keywords that select geometric vs organic examples
+# ---------------------------------------------------------------------------
+# JSON-based few-shot examples (Phase 2)
+# ---------------------------------------------------------------------------
+
+def _load_examples_json() -> list:
+    """Load curated examples from examples.json."""
+    examples_path = _Path(__file__).parent / "examples.json"
+    if not examples_path.exists():
+        return []
+    try:
+        with open(examples_path, "r") as f:
+            return _json.load(f)
+    except Exception:
+        return []
+
+_CACHED_EXAMPLES: Optional[list] = None
+
+def _get_examples() -> list:
+    global _CACHED_EXAMPLES
+    if _CACHED_EXAMPLES is None:
+        _CACHED_EXAMPLES = _load_examples_json()
+    return _CACHED_EXAMPLES
+
+
+# Keywords that select geometric vs organic examples (fallback)
 _GEOMETRIC_KEYWORDS = {"square", "rectangle", "triangle", "grid", "line", "hexagon", "polygon",
                        "geometric", "pattern", "maze", "box", "diamond"}
 _ORGANIC_KEYWORDS = {"flower", "tree", "leaf", "face", "animal", "cat", "dog", "bird", "fish",
@@ -398,13 +425,55 @@ _ORGANIC_KEYWORDS = {"flower", "tree", "leaf", "face", "animal", "cat", "dog", "
 
 
 def _select_example(user_prompt: str) -> Optional[str]:
-    """Select a relevant few-shot example based on keywords in the prompt."""
+    """Select a relevant few-shot example based on keywords in the prompt.
+
+    First tries JSON examples with keyword matching, then falls back to
+    the inline FEW_SHOT_EXAMPLES dict.
+    """
     words = set(user_prompt.lower().split())
+    # Try JSON examples first
+    examples = _get_examples()
+    if examples:
+        best_match = None
+        best_score = 0
+        for ex in examples:
+            kw_set = set(ex.get("keywords", []))
+            overlap = len(words & kw_set)
+            if overlap > best_score:
+                best_score = overlap
+                best_match = ex["name"]
+        if best_match:
+            return best_match
+
+    # Fallback to original keyword sets
     if words & _ORGANIC_KEYWORDS:
         return "organic"
     if words & _GEOMETRIC_KEYWORDS:
         return "geometric"
     return None
+
+
+# ---------------------------------------------------------------------------
+# Complexity estimation (Phase 2)
+# ---------------------------------------------------------------------------
+
+_COMPLEX_KEYWORDS = {"detailed", "complex", "intricate", "cityscape", "landscape",
+                     "portrait", "realistic", "elaborate", "dense", "fine"}
+_SIMPLE_KEYWORDS = {"simple", "basic", "single", "minimal", "one", "just"}
+
+
+def estimate_complexity(prompt: str) -> str:
+    """Estimate prompt complexity from keywords and word count.
+
+    Returns "simple", "moderate", or "complex".
+    """
+    words = prompt.lower().split()
+    word_set = set(words)
+    if word_set & _COMPLEX_KEYWORDS or len(words) > 15:
+        return "complex"
+    if word_set & _SIMPLE_KEYWORDS or len(words) <= 4:
+        return "simple"
+    return "moderate"
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +518,8 @@ def build_gcode_prompt(
     paper: PaperConfig,
     pen: PenConfig,
     style: str = "artistic",
+    style_profile: Optional[Any] = None,
+    memory_entry: Optional[Any] = None,
 ) -> str:
     """Build a GCode generation prompt using actual config values."""
     x0, y0, x1, y1 = paper.get_drawable_area()
@@ -472,10 +543,44 @@ def build_gcode_prompt(
 
     style_block = STYLE_PRESETS.get(style, STYLE_PRESETS["artistic"])
 
-    # Optionally include a few-shot example
+    # Adaptive detail based on complexity
+    complexity = estimate_complexity(user_prompt)
+    complexity_block = ""
+    if complexity == "complex":
+        complexity_block = """
+COMPLEXITY: This is a detailed prompt. Generate at least 100 GCode commands.
+Use 80%+ of the canvas. Use multiple stroke densities for detail and texture.
+"""
+    elif complexity == "simple":
+        complexity_block = """
+COMPLEXITY: Keep it simple. 20-40 GCode commands should suffice.
+"""
+
+    # Curve guidance
+    curve_block = """
+For circles and curves: approximate with 12+ short G1 segments. Example circle of radius 20mm centered at (100, 150):
+G1 X120.0 Y150.0, G1 X117.3 Y160.0, G1 X110.0 Y167.3, G1 X100.0 Y170.0,
+G1 X90.0 Y167.3, G1 X82.7 Y160.0, G1 X80.0 Y150.0, G1 X82.7 Y140.0,
+G1 X90.0 Y132.7, G1 X100.0 Y130.0, G1 X110.0 Y132.7, G1 X117.3 Y140.0, G1 X120.0 Y150.0
+Do NOT use G2/G3 arc commands.
+"""
+
+    # Optionally include a few-shot example (try JSON examples first, then inline)
     example_key = _select_example(user_prompt)
     few_shot_block = ""
-    if example_key and example_key in FEW_SHOT_EXAMPLES:
+    json_examples = _get_examples()
+    json_match = None
+    if example_key and json_examples:
+        json_match = next((ex for ex in json_examples if ex["name"] == example_key), None)
+
+    if json_match:
+        few_shot_block = f"""
+REFERENCE EXAMPLE ({json_match['prompt']}):
+{json_match['gcode'][:500]}
+
+Use a similar structure but adapt to the actual prompt and canvas dimensions below.
+"""
+    elif example_key and example_key in FEW_SHOT_EXAMPLES:
         import json
         ex = FEW_SHOT_EXAMPLES[example_key]
         few_shot_block = f"""
@@ -484,6 +589,24 @@ REFERENCE EXAMPLE ({ex['description']}):
 
 Use a similar structure but adapt to the actual prompt and canvas dimensions below.
 """
+
+    # Memory-based few-shot (from past successful drawings)
+    memory_block = ""
+    if memory_entry is not None:
+        gcode_preview = memory_entry.gcode[:600]
+        memory_block = f"""
+SUCCESSFUL PREVIOUS DRAWING (similar request: "{memory_entry.prompt}"):
+{gcode_preview}
+
+Use a similar approach adapted to the current prompt.
+"""
+
+    # Style profile constraints
+    style_profile_block = ""
+    if style_profile is not None:
+        hints = style_profile.to_prompt_hints()
+        if hints:
+            style_profile_block = f"\nSTYLE CONSTRAINTS (from reference): {hints}\n"
 
     prompt = f"""Create G-code for a pen plotter. Prompt: {user_prompt}
 
@@ -507,7 +630,8 @@ PEN CONTROL RULES (critical):
   3. Before drawing with G1, ensure pen is DOWN (M3 S{s_val}).
   4. The sequence for each stroke is: M5 -> G0 (move to start) -> M3 S{s_val} -> G1 ... G1 (draw) -> M5
   5. ALWAYS end with: M5 then G0 X0 Y0 (pen up, return home).
-{few_shot_block}
+{few_shot_block}{memory_block}{style_profile_block}{complexity_block}
+{curve_block}
 {style_block}
 
 Return a JSON with "commands" list. Example:

@@ -178,12 +178,21 @@ class VisualizationConfig:
 
 
 @dataclass
+class MultiPassConfig:
+    """Multi-pass generation configuration."""
+    enabled: bool = False
+    outline_style: str = "precise"
+    detail_style: str = "artistic"
+
+
+@dataclass
 class WorkflowConfig:
     """Workflow execution configuration."""
     max_retries: int = 3
     max_steps: int = 50
     step_timeout: float = 30.0
     output_directory: str = "output"
+    multipass: MultiPassConfig = field(default_factory=MultiPassConfig)
 
 
 @dataclass
