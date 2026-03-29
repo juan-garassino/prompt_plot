@@ -52,6 +52,11 @@ class LLMConfig:
     ollama_timeout: int = 10000
     ollama_vision_model: str = "llama3.2-vision:11b"
 
+    anthropic_model: str = "claude-sonnet-4-20250514"
+    anthropic_api_key: Optional[str] = None
+    anthropic_timeout: int = 120
+    anthropic_max_tokens: int = 4096
+
     max_retries: int = 3
     temperature: float = 0.1
 
@@ -66,7 +71,9 @@ class LLMConfig:
             self.azure_api_version = os.environ.get("GPT4_API_VERSION")
         if self.azure_endpoint is None:
             self.azure_endpoint = os.environ.get("GPT4_ENDPOINT")
-        valid = ["openai", "gemini", "azure_openai", "ollama"]
+        if self.anthropic_api_key is None:
+            self.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
+        valid = ["openai", "gemini", "azure_openai", "ollama", "anthropic"]
         if self.default_provider not in valid:
             raise ValueError(f"Invalid LLM provider: {self.default_provider}. Must be one of {valid}")
 
@@ -193,6 +200,7 @@ class WorkflowConfig:
     step_timeout: float = 30.0
     output_directory: str = "output"
     multipass: MultiPassConfig = field(default_factory=MultiPassConfig)
+    planning_enabled: bool = False
 
 
 @dataclass

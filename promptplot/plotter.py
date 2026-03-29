@@ -14,10 +14,12 @@ import time
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Optional, List, Tuple, Any, Callable, Awaitable
 
 from .models import GCodeCommand, GCodeProgram
 from .config import SerialConfig
+from .engine import PenState
 
 
 # ---------------------------------------------------------------------------
@@ -32,6 +34,78 @@ class PlotterStatus:
     queue_size: int = 0
     last_update: float = field(default_factory=time.time)
     last_error: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Connection State Machine
+# ---------------------------------------------------------------------------
+
+class ConnectionState(str, Enum):
+    DISCONNECTED = "disconnected"
+    CONNECTING = "connecting"
+    IDLE = "idle"
+    STREAMING = "streaming"
+    PAUSED = "paused"
+    ALARM = "alarm"
+    RECOVERY = "recovery"
+
+
+VALID_CONNECTION_TRANSITIONS = {
+    ConnectionState.DISCONNECTED: {ConnectionState.CONNECTING},
+    ConnectionState.CONNECTING: {ConnectionState.IDLE, ConnectionState.DISCONNECTED},
+    ConnectionState.IDLE: {ConnectionState.STREAMING, ConnectionState.DISCONNECTED},
+    ConnectionState.STREAMING: {ConnectionState.IDLE, ConnectionState.PAUSED, ConnectionState.ALARM, ConnectionState.DISCONNECTED},
+    ConnectionState.PAUSED: {ConnectionState.STREAMING, ConnectionState.IDLE, ConnectionState.DISCONNECTED},
+    ConnectionState.ALARM: {ConnectionState.RECOVERY, ConnectionState.DISCONNECTED},
+    ConnectionState.RECOVERY: {ConnectionState.IDLE, ConnectionState.DISCONNECTED, ConnectionState.ALARM},
+}
+
+
+class ConnectionStateError(Exception):
+    """Raised when an invalid connection state transition is attempted."""
+
+    def __init__(self, current: ConnectionState, target: ConnectionState):
+        self.current = current
+        self.target = target
+        valid = VALID_CONNECTION_TRANSITIONS.get(current, set())
+        super().__init__(
+            f"Cannot transition from {current.value} to {target.value}. "
+            f"Valid targets: {', '.join(s.value for s in valid)}"
+        )
+
+
+class PlotterStateMachine:
+    """Manages plotter connection state with validated transitions."""
+
+    def __init__(self, initial: ConnectionState = ConnectionState.DISCONNECTED):
+        self._state: ConnectionState = initial
+        self._on_change_callbacks: List[Callable] = []
+
+    @property
+    def state(self) -> ConnectionState:
+        return self._state
+
+    def transition(self, new_state: ConnectionState) -> None:
+        if new_state not in VALID_CONNECTION_TRANSITIONS.get(self._state, set()):
+            raise ConnectionStateError(self._state, new_state)
+        old = self._state
+        self._state = new_state
+        for cb in self._on_change_callbacks:
+            cb(old, new_state)
+
+    def on_change(self, callback: Callable) -> None:
+        self._on_change_callbacks.append(callback)
+
+    @property
+    def is_connected(self) -> bool:
+        return self._state in (
+            ConnectionState.IDLE, ConnectionState.STREAMING,
+            ConnectionState.PAUSED, ConnectionState.RECOVERY,
+        )
+
+    @property
+    def can_send(self) -> bool:
+        return self._state in (ConnectionState.IDLE, ConnectionState.STREAMING)
 
 
 # ---------------------------------------------------------------------------
@@ -77,10 +151,20 @@ class BasePlotter(ABC):
     def __init__(self, port: str = "SIMULATED", max_retries: int = 3):
         self.port = port
         self.max_retries = max_retries
-        self._active = False
+        self._connection = PlotterStateMachine()
         self.logger = logging.getLogger(f"{self.__class__.__name__}({port})")
         self.command_history: List[str] = []
         self.status = PlotterStatus()
+
+    @property
+    def _active(self) -> bool:
+        return self._connection.is_connected
+
+    @_active.setter
+    def _active(self, value: bool):
+        # Backward compatibility — used by subclasses during connect/disconnect
+        # Actual transitions are handled by the state machine methods
+        pass
 
     @abstractmethod
     async def connect(self) -> bool:
@@ -98,6 +182,7 @@ class BasePlotter(ABC):
         self,
         program: GCodeProgram,
         on_command: Optional[Callable[[int, int, str, bool], Awaitable[None]]] = None,
+        start_index: int = 0,
     ) -> Tuple[int, int]:
         """Stream an entire program, returning (success_count, error_count).
 
@@ -105,11 +190,14 @@ class BasePlotter(ABC):
             program: The GCode program to stream.
             on_command: Optional async callback(index, total, gcode_str, success)
                         called after each command is sent.
+            start_index: Skip commands before this index (for checkpoint resume).
         """
         success = 0
         errors = 0
         total = len(program.commands)
         for i, cmd in enumerate(program.commands):
+            if i < start_index:
+                continue
             gcode = cmd.to_gcode()
             if gcode == "COMPLETE":
                 continue
@@ -124,7 +212,11 @@ class BasePlotter(ABC):
 
     @property
     def is_connected(self) -> bool:
-        return self._active
+        return self._connection.is_connected
+
+    @property
+    def connection_state(self) -> ConnectionState:
+        return self._connection.state
 
     async def __aenter__(self):
         await self.connect()
@@ -164,12 +256,16 @@ class SerialPlotter(BasePlotter):
         except ImportError:
             raise RuntimeError("pyserial-asyncio required: pip install pyserial-asyncio")
 
+        self._connection.transition(ConnectionState.CONNECTING)
         self.logger.info(f"Connecting to {self.port} at {self.baud_rate} baud...")
-        self.reader, self.writer = await asyncio.wait_for(
-            open_serial_connection(url=self.port, baudrate=self.baud_rate),
-            timeout=self.timeout,
-        )
-        self._active = True
+        try:
+            self.reader, self.writer = await asyncio.wait_for(
+                open_serial_connection(url=self.port, baudrate=self.baud_rate),
+                timeout=self.timeout,
+            )
+        except Exception:
+            self._connection.transition(ConnectionState.DISCONNECTED)
+            raise
 
         # Wake-up sequence
         await asyncio.sleep(2.0)
@@ -185,6 +281,8 @@ class SerialPlotter(BasePlotter):
             except asyncio.TimeoutError:
                 pass
 
+        self._connection.transition(ConnectionState.IDLE)
+
         if self.enable_heartbeat:
             self._heartbeat_task = asyncio.create_task(self._heartbeat_monitor())
 
@@ -192,7 +290,7 @@ class SerialPlotter(BasePlotter):
         return True
 
     async def disconnect(self) -> None:
-        if not self._active:
+        if self._connection.state == ConnectionState.DISCONNECTED:
             return
         self._shutdown_event.set()
         if self._heartbeat_task and not self._heartbeat_task.done():
@@ -209,11 +307,11 @@ class SerialPlotter(BasePlotter):
                 pass
         self.reader = None
         self.writer = None
-        self._active = False
+        self._connection.transition(ConnectionState.DISCONNECTED)
         self.logger.info("Disconnected")
 
     async def send_command(self, command: str) -> bool:
-        if not self._active or not self.writer:
+        if not self._connection.can_send or not self.writer:
             return False
         try:
             self.status.is_busy = True
@@ -225,6 +323,16 @@ class SerialPlotter(BasePlotter):
             response = await self._read_response()
             self.status.last_response = response
             self.status.is_busy = False
+
+            # ALARM detection
+            if response is not None:
+                lower = response.lower()
+                if "alarm" in lower or "error:" in lower:
+                    self.status.last_error = response
+                    if self._connection.state == ConnectionState.STREAMING:
+                        self._connection.transition(ConnectionState.ALARM)
+                    return False
+
             return response is not None and "ok" in response.lower()
         except Exception as e:
             self.logger.error(f"Error sending '{command}': {e}")
@@ -235,6 +343,7 @@ class SerialPlotter(BasePlotter):
         self,
         program: GCodeProgram,
         on_command: Optional[Callable[[int, int, str, bool], Awaitable[None]]] = None,
+        start_index: int = 0,
     ) -> Tuple[int, int]:
         """Stream with backpressure via Dispatcher."""
         success = 0
@@ -242,8 +351,11 @@ class SerialPlotter(BasePlotter):
         sent_idx = 0
         total = len(program.commands)
         self._dispatcher._active = True
+        self._connection.transition(ConnectionState.STREAMING)
 
-        for cmd in program.commands:
+        for i, cmd in enumerate(program.commands):
+            if i < start_index:
+                continue
             gcode = cmd.to_gcode()
             if gcode == "COMPLETE":
                 continue
@@ -277,7 +389,51 @@ class SerialPlotter(BasePlotter):
             sent_idx += 1
 
         self._dispatcher._active = False
+        if self._connection.state == ConnectionState.STREAMING:
+            self._connection.transition(ConnectionState.IDLE)
         return success, errors
+
+    async def recover(self) -> bool:
+        """Attempt to recover from ALARM state."""
+        if self._connection.state != ConnectionState.ALARM:
+            return False
+        self._connection.transition(ConnectionState.RECOVERY)
+        try:
+            if self.writer:
+                # Soft reset
+                self.writer.write(b"$X\n")
+                await self.writer.drain()
+                response = await self._read_response()
+                # Home
+                self.writer.write(b"$H\n")
+                await self.writer.drain()
+                response = await self._read_response()
+            self._connection.transition(ConnectionState.IDLE)
+            return True
+        except Exception as e:
+            self.logger.error(f"Recovery failed: {e}")
+            self._connection.transition(ConnectionState.ALARM)
+            return False
+
+    async def pause(self) -> bool:
+        """Pause streaming (send feed hold)."""
+        if self._connection.state != ConnectionState.STREAMING:
+            return False
+        if self.writer:
+            self.writer.write(b"!")
+            await self.writer.drain()
+        self._connection.transition(ConnectionState.PAUSED)
+        return True
+
+    async def resume(self) -> bool:
+        """Resume streaming (send cycle resume)."""
+        if self._connection.state != ConnectionState.PAUSED:
+            return False
+        if self.writer:
+            self.writer.write(b"~")
+            await self.writer.drain()
+        self._connection.transition(ConnectionState.STREAMING)
+        return True
 
     async def _read_response(self) -> Optional[str]:
         if not self.reader:
@@ -318,19 +474,32 @@ class SimulatedPlotter(BasePlotter):
         self.command_delay = command_delay
         self.collect_commands = collect_commands
         self.collected: List[str] = []
-        self.pen_down = False
+        self.pen_state = PenState()
         self.position = (0.0, 0.0)
         self.lines: List[Tuple[float, float, float, float, bool]] = []
 
+    @property
+    def pen_down(self) -> bool:
+        return self.pen_state.is_down
+
+    @pen_down.setter
+    def pen_down(self, value: bool):
+        if value:
+            self.pen_state.set_down()
+        else:
+            self.pen_state.set_up()
+
     async def connect(self) -> bool:
-        self._active = True
+        self._connection.transition(ConnectionState.CONNECTING)
+        self._connection.transition(ConnectionState.IDLE)
         return True
 
     async def disconnect(self) -> None:
-        self._active = False
+        if self._connection.state != ConnectionState.DISCONNECTED:
+            self._connection.transition(ConnectionState.DISCONNECTED)
 
     async def send_command(self, command: str) -> bool:
-        if not self._active:
+        if not self._connection.can_send:
             return False
         if self.collect_commands:
             self.collected.append(command)
@@ -366,10 +535,10 @@ class SimulatedPlotter(BasePlotter):
             old = self.position
             new_x = params.get("X", old[0])
             new_y = params.get("Y", old[1])
-            is_drawing = self.pen_down and cmd == "G1"
+            is_drawing = self.pen_state.is_down and cmd == "G1"
             self.lines.append((old[0], old[1], new_x, new_y, is_drawing))
             self.position = (new_x, new_y)
         elif cmd == "M3":
-            self.pen_down = True
+            self.pen_state.set_down()
         elif cmd == "M5":
-            self.pen_down = False
+            self.pen_state.set_up()

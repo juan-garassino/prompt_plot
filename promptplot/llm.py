@@ -1,64 +1,36 @@
 """
 LLM providers for PromptPlot v3.0
 
-Unified LLM abstraction using LlamaIndex. Supports OpenAI, Azure OpenAI,
-Gemini, and Ollama. Includes config-aware prompt builders for GCode generation.
+Direct SDK calls to OpenAI, Azure OpenAI, Gemini, Anthropic, and Ollama.
+Includes config-aware prompt builders for GCode generation.
 """
 
 import os
 import asyncio
+import base64
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Optional, Dict, List
 
-from llama_index.llms.ollama import Ollama
-from llama_index.core.llms import CompletionResponse
+import httpx
 
 try:
-    from llama_index.llms.azure_openai import AzureOpenAI
-    AZURE_AVAILABLE = True
-except ImportError:
-    AZURE_AVAILABLE = False
-    AzureOpenAI = None
-
-try:
-    from llama_index.llms.openai import OpenAI
+    import openai as _openai
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
-    OpenAI = None
 
 try:
-    from llama_index.llms.gemini import Gemini
+    import anthropic as _anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
+
+try:
+    import google.generativeai as _genai
     GEMINI_AVAILABLE = True
 except ImportError:
     GEMINI_AVAILABLE = False
-    Gemini = None
-
-# Multimodal imports (optional)
-try:
-    from llama_index.multi_modal_llms.openai import OpenAIMultiModal
-    OPENAI_MULTIMODAL_AVAILABLE = True
-except ImportError:
-    OPENAI_MULTIMODAL_AVAILABLE = False
-
-try:
-    from llama_index.multi_modal_llms.gemini import GeminiMultiModal
-    GEMINI_MULTIMODAL_AVAILABLE = True
-except ImportError:
-    GEMINI_MULTIMODAL_AVAILABLE = False
-
-try:
-    from llama_index.multi_modal_llms.ollama import OllamaMultiModal
-    OLLAMA_MULTIMODAL_AVAILABLE = True
-except ImportError:
-    OLLAMA_MULTIMODAL_AVAILABLE = False
-
-try:
-    from llama_index.multi_modal_llms.azure_openai import AzureOpenAIMultiModal
-    AZURE_MULTIMODAL_AVAILABLE = True
-except ImportError:
-    AZURE_MULTIMODAL_AVAILABLE = False
 
 import json as _json
 from pathlib import Path as _Path
@@ -78,36 +50,38 @@ class LLMProvider(ABC):
     def __init__(self, timeout: int = 30, temperature: float = 0.1):
         self.timeout = timeout
         self.temperature = temperature
-        self._llm = None
 
     @property
     @abstractmethod
     def provider_name(self) -> str: ...
 
     @abstractmethod
-    def _create_llm_instance(self) -> Any: ...
-
-    @property
-    def llm(self) -> Any:
-        if self._llm is None:
-            self._llm = self._create_llm_instance()
-        return self._llm
-
-    async def acomplete(self, prompt: str) -> str:
-        response = await asyncio.wait_for(
-            self.llm.acomplete(prompt), timeout=self.timeout
-        )
-        return response.text if isinstance(response, CompletionResponse) else str(response)
+    async def acomplete(self, prompt: str) -> str: ...
 
     def complete(self, prompt: str) -> str:
-        response = self.llm.complete(prompt)
-        return response.text if isinstance(response, CompletionResponse) else str(response)
+        return asyncio.get_event_loop().run_until_complete(self.acomplete(prompt))
 
     async def acomplete_multimodal(
         self, prompt: str, image_paths: Optional[List[Path]] = None
     ) -> str:
         """Complete with optional image inputs. Falls back to text-only by default."""
         return await self.acomplete(prompt)
+
+
+def _load_image_base64(path: Path) -> str:
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
+
+
+def _image_media_type(path: Path) -> str:
+    suffix = path.suffix.lower()
+    return {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+    }.get(suffix, "image/png")
 
 
 class AzureOpenAIProvider(LLMProvider):
@@ -128,35 +102,52 @@ class AzureOpenAIProvider(LLMProvider):
     def provider_name(self) -> str:
         return "azure_openai"
 
-    def _create_llm_instance(self):
-        if not AZURE_AVAILABLE:
-            raise LLMProviderError("pip install llama-index-llms-azure-openai", self.provider_name)
-        return AzureOpenAI(
-            model=self.model, deployment_name=self.deployment_name,
-            api_key=self.api_key, api_version=self.api_version,
-            azure_endpoint=self.azure_endpoint, timeout=self.timeout,
-            temperature=self.temperature,
+    async def acomplete(self, prompt: str) -> str:
+        if not OPENAI_AVAILABLE:
+            raise LLMProviderError("pip install openai", self.provider_name)
+        client = _openai.AsyncAzureOpenAI(
+            api_key=self.api_key,
+            api_version=self.api_version,
+            azure_endpoint=self.azure_endpoint,
         )
+        response = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=self.deployment_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=self.temperature,
+            ),
+            timeout=self.timeout,
+        )
+        return response.choices[0].message.content
 
     async def acomplete_multimodal(
         self, prompt: str, image_paths: Optional[List[Path]] = None
     ) -> str:
-        if not image_paths or not AZURE_MULTIMODAL_AVAILABLE:
+        if not image_paths or not OPENAI_AVAILABLE:
             return await self.acomplete(prompt)
         try:
-            from llama_index.core.schema import ImageDocument
-            mm_llm = AzureOpenAIMultiModal(
-                model=self.model, deployment_name=self.deployment_name,
-                api_key=self.api_key, api_version=self.api_version,
+            client = _openai.AsyncAzureOpenAI(
+                api_key=self.api_key,
+                api_version=self.api_version,
                 azure_endpoint=self.azure_endpoint,
-                temperature=self.temperature,
             )
-            image_docs = [ImageDocument(image_path=str(p)) for p in image_paths]
+            content = [{"type": "text", "text": prompt}]
+            for p in image_paths:
+                b64 = _load_image_base64(p)
+                mt = _image_media_type(p)
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mt};base64,{b64}"},
+                })
             response = await asyncio.wait_for(
-                mm_llm.acomplete(prompt, image_documents=image_docs),
+                client.chat.completions.create(
+                    model=self.deployment_name,
+                    messages=[{"role": "user", "content": content}],
+                    temperature=self.temperature,
+                ),
                 timeout=self.timeout,
             )
-            return response.text if hasattr(response, "text") else str(response)
+            return response.choices[0].message.content
         except Exception:
             return await self.acomplete(prompt)
 
@@ -168,40 +159,47 @@ class OllamaProvider(LLMProvider):
         super().__init__(timeout=request_timeout // 1000, temperature=temperature)
         self.model = model
         self.request_timeout = request_timeout
-        self.base_url = base_url
+        self.base_url = (base_url or "http://localhost:11434").rstrip("/")
         self.vision_model = vision_model
 
     @property
     def provider_name(self) -> str:
         return "ollama"
 
-    def _create_llm_instance(self):
-        kwargs = {
-            "model": self.model,
-            "request_timeout": self.request_timeout,
-            "temperature": self.temperature,
-        }
-        if self.base_url:
-            kwargs["base_url"] = self.base_url
-        return Ollama(**kwargs)
+    async def acomplete(self, prompt: str) -> str:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.post(
+                f"{self.base_url}/api/generate",
+                json={
+                    "model": self.model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {"temperature": self.temperature},
+                },
+            )
+            response.raise_for_status()
+            return response.json()["response"]
 
     async def acomplete_multimodal(
         self, prompt: str, image_paths: Optional[List[Path]] = None
     ) -> str:
-        if not image_paths or not OLLAMA_MULTIMODAL_AVAILABLE:
+        if not image_paths:
             return await self.acomplete(prompt)
         try:
-            from llama_index.core.schema import ImageDocument
-            kwargs = {"model": self.vision_model, "request_timeout": self.request_timeout}
-            if self.base_url:
-                kwargs["base_url"] = self.base_url
-            mm_llm = OllamaMultiModal(**kwargs)
-            image_docs = [ImageDocument(image_path=str(p)) for p in image_paths]
-            response = await asyncio.wait_for(
-                mm_llm.acomplete(prompt, image_documents=image_docs),
-                timeout=self.timeout,
-            )
-            return response.text if hasattr(response, "text") else str(response)
+            images = [_load_image_base64(p) for p in image_paths]
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(
+                    f"{self.base_url}/api/generate",
+                    json={
+                        "model": self.vision_model,
+                        "prompt": prompt,
+                        "images": images,
+                        "stream": False,
+                        "options": {"temperature": self.temperature},
+                    },
+                )
+                response.raise_for_status()
+                return response.json()["response"]
         except Exception:
             return await self.acomplete(prompt)
 
@@ -219,31 +217,44 @@ class OpenAIProvider(LLMProvider):
     def provider_name(self) -> str:
         return "openai"
 
-    def _create_llm_instance(self):
+    async def acomplete(self, prompt: str) -> str:
         if not OPENAI_AVAILABLE:
-            raise LLMProviderError("pip install llama-index-llms-openai", self.provider_name)
-        return OpenAI(
-            model=self.model, api_key=self.api_key,
-            timeout=self.timeout, temperature=self.temperature,
+            raise LLMProviderError("pip install openai", self.provider_name)
+        client = _openai.AsyncOpenAI(api_key=self.api_key)
+        response = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=self.temperature,
+            ),
+            timeout=self.timeout,
         )
+        return response.choices[0].message.content
 
     async def acomplete_multimodal(
         self, prompt: str, image_paths: Optional[List[Path]] = None
     ) -> str:
-        if not image_paths or not OPENAI_MULTIMODAL_AVAILABLE:
+        if not image_paths or not OPENAI_AVAILABLE:
             return await self.acomplete(prompt)
         try:
-            from llama_index.core.schema import ImageDocument
-            mm_llm = OpenAIMultiModal(
-                model=self.model, api_key=self.api_key,
-                temperature=self.temperature,
-            )
-            image_docs = [ImageDocument(image_path=str(p)) for p in image_paths]
+            client = _openai.AsyncOpenAI(api_key=self.api_key)
+            content = [{"type": "text", "text": prompt}]
+            for p in image_paths:
+                b64 = _load_image_base64(p)
+                mt = _image_media_type(p)
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mt};base64,{b64}"},
+                })
             response = await asyncio.wait_for(
-                mm_llm.acomplete(prompt, image_documents=image_docs),
+                client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": content}],
+                    temperature=self.temperature,
+                ),
                 timeout=self.timeout,
             )
-            return response.text if hasattr(response, "text") else str(response)
+            return response.choices[0].message.content
         except Exception:
             return await self.acomplete(prompt)
 
@@ -262,31 +273,97 @@ class GeminiProvider(LLMProvider):
     def provider_name(self) -> str:
         return "gemini"
 
-    def _create_llm_instance(self):
+    async def acomplete(self, prompt: str) -> str:
         if not GEMINI_AVAILABLE:
-            raise LLMProviderError("pip install llama-index-llms-gemini", self.provider_name)
-        return Gemini(
-            model=self.model, api_key=self.api_key,
-            temperature=self.temperature,
+            raise LLMProviderError("pip install google-generativeai", self.provider_name)
+        _genai.configure(api_key=self.api_key)
+        gen_model = _genai.GenerativeModel(self.model)
+        response = await asyncio.to_thread(
+            gen_model.generate_content,
+            prompt,
+            generation_config=_genai.types.GenerationConfig(temperature=self.temperature),
         )
+        return response.text
 
     async def acomplete_multimodal(
         self, prompt: str, image_paths: Optional[List[Path]] = None
     ) -> str:
-        if not image_paths or not GEMINI_MULTIMODAL_AVAILABLE:
+        if not image_paths or not GEMINI_AVAILABLE:
             return await self.acomplete(prompt)
         try:
-            from llama_index.core.schema import ImageDocument
-            mm_llm = GeminiMultiModal(
-                model=self.model, api_key=self.api_key,
-                temperature=self.temperature,
+            _genai.configure(api_key=self.api_key)
+            gen_model = _genai.GenerativeModel(self.model)
+            parts = [prompt]
+            for p in image_paths:
+                img_data = _load_image_base64(p)
+                mt = _image_media_type(p)
+                parts.append({"mime_type": mt, "data": base64.b64decode(img_data)})
+            response = await asyncio.to_thread(
+                gen_model.generate_content,
+                parts,
+                generation_config=_genai.types.GenerationConfig(temperature=self.temperature),
             )
-            image_docs = [ImageDocument(image_path=str(p)) for p in image_paths]
+            return response.text
+        except Exception:
+            return await self.acomplete(prompt)
+
+
+class AnthropicProvider(LLMProvider):
+    def __init__(self, model: str = "claude-sonnet-4-20250514",
+                 api_key: Optional[str] = None, timeout: int = 120,
+                 temperature: float = 0.1, max_tokens: int = 4096):
+        super().__init__(timeout, temperature)
+        self.model = model
+        self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+        self.max_tokens = max_tokens
+        if not self.api_key:
+            raise LLMProviderError("Missing ANTHROPIC_API_KEY", self.provider_name)
+
+    @property
+    def provider_name(self) -> str:
+        return "anthropic"
+
+    async def acomplete(self, prompt: str) -> str:
+        if not ANTHROPIC_AVAILABLE:
+            raise LLMProviderError("pip install anthropic", self.provider_name)
+        client = _anthropic.AsyncAnthropic(api_key=self.api_key)
+        response = await asyncio.wait_for(
+            client.messages.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=self.temperature,
+            ),
+            timeout=self.timeout,
+        )
+        return response.content[0].text
+
+    async def acomplete_multimodal(
+        self, prompt: str, image_paths: Optional[List[Path]] = None
+    ) -> str:
+        if not image_paths or not ANTHROPIC_AVAILABLE:
+            return await self.acomplete(prompt)
+        try:
+            client = _anthropic.AsyncAnthropic(api_key=self.api_key)
+            content = []
+            for p in image_paths:
+                b64 = _load_image_base64(p)
+                mt = _image_media_type(p)
+                content.append({
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": mt, "data": b64},
+                })
+            content.append({"type": "text", "text": prompt})
             response = await asyncio.wait_for(
-                mm_llm.acomplete(prompt, image_documents=image_docs),
+                client.messages.create(
+                    model=self.model,
+                    max_tokens=self.max_tokens,
+                    messages=[{"role": "user", "content": content}],
+                    temperature=self.temperature,
+                ),
                 timeout=self.timeout,
             )
-            return response.text if hasattr(response, "text") else str(response)
+            return response.content[0].text
         except Exception:
             return await self.acomplete(prompt)
 
@@ -300,6 +377,7 @@ _PROVIDERS = {
     "gemini": GeminiProvider,
     "azure_openai": AzureOpenAIProvider,
     "ollama": OllamaProvider,
+    "anthropic": AnthropicProvider,
 }
 
 
@@ -334,6 +412,12 @@ def get_llm_provider(llm_config: LLMConfig) -> LLMProvider:
         return GeminiProvider(
             model=llm_config.gemini_model, api_key=llm_config.gemini_api_key,
             timeout=llm_config.gemini_timeout, temperature=temp,
+        )
+    elif p == "anthropic":
+        return AnthropicProvider(
+            model=llm_config.anthropic_model, api_key=llm_config.anthropic_api_key,
+            timeout=llm_config.anthropic_timeout, temperature=temp,
+            max_tokens=llm_config.anthropic_max_tokens,
         )
     raise ValueError(f"Unknown provider: {p}")
 
@@ -425,11 +509,7 @@ _ORGANIC_KEYWORDS = {"flower", "tree", "leaf", "face", "animal", "cat", "dog", "
 
 
 def _select_example(user_prompt: str) -> Optional[str]:
-    """Select a relevant few-shot example based on keywords in the prompt.
-
-    First tries JSON examples with keyword matching, then falls back to
-    the inline FEW_SHOT_EXAMPLES dict.
-    """
+    """Select a relevant few-shot example based on keywords in the prompt."""
     words = set(user_prompt.lower().split())
     # Try JSON examples first
     examples = _get_examples()
@@ -463,10 +543,7 @@ _SIMPLE_KEYWORDS = {"simple", "basic", "single", "minimal", "one", "just"}
 
 
 def estimate_complexity(prompt: str) -> str:
-    """Estimate prompt complexity from keywords and word count.
-
-    Returns "simple", "moderate", or "complex".
-    """
+    """Estimate prompt complexity from keywords and word count."""
     words = prompt.lower().split()
     word_set = set(words)
     if word_set & _COMPLEX_KEYWORDS or len(words) > 15:
@@ -714,6 +791,52 @@ Rules:
 
 Return ONLY ONE command as JSON: {{"command": "G1", "x": 10.0, "y": 20.0, "f": {f_val}}}
 If the drawing is complete, return: {{"command": "COMPLETE"}}
+"""
+
+
+def build_composition_plan_prompt(
+    user_prompt: str,
+    paper: PaperConfig,
+    style: str = "artistic",
+) -> str:
+    """Build a prompt asking the LLM for a JSON composition plan."""
+    x0, y0, x1, y1 = paper.get_drawable_area()
+    w, h = paper.get_drawable_dimensions()
+    return f"""You are a composition planner for a pen plotter. Given a drawing request,
+plan the layout by breaking it into subjects with positions and sizes.
+
+Drawing request: {user_prompt}
+Style: {style}
+
+Canvas: {w:.0f}mm x {h:.0f}mm (drawable area X: {x0:.1f}-{x1:.1f}, Y: {y0:.1f}-{y1:.1f})
+
+Return a JSON object with this structure:
+{{
+    "subjects": [
+        {{
+            "name": "main subject",
+            "description": "brief description of what to draw",
+            "x": 100.0,
+            "y": 150.0,
+            "width": 80.0,
+            "height": 60.0,
+            "density": "medium",
+            "priority": 1
+        }}
+    ],
+    "style": "{style}",
+    "estimated_commands": 50,
+    "notes": "optional composition notes"
+}}
+
+Rules:
+- All subjects must fit within the drawable area
+- density: "sparse" (few strokes), "medium" (normal), "dense" (detailed)
+- priority: 1 = most important, higher = less important
+- Use the full canvas — distribute subjects across the space
+- x, y are CENTER positions of each subject
+
+Return ONLY the JSON, no other text.
 """
 
 

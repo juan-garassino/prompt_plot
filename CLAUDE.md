@@ -94,29 +94,44 @@ Use skills interactively to explain — don't launch agents.
 - One side of a shape looks different → the AI doesn't understand the geometry
 
 ## Current status
-v3.0 — 11 flat modules, 4 LLM providers (OpenAI, Azure OpenAI, Gemini, Ollama),
+v3.0 — 13 flat modules, 5 LLM providers (OpenAI, Azure OpenAI, Gemini, Ollama, Anthropic),
 config-aware prompts, bounds validation, multimodal vision feedback, style presets
 (artistic/precise/sketch/minimal), 6-stage postprocessing pipeline
 (arcs → bounds → pen safety → stroke optimization → paint dips → pen dwells),
 quality scoring with letter grades (A–F), drawing memory for few-shot learning,
-multi-pass generation, diagnostic retry, style transfer, and brush/paint mode.
+multi-pass generation, diagnostic retry, style transfer, brush/paint mode,
+first-class pen state tracking (PenState), validated phase transitions
+(IDLE → PLANNING → GENERATING → STREAMING → PAUSED → DONE),
+plotter connection state machine (DISCONNECTED → CONNECTING → IDLE → STREAMING → ALARM → RECOVERY),
+resumable drawing checkpoints, and LLM-driven composition planning.
 
 Main command: `promptplot draw "prompt" --simulate` (batch mode) or
 `promptplot draw "prompt" --live --simulate` (real-time, pen moves while LLM thinks).
 
+New flags: `--plan` (LLM plans composition before generating), `--resume` (resume interrupted drawing).
+
+## State management
+- **PenState** — tracks pen up/down, validates commands (G0 requires UP, G1 requires DOWN), used across postprocess, workflow, and plotter
+- **Phase transitions** — validated state machine: IDLE → PLANNING → GENERATING → STREAMING ↔ PAUSED → DONE. Invalid transitions raise `IllegalTransitionError`.
+- **Connection SM** — plotter connection lifecycle: DISCONNECTED → CONNECTING → IDLE → STREAMING. Handles ALARM detection and recovery.
+- **Checkpoints** — interrupted drawings save state to `~/.promptplot/checkpoints/`. Resume with `--resume`.
+
 ## File structure
 All source lives in `promptplot/`:
-- `cli.py` — Click CLI (`draw`, `generate`, `plot`, `preview`, `score`, `interactive`)
-- `config.py` — Dataclass config tree (paper, pen, brush, bounds, vision, serial, LLM)
-- `llm.py` — LLM provider abstraction (LlamaIndex), prompt builders, few-shot examples
-- `models.py` — Pydantic models: GCodeCommand, GCodeProgram, WorkflowResult
+- `cli.py` — Click CLI (`draw`, `generate`, `plot`, `preview`, `score`, `interactive`, `ui`)
+- `config.py` — Dataclass config tree (paper, pen, brush, bounds, vision, serial, LLM, workflow)
+- `engine.py` — Workflow engine, PenState, Phase enum, validated transitions, DrawingSession
+- `llm.py` — LLM provider abstraction, prompt builders, composition plan prompt, few-shot examples
+- `models.py` — Pydantic models: GCodeCommand, GCodeProgram, WorkflowResult, CompositionPlan
 - `pipeline.py` — FilePipeline: load .gcode → postprocess → preview → stream
-- `plotter.py` — BasePlotter ABC, SerialPlotter (serial_asyncio), SimulatedPlotter
+- `plotter.py` — ConnectionState SM, BasePlotter ABC, SerialPlotter (ALARM/recovery/pause/resume), SimulatedPlotter
 - `postprocess.py` — 6-stage pipeline: arcs, bounds, pen safety, stroke optimization, dips, dwells
+- `checkpoint.py` — CheckpointManager for resumable drawings
 - `visualizer.py` — matplotlib GCode renderer with stats
-- `workflow.py` — BatchGCodeWorkflow, StreamingGCodeWorkflow, LiveDrawWorkflow
+- `workflow.py` — BatchGCodeWorkflow (with planning step), StreamingGCodeWorkflow, LiveDrawWorkflow
 - `scoring.py` — Quality scorer (A–F grades) and style profile extractor
 - `memory.py` — Drawing memory (JSONL) for few-shot retrieval
+- `tui.py` — Rich-based TUI with planning/paused phase display
 - `logger.py` — Rich-based terminal output
 - `__init__.py` — Public API exports
 

@@ -47,10 +47,22 @@ promptplot draw "a cat" --live --simulate
 promptplot draw "a mountain range" --port /dev/cu.usbserial-1420
 ```
 
+**Draw with composition planning (LLM plans layout before generating):**
+
+```bash
+promptplot draw "a house with garden and sun" --plan --simulate
+```
+
 **Draw with quality gate (reject bad output):**
 
 ```bash
 promptplot draw "a flower" --port /dev/cu.usbserial-1420 --min-grade B
+```
+
+**Resume an interrupted drawing:**
+
+```bash
+promptplot draw "a spiral galaxy" --port /dev/cu.usbserial-1420 --resume
 ```
 
 **Generate GCode without plotting:**
@@ -94,6 +106,8 @@ promptplot draw <prompt>
   -o, --save <path>              Save GCode to file
   --preview                      Save preview PNG
   --min-grade <A|B|C|D|F>       Minimum quality grade to send to plotter (default: D)
+  --plan                         Enable LLM composition planning phase
+  --resume                       Resume from last checkpoint
 ```
 
 **Batch mode (default):** LLM generates the full drawing, quality is scored,
@@ -162,33 +176,80 @@ promptplot interactive           Interactive REPL mode
 
 ## Architecture
 
-11 flat modules under `promptplot/`:
+15 flat modules under `promptplot/`:
 
 ```
 promptplot/
 ├── __init__.py       Public API exports
-├── cli.py            Click CLI (draw, generate, plot, preview, score, interactive)
-├── config.py         Dataclass config: LLM, paper, pen, brush, bounds, vision, serial, viz
-├── llm.py            LLM provider abstraction + config-aware prompt builders + multimodal
+├── checkpoint.py     Resumable drawing checkpoints (~/.promptplot/checkpoints/)
+├── cli.py            Click CLI (draw, generate, plot, preview, score, interactive, ui)
+├── config.py         Dataclass config: LLM, paper, pen, brush, bounds, vision, serial, viz, workflow
+├── engine.py         Workflow engine, PenState, Phase transitions, DrawingSession
+├── llm.py            LLM provider abstraction + prompt builders + composition planning
 ├── logger.py         Rich-based workflow logger
 ├── memory.py         Drawing memory (JSONL) for few-shot learning
-├── models.py         GCodeCommand, GCodeProgram, WorkflowResult (Pydantic)
+├── models.py         GCodeCommand, GCodeProgram, WorkflowResult, CompositionPlan (Pydantic)
 ├── pipeline.py       File-based async pipeline: load → postprocess → stream
-├── plotter.py        Serial and simulated plotter with backpressure dispatcher
+├── plotter.py        Connection state machine, serial/simulated plotter, ALARM recovery
 ├── postprocess.py    Bounds → arcs → pen safety → stroke optimization → paint dips → dwells
 ├── scoring.py        Quality scorer (A–F grades) + style profile extraction
+├── tui.py            Rich-based TUI with live status display
 ├── visualizer.py     Matplotlib-based GCode preview with bounds overlay
-└── workflow.py       Batch, streaming, and live draw workflows (LlamaIndex)
+└── workflow.py       Batch (with planning), streaming, and live draw workflows
 ```
 
 **Data flow:**
 
 ```
-prompt → llm.py → workflow.py → postprocess.py → plotter.py
-                                                → visualizer.py
+prompt → llm.py (plan?) → workflow.py → postprocess.py → plotter.py
+                                                        → visualizer.py
 file.gcode → pipeline.py → postprocess.py → plotter.py
                                            → visualizer.py
 ```
+
+## State management
+
+PromptPlot uses proper state machines throughout:
+
+**PenState** — tracks pen up/down and validates commands. G0 requires pen UP,
+G1 requires pen DOWN. Used in postprocessing, live workflows, and the simulated
+plotter. The postprocessor uses `set_up()`/`set_down()` to fix violations; the
+validator uses `process()` to detect them.
+
+**Phase transitions** — the drawing lifecycle follows validated phases:
+
+```
+IDLE → PLANNING → GENERATING → STREAMING ↔ PAUSED → DONE → IDLE
+```
+
+Invalid transitions (e.g. IDLE → DONE) raise `IllegalTransitionError`.
+Use `force=True` to bypass in exceptional cases.
+
+**Plotter connection** — a state machine manages the serial connection:
+
+```
+DISCONNECTED → CONNECTING → IDLE → STREAMING ↔ PAUSED → IDLE → DISCONNECTED
+                                  ↘ ALARM → RECOVERY ↗
+```
+
+ALARM is detected automatically from firmware responses. Recovery sends `$X`
+(soft reset) and `$H` (home). Pause/resume use GRBL feed hold (`!`/`~`).
+
+**Checkpoints** — interrupted drawings are saved to `~/.promptplot/checkpoints/`.
+Resume with `--resume` to skip already-sent commands.
+
+## Composition planning
+
+The `--plan` flag enables an LLM-driven planning phase before GCode generation.
+The LLM first creates a `CompositionPlan` that specifies subjects, positions,
+sizes, and density. This plan is then injected as structured guidance into the
+GCode generation prompt.
+
+```bash
+promptplot draw "a house with a garden and sun" --plan --simulate
+```
+
+The planning phase adds PLANNING to the lifecycle: IDLE → PLANNING → GENERATING → DONE.
 
 ## Configuration
 
@@ -243,6 +304,7 @@ serial:
 
 workflow:
   output_directory: output
+  planning_enabled: false         # --plan flag enables this
   multipass:
     enabled: false
     outline_style: precise
@@ -396,7 +458,7 @@ import asyncio
 from promptplot import (
     PromptPlotConfig, get_config, BatchGCodeWorkflow,
     LiveDrawWorkflow, SimulatedPlotter, get_llm_provider,
-    score_gcode,
+    score_gcode, PenState, ConnectionState, CheckpointManager,
 )
 
 async def main():
@@ -408,9 +470,22 @@ async def main():
     result = await wf.run(prompt="draw a triangle")
     print(result["gcode"])
 
+    # Batch generation with composition planning
+    config.workflow.planning_enabled = True
+    wf = BatchGCodeWorkflow(llm=llm, config=config)
+    result = await wf.run(prompt="a house with garden")
+
+    # PenState tracking
+    pen = PenState()
+    pen.process("M3 S1000")   # pen down
+    assert pen.is_down
+    pen.process("M5")          # pen up
+    assert pen.is_up
+
     # Live drawing to simulated plotter
     plotter = SimulatedPlotter()
     await plotter.connect()
+    assert plotter.connection_state == ConnectionState.IDLE
     live = LiveDrawWorkflow(llm=llm, config=config, plotter=plotter)
     result = await live.run("draw a spiral")
     await plotter.disconnect()

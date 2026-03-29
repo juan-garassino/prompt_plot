@@ -274,9 +274,11 @@ def preview(ctx, filepath, output, stats, show_score):
 @click.option("--min-grade", default="D",
               type=click.Choice(["A", "B", "C", "D", "F"]),
               help="Minimum quality grade to proceed to plotter (batch mode only)")
+@click.option("--resume", is_flag=True, help="Resume from last checkpoint")
+@click.option("--plan", "planning", is_flag=True, help="Enable LLM composition planning phase")
 @click.pass_context
 def draw(ctx, prompt, port, baud, simulate, provider, model, style,
-         multipass, live, max_steps, save, save_preview, min_grade):
+         multipass, live, max_steps, save, save_preview, min_grade, resume, planning):
     """Generate and draw in one shot: prompt → LLM → quality check → plotter.
 
     Two modes:
@@ -309,6 +311,8 @@ def draw(ctx, prompt, port, baud, simulate, provider, model, style,
         config.serial.baud_rate = baud
     if multipass:
         config.workflow.multipass.enabled = True
+    if planning:
+        config.workflow.planning_enabled = True
 
     grade_order = {"A": 4, "B": 3, "C": 2, "D": 1, "F": 0}
 
@@ -679,6 +683,40 @@ def interactive(ctx, provider, model):
                 logger.step_error(f"Generation failed: {e}")
 
     asyncio.run(_run())
+
+
+@cli.command()
+@click.option("--port", default=None, help="Serial port")
+@click.option("--baud", default=115200, help="Baud rate")
+@click.option("--simulate", is_flag=True, help="Simulated plotter (no hardware)")
+@click.option("--provider", default=None, help="LLM provider")
+@click.option("--model", default=None, help="Model name")
+@click.option("--live/--batch", default=True, help="Start in live or batch mode")
+@click.pass_context
+def ui(ctx, port, baud, simulate, provider, model, live):
+    """Launch the PromptPlot TUI.
+
+    A split-screen terminal interface: status header, rolling command log,
+    quality footer, and a prompt input. Type what you want drawn.
+
+    Examples:
+
+        promptplot ui --simulate
+
+        promptplot ui --port /dev/cu.usbserial-1420
+
+        promptplot ui --simulate --batch
+    """
+    config = ctx.obj["config"]
+    if provider:
+        config.llm.default_provider = provider
+    if model:
+        setattr(config.llm, f"{config.llm.default_provider}_model", model)
+    if port:
+        config.serial.port = port
+
+    from .tui import run_tui
+    run_tui(config, simulate=simulate, port=port, baud=baud, live_mode=live)
 
 
 def main():
