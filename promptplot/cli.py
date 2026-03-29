@@ -681,6 +681,40 @@ def interactive(ctx, provider, model):
     asyncio.run(_run())
 
 
+@cli.command()
+@click.option("--port", default=None, help="Serial port")
+@click.option("--baud", default=115200, help="Baud rate")
+@click.option("--simulate", is_flag=True, help="Simulated plotter (no hardware)")
+@click.option("--provider", default=None, help="LLM provider")
+@click.option("--model", default=None, help="Model name")
+@click.option("--live/--batch", default=True, help="Start in live or batch mode")
+@click.pass_context
+def ui(ctx, port, baud, simulate, provider, model, live):
+    """Launch the PromptPlot TUI.
+
+    A split-screen terminal interface: status header, rolling command log,
+    quality footer, and a prompt input. Type what you want drawn.
+
+    Examples:
+
+        promptplot ui --simulate
+
+        promptplot ui --port /dev/cu.usbserial-1420
+
+        promptplot ui --simulate --batch
+    """
+    config = ctx.obj["config"]
+    if provider:
+        config.llm.default_provider = provider
+    if model:
+        setattr(config.llm, f"{config.llm.default_provider}_model", model)
+    if port:
+        config.serial.port = port
+
+    from .tui import run_tui
+    run_tui(config, simulate=simulate, port=port, baud=baud, live_mode=live)
+
+
 def main():
     """Entry point for promptplot CLI."""
     cli(obj={})
