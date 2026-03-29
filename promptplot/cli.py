@@ -267,23 +267,33 @@ def preview(ctx, filepath, output, stats, show_score):
 @click.option("--style", default="artistic",
               type=click.Choice(["artistic", "precise", "sketch", "minimal"]))
 @click.option("--multipass", is_flag=True, help="Multi-pass generation")
+@click.option("--live", is_flag=True, help="Real-time: LLM generates each command and sends it to the plotter immediately")
+@click.option("--max-steps", default=80, help="Max LLM steps in --live mode")
 @click.option("--save", "-o", default=None, help="Also save GCode to file")
 @click.option("--preview", "save_preview", is_flag=True, help="Save preview PNG")
 @click.option("--min-grade", default="D",
               type=click.Choice(["A", "B", "C", "D", "F"]),
-              help="Minimum quality grade to proceed to plotter")
+              help="Minimum quality grade to proceed to plotter (batch mode only)")
 @click.pass_context
 def draw(ctx, prompt, port, baud, simulate, provider, model, style,
-         multipass, save, save_preview, min_grade):
+         multipass, live, max_steps, save, save_preview, min_grade):
     """Generate and draw in one shot: prompt → LLM → quality check → plotter.
 
-    This is the main command for going from a text description to a physical drawing.
+    Two modes:
+
+      Batch (default): LLM generates full drawing → quality check → stream to plotter.
+
+      Live (--live): LLM generates one command at a time → validate → send to plotter
+      immediately. The pen moves while the LLM is still thinking. No global optimization
+      but maximum real-time feel.
 
     Examples:
 
         promptplot draw "a spiral" --simulate
 
         promptplot draw "a cat" --port /dev/cu.usbserial-1420
+
+        promptplot draw "a cat" --live --simulate
 
         promptplot draw "detailed cityscape" --multipass --min-grade B
     """
@@ -301,6 +311,127 @@ def draw(ctx, prompt, port, baud, simulate, provider, model, style,
         config.workflow.multipass.enabled = True
 
     grade_order = {"A": 4, "B": 3, "C": 2, "D": 1, "F": 0}
+
+    async def _run_live():
+        """Real-time mode: LLM → validate → plotter, one command at a time."""
+        from .workflow import LiveDrawWorkflow
+        from .llm import get_llm_provider
+        from .models import GCodeProgram
+        from .scoring import score_gcode
+        from .plotter import SimulatedPlotter, SerialPlotter
+
+        console.print()
+        console.print(f"[bold blue]prompt[/bold blue] [dim]→[/dim] {prompt}")
+        console.print(f"[bold magenta]mode[/bold magenta]   [dim]→[/dim] live (real-time)")
+        console.print()
+
+        # Connect plotter
+        if simulate:
+            plotter_inst = SimulatedPlotter(command_delay=0.02)
+            console.print("  [yellow]simulated[/yellow] plotter")
+        else:
+            plotter_inst = SerialPlotter(
+                port=config.serial.port,
+                baud_rate=config.serial.baud_rate,
+                timeout=config.serial.timeout,
+            )
+            console.print(f"  [cyan]connecting[/cyan] {config.serial.port}")
+
+        llm = get_llm_provider(config.llm)
+
+        from rich.live import Live
+        from rich.table import Table as RichTable
+
+        # Live display state
+        step_log = []
+        sent_total = [0]
+        err_total = [0]
+
+        def _build_display():
+            tbl = RichTable(show_header=True, header_style="bold cyan",
+                            title=f"Live Drawing — {sent_total[0]} sent, {err_total[0]} errors",
+                            min_width=60)
+            tbl.add_column("#", width=4, justify="right")
+            tbl.add_column("GCode", min_width=30)
+            tbl.add_column("Status", width=10)
+            # Show last 15 commands
+            for entry in step_log[-15:]:
+                num, gcode, status, warns = entry
+                if status == "ok":
+                    status_str = "[green]ok[/green]"
+                elif status == "DONE":
+                    status_str = "[bold green]DONE[/bold green]"
+                elif status == "skip":
+                    status_str = "[yellow]skip[/yellow]"
+                else:
+                    status_str = "[red]err[/red]"
+                extra = f" [dim]{'; '.join(warns)}[/dim]" if warns else ""
+                tbl.add_row(str(num), gcode + extra, status_str)
+            return tbl
+
+        async with plotter_inst:
+            console.print(f"  [green]connected[/green]  {plotter_inst.port}")
+            console.print()
+
+            with Live(_build_display(), console=console, refresh_per_second=4) as live_display:
+
+                async def on_step(step_num, max_s, gcode, ok, warnings):
+                    if gcode == "COMPLETE":
+                        step_log.append((step_num, "COMPLETE", "DONE", []))
+                    elif ok:
+                        sent_total[0] += 1
+                        step_log.append((step_num, gcode, "ok", warnings))
+                    else:
+                        err_total[0] += 1
+                        step_log.append((step_num, gcode, "err", warnings))
+                    live_display.update(_build_display())
+
+                wf = LiveDrawWorkflow(
+                    llm=llm, config=config, plotter=plotter_inst,
+                    max_steps=max_steps, on_step=on_step,
+                )
+                t0 = time.time()
+                result = await wf.run(prompt=prompt)
+                elapsed = time.time() - t0
+
+        # Post-run summary
+        console.print()
+        n_cmds = len(result["commands"])
+        console.print(
+            f"  [green]done[/green]  {result['sent_count']} sent, "
+            f"{result['error_count']} errors, {result['skipped_count']} skipped  "
+            f"[dim]({elapsed:.1f}s)[/dim]"
+        )
+
+        # Score the final result
+        program = GCodeProgram(**result["program"])
+        if len([c for c in program.commands if c.command == "G1"]) > 0:
+            report = score_gcode(program, config.paper)
+            grade_color = {
+                "A": "bold green", "B": "green", "C": "yellow",
+                "D": "red", "F": "bold red",
+            }.get(report.grade, "white")
+            console.print(
+                f"  [cyan]quality[/cyan] grade [{grade_color}]{report.grade}[/{grade_color}]  "
+                f"utilization {report.canvas_utilization:.0%}  "
+                f"strokes {report.stroke_count}"
+            )
+
+        # Save
+        if save:
+            Path(save).parent.mkdir(parents=True, exist_ok=True)
+            Path(save).write_text(result["gcode"])
+            console.print(f"  [green]saved[/green]  {save}")
+
+        if save_preview:
+            try:
+                from .visualizer import GCodeVisualizer
+                viz = GCodeVisualizer(config)
+                preview_path = (save or "drawing").replace(".gcode", "") + ".png"
+                viz.preview(program, preview_path)
+                console.print(f"  [green]preview[/green] {preview_path}")
+            except ImportError:
+                pass
 
     async def _run():
         from .workflow import BatchGCodeWorkflow
@@ -425,7 +556,10 @@ def draw(ctx, prompt, port, baud, simulate, provider, model, style,
             console.print()
             _print_score(report)
 
-    asyncio.run(_run())
+    if live:
+        asyncio.run(_run_live())
+    else:
+        asyncio.run(_run())
 
 
 @cli.group(name="config")

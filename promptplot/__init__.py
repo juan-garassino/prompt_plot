@@ -9,7 +9,7 @@ __author__ = "PromptPlot Team"
 
 from .models import GCodeCommand, GCodeProgram, WorkflowResult
 from .config import PromptPlotConfig, load_config, get_config
-from .workflow import BatchGCodeWorkflow, StreamingGCodeWorkflow
+from .workflow import BatchGCodeWorkflow, StreamingGCodeWorkflow, LiveDrawWorkflow
 from .pipeline import FilePipeline
 from .plotter import BasePlotter, SerialPlotter, SimulatedPlotter
 from .llm import LLMProvider, create_llm_provider, get_llm_provider
@@ -30,6 +30,7 @@ __all__ = [
     # Workflows
     "BatchGCodeWorkflow",
     "StreamingGCodeWorkflow",
+    "LiveDrawWorkflow",
     # Pipeline
     "FilePipeline",
     # Plotter

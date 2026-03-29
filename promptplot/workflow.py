@@ -508,3 +508,175 @@ class StreamingGCodeWorkflow(Workflow):
             step_count=len(commands),
             timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         )
+
+
+# ---------------------------------------------------------------------------
+# LiveDrawWorkflow — real-time LLM → plotter streaming
+# ---------------------------------------------------------------------------
+
+from .postprocess import validate_single_command
+from .plotter import BasePlotter
+
+from typing import Callable, Awaitable
+
+
+class LiveDrawWorkflow:
+    """Real-time workflow: LLM generates one command → validate → send to plotter → repeat.
+
+    The pen moves while the LLM is still thinking about the next command.
+    No global stroke optimization (can't reorder what's already drawn),
+    but per-command bounds clamping and pen safety are applied live.
+    """
+
+    def __init__(
+        self,
+        llm: Optional[LLMProvider] = None,
+        config: Optional[PromptPlotConfig] = None,
+        plotter: Optional[BasePlotter] = None,
+        max_steps: int = 80,
+        on_step: Optional[Callable[[int, int, str, bool, List[str]], Awaitable[None]]] = None,
+    ):
+        """
+        Args:
+            llm: LLM provider for command generation.
+            config: Full PromptPlot config.
+            plotter: Connected plotter (SimulatedPlotter or SerialPlotter).
+            max_steps: Maximum number of LLM calls before forced completion.
+            on_step: Async callback(step_num, max_steps, gcode_str, sent_ok, warnings)
+                     called after each command is validated and sent (or skipped).
+        """
+        self.config = config or get_config()
+        self.llm = llm or get_llm_provider(self.config.llm)
+        self.plotter = plotter
+        self.max_steps = max_steps
+        self.on_step = on_step
+
+    async def run(self, prompt: str) -> Dict[str, Any]:
+        """Execute the live draw loop.
+
+        Returns dict with: prompt, commands (list[GCodeCommand]), sent_count,
+        error_count, skipped_count, gcode (str), success (bool).
+        """
+        commands_sent: List[GCodeCommand] = []
+        all_commands: List[GCodeCommand] = []
+        sent_count = 0
+        error_count = 0
+        skipped = 0
+        pen_is_down = False
+
+        # Start with pen up
+        if self.plotter:
+            startup = GCodeCommand(command="M5")
+            gcode = startup.to_gcode()
+            await self.plotter.send_command(gcode)
+            all_commands.append(startup)
+            sent_count += 1
+
+        for step_num in range(1, self.max_steps + 1):
+            # Build history from what we've actually sent
+            if commands_sent:
+                history = "\n".join(
+                    f"Step {i+1}: {c.to_gcode()}" for i, c in enumerate(commands_sent)
+                )
+            else:
+                history = "No previous commands"
+
+            # Ask LLM for the next command
+            llm_prompt = build_next_command_prompt(
+                prompt, history, self.config.paper, self.config.pen,
+            )
+            try:
+                response = await self.llm.acomplete(llm_prompt)
+            except Exception as e:
+                if self.on_step:
+                    await self.on_step(step_num, self.max_steps, f"LLM error: {e}", False, [])
+                error_count += 1
+                continue
+
+            try:
+                result = _validate_output(response)
+            except Exception as parse_err:
+                result = parse_err
+
+            if isinstance(result, Exception):
+                if self.on_step:
+                    await self.on_step(step_num, self.max_steps, f"parse error", False, [str(result)])
+                skipped += 1
+                continue
+
+            if not isinstance(result, GCodeCommand):
+                # Got a full program instead of single command — skip
+                if self.on_step:
+                    await self.on_step(step_num, self.max_steps, "unexpected format", False, [])
+                skipped += 1
+                continue
+
+            # Check for completion signal
+            if result.command == "COMPLETE":
+                if self.on_step:
+                    await self.on_step(step_num, self.max_steps, "COMPLETE", True, [])
+                break
+
+            # Per-command validation: bounds clamping + pen safety
+            fixed_cmd, warnings, prefix_cmds = validate_single_command(
+                result, self.config.paper, pen_is_down,
+            )
+
+            # Send prefix commands (pen safety fixes) to plotter
+            if self.plotter:
+                for pcmd in prefix_cmds:
+                    gcode = pcmd.to_gcode()
+                    ok = await self.plotter.send_command(gcode)
+                    all_commands.append(pcmd)
+                    if pcmd.command == "M3":
+                        pen_is_down = True
+                    elif pcmd.command == "M5":
+                        pen_is_down = False
+                    if ok:
+                        sent_count += 1
+                    else:
+                        error_count += 1
+
+            # Send the actual command to plotter
+            gcode_str = fixed_cmd.to_gcode()
+            ok = True
+            if self.plotter:
+                ok = await self.plotter.send_command(gcode_str)
+
+            if ok:
+                sent_count += 1
+                commands_sent.append(fixed_cmd)
+                all_commands.append(fixed_cmd)
+                # Track pen state
+                if fixed_cmd.command == "M3":
+                    pen_is_down = True
+                elif fixed_cmd.command == "M5":
+                    pen_is_down = False
+            else:
+                error_count += 1
+
+            if self.on_step:
+                await self.on_step(step_num, self.max_steps, gcode_str, ok, warnings)
+
+        # End with pen up + home
+        if self.plotter:
+            for end_cmd in [
+                GCodeCommand(command="M5"),
+                GCodeCommand(command="G0", x=0, y=0),
+            ]:
+                gcode = end_cmd.to_gcode()
+                await self.plotter.send_command(gcode)
+                all_commands.append(end_cmd)
+                sent_count += 1
+
+        program = GCodeProgram(commands=all_commands)
+        return {
+            "prompt": prompt,
+            "commands": all_commands,
+            "program": program.model_dump(),
+            "gcode": program.to_gcode(),
+            "sent_count": sent_count,
+            "error_count": error_count,
+            "skipped_count": skipped,
+            "success": error_count == 0,
+        }
