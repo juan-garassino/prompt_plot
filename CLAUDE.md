@@ -96,23 +96,26 @@ Use skills interactively to explain — don't launch agents.
 ## Current status
 v3.0 — 11 flat modules, 4 LLM providers (OpenAI, Azure OpenAI, Gemini, Ollama),
 config-aware prompts, bounds validation, multimodal vision feedback, style presets
-(artistic/precise/sketch/minimal), 5-stage postprocessing pipeline
-(bounds → pen safety → stroke optimization → paint dips → pen dwells),
-quality scoring with letter grades, drawing memory for few-shot learning,
-multi-pass generation, and diagnostic retry.
+(artistic/precise/sketch/minimal), 6-stage postprocessing pipeline
+(arcs → bounds → pen safety → stroke optimization → paint dips → pen dwells),
+quality scoring with letter grades (A–F), drawing memory for few-shot learning,
+multi-pass generation, diagnostic retry, style transfer, and brush/paint mode.
+
+Main command: `promptplot draw "prompt" --simulate` (batch mode) or
+`promptplot draw "prompt" --live --simulate` (real-time, pen moves while LLM thinks).
 
 ## File structure
 All source lives in `promptplot/`:
-- `cli.py` — Click-based CLI (`generate`, `plot`, `preview`, `score`, `interactive`)
+- `cli.py` — Click CLI (`draw`, `generate`, `plot`, `preview`, `score`, `interactive`)
 - `config.py` — Dataclass config tree (paper, pen, brush, bounds, vision, serial, LLM)
 - `llm.py` — LLM provider abstraction (LlamaIndex), prompt builders, few-shot examples
 - `models.py` — Pydantic models: GCodeCommand, GCodeProgram, WorkflowResult
 - `pipeline.py` — FilePipeline: load .gcode → postprocess → preview → stream
 - `plotter.py` — BasePlotter ABC, SerialPlotter (serial_asyncio), SimulatedPlotter
-- `postprocess.py` — 5-stage pipeline: bounds, pen safety, stroke optimization, dips, dwells
+- `postprocess.py` — 6-stage pipeline: arcs, bounds, pen safety, stroke optimization, dips, dwells
 - `visualizer.py` — matplotlib GCode renderer with stats
-- `workflow.py` — LlamaIndex Workflows: BatchGCodeWorkflow, StreamingGCodeWorkflow
-- `scoring.py` — Quality scorer and style profile extractor
+- `workflow.py` — BatchGCodeWorkflow, StreamingGCodeWorkflow, LiveDrawWorkflow
+- `scoring.py` — Quality scorer (A–F grades) and style profile extractor
 - `memory.py` — Drawing memory (JSONL) for few-shot retrieval
 - `logger.py` — Rich-based terminal output
 - `__init__.py` — Public API exports

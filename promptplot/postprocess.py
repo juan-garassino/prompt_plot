@@ -90,6 +90,47 @@ def validate_bounds(
     return GCodeProgram(commands=new_commands, metadata=metadata), violations
 
 
+def validate_single_command(
+    cmd: GCodeCommand,
+    paper: PaperConfig,
+    pen_is_down: bool,
+) -> tuple[GCodeCommand, list[str], list[GCodeCommand]]:
+    """Validate and fix a single command for live streaming.
+
+    Returns:
+        (fixed_cmd, warnings, prefix_commands)
+        prefix_commands: any pen safety commands to insert BEFORE this command
+            (e.g., M5 before a G0 travel, M3 before a G1 draw)
+    """
+    warnings: list[str] = []
+    prefix: list[GCodeCommand] = []
+
+    # Clamp coordinates to paper bounds
+    x0, y0, x1, y1 = paper.get_drawable_area()
+    fixed_x = cmd.x
+    fixed_y = cmd.y
+    if cmd.x is not None and (cmd.x < 0 or cmd.x > paper.width):
+        fixed_x = max(0, min(cmd.x, paper.width))
+        warnings.append(f"X={cmd.x:.1f} clamped to {fixed_x:.1f}")
+    if cmd.y is not None and (cmd.y < 0 or cmd.y > paper.height):
+        fixed_y = max(0, min(cmd.y, paper.height))
+        warnings.append(f"Y={cmd.y:.1f} clamped to {fixed_y:.1f}")
+
+    if fixed_x != cmd.x or fixed_y != cmd.y:
+        cmd = cmd.model_copy(update={"x": fixed_x, "y": fixed_y})
+
+    # Pen safety: ensure pen is up before travel, down before draw
+    if cmd.command == "G0" and pen_is_down:
+        prefix.append(GCodeCommand(command="M5"))
+        warnings.append("Inserted M5 before travel move")
+    elif cmd.command == "G1" and not pen_is_down:
+        s_val = 1000  # default; caller can override
+        prefix.append(GCodeCommand(command="M3", s=s_val))
+        warnings.append("Inserted M3 before draw move")
+
+    return cmd, warnings, prefix
+
+
 # ---------------------------------------------------------------------------
 # 0.5 Arc Approximation (G2/G3 → G1 segments)
 # ---------------------------------------------------------------------------

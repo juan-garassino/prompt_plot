@@ -29,68 +29,131 @@ uv pip install -e ".[gemini]"
 
 ## Quick start
 
-**Generate GCode from a prompt:**
+**Draw something (simulated, no hardware needed):**
 
 ```bash
-promptplot generate "draw a spiral"
+promptplot draw "a spiral galaxy" --simulate
 ```
 
-**Generate and preview:**
+**Draw with real-time streaming (pen moves while LLM thinks):**
 
 ```bash
-promptplot generate "draw a house with a tree" --visualize
+promptplot draw "a cat" --live --simulate
 ```
 
-**Generate with a style preset:**
+**Draw on a real plotter:**
 
 ```bash
-promptplot generate "draw a cat" --style sketch --visualize
+promptplot draw "a mountain range" --port /dev/cu.usbserial-1420
 ```
 
-**Generate from a reference image:**
+**Draw with quality gate (reject bad output):**
 
 ```bash
-promptplot generate "draw this scene" --reference photo.jpg --visualize
+promptplot draw "a flower" --port /dev/cu.usbserial-1420 --min-grade B
 ```
 
-**Plot a GCode file to the plotter:**
+**Generate GCode without plotting:**
+
+```bash
+promptplot generate "draw a house with a tree" --visualize --score
+```
+
+**Preview an existing GCode file:**
+
+```bash
+promptplot preview drawing.gcode --stats --score
+```
+
+**Plot an existing GCode file:**
 
 ```bash
 promptplot plot drawing.gcode --port /dev/cu.usbserial-10
-```
-
-**Preview a GCode file without plotting:**
-
-```bash
-promptplot preview drawing.gcode --stats
 ```
 
 Generated files go to `output/` by default.
 
 ## CLI reference
 
+### `draw` — prompt to paper in one shot
+
+The main command. Generates GCode from a text prompt, scores it, and streams
+it to the plotter.
+
 ```
-promptplot generate <prompt>     Generate GCode from text prompt
+promptplot draw <prompt>
+  --port <port>                  Serial port
+  --baud <rate>                  Baud rate (default: 115200)
+  --simulate                     Simulated plotter (no hardware)
+  --provider <name>              LLM provider (ollama|openai|azure|gemini)
+  --model <name>                 Model name
+  --style <preset>               Drawing style: artistic|precise|sketch|minimal
+  --multipass                    Two-pass generation (outline + detail)
+  --live                         Real-time mode: LLM → validate → plotter, one command at a time
+  --max-steps <n>                Max LLM steps in live mode (default: 80)
+  -o, --save <path>              Save GCode to file
+  --preview                      Save preview PNG
+  --min-grade <A|B|C|D|F>       Minimum quality grade to send to plotter (default: D)
+```
+
+**Batch mode (default):** LLM generates the full drawing, quality is scored,
+and if it meets `--min-grade` the whole program streams to the plotter.
+Global stroke optimization reduces pen lifts and travel.
+
+**Live mode (`--live`):** LLM generates one command at a time. Each command is
+validated (bounds clamped, pen safety enforced) and sent to the plotter
+immediately. The pen moves while the LLM is still thinking about the next
+command. No global optimization, but maximum real-time feel.
+
+### `generate` — generate GCode without plotting
+
+```
+promptplot generate <prompt>
   --provider <name>              LLM provider (ollama|openai|azure|gemini)
   --model <name>                 Model name
   -o, --output <path>            Output file (default: output/<slug>_<ts>.gcode)
-  --visualize                    Show preview after generation
+  --visualize                    Save preview PNG after generation
   --simulate                     Use simulated plotter
   --reference <path>             Reference image for visual guidance (enables multimodal)
   --style <preset>               Drawing style: artistic|precise|sketch|minimal
+  --score                        Show quality score
+  --multipass                    Two-pass generation (outline + detail)
+  --style-from <path>            Reference GCode file for style transfer
+```
 
-promptplot plot <file>           Plot a GCode file
+### `plot` — plot an existing GCode file
+
+```
+promptplot plot <file>
   --port <port>                  Serial port
   --baud <rate>                  Baud rate (default: 115200)
   --simulate                     Simulation mode
-  --brush                        Enable brush/ink mode
+  --brush                        Enable brush/ink mode (paint recharging)
   --preview-only                 Preview without plotting
   -o, --output <path>            Preview output path
+```
 
-promptplot preview <file>        Preview/visualize a GCode file
+### `score` — score a GCode file
+
+```
+promptplot score <file>
+```
+
+Shows quality metrics: canvas utilization, stroke count, draw/travel ratio,
+pen lifts, estimated time, and a letter grade (A through F).
+
+### `preview` — visualize a GCode file
+
+```
+promptplot preview <file>
   -o, --output <path>            Output PNG path
   --stats                        Show statistics
+  --score                        Show quality score
+```
 
+### Other commands
+
+```
 promptplot config show           Display current configuration
 promptplot plotter connect       Test plotter connection
 promptplot plotter list-ports    List available serial ports
@@ -104,16 +167,18 @@ promptplot interactive           Interactive REPL mode
 ```
 promptplot/
 ├── __init__.py       Public API exports
-├── cli.py            Click-based CLI (generate, plot, preview, interactive)
+├── cli.py            Click CLI (draw, generate, plot, preview, score, interactive)
 ├── config.py         Dataclass config: LLM, paper, pen, brush, bounds, vision, serial, viz
 ├── llm.py            LLM provider abstraction + config-aware prompt builders + multimodal
 ├── logger.py         Rich-based workflow logger
-├── models.py         GCodeCommand, GCodeProgram, WorkflowResult
+├── memory.py         Drawing memory (JSONL) for few-shot learning
+├── models.py         GCodeCommand, GCodeProgram, WorkflowResult (Pydantic)
 ├── pipeline.py       File-based async pipeline: load → postprocess → stream
-├── plotter.py        Serial and simulated plotter implementations
-├── postprocess.py    Bounds → pen safety → stroke optimization → paint dips → dwells
+├── plotter.py        Serial and simulated plotter with backpressure dispatcher
+├── postprocess.py    Bounds → arcs → pen safety → stroke optimization → paint dips → dwells
+├── scoring.py        Quality scorer (A–F grades) + style profile extraction
 ├── visualizer.py     Matplotlib-based GCode preview with bounds overlay
-└── workflow.py       Batch and streaming GCode generation workflows + vision refinement
+└── workflow.py       Batch, streaming, and live draw workflows (LlamaIndex)
 ```
 
 **Data flow:**
@@ -130,7 +195,7 @@ file.gcode → pipeline.py → postprocess.py → plotter.py
 Configuration is a hierarchy of dataclasses. Set via YAML/JSON file or code:
 
 ```bash
-promptplot --config my_config.yaml generate "draw a cat"
+promptplot --config my_config.yaml draw "draw a cat" --simulate
 ```
 
 ```yaml
@@ -138,41 +203,55 @@ llm:
   default_provider: ollama
   ollama_model: llama3.2:3b
   temperature: 0.1
+
 paper:
-  width: 297.0
+  width: 297.0          # mm (A3)
   height: 420.0
   margin_x: 10.0
   margin_y: 10.0
+
 pen:
   up_position: 5.0
   down_position: 0.0
-  pen_up_delay: 0.2
-  pen_down_delay: 0.2
-  pen_down_s_value: 1000
-  feed_rate: 2000
+  pen_up_delay: 0.2     # seconds — G4 dwell after pen up
+  pen_down_delay: 0.2   # seconds — G4 dwell after pen down
+  pen_down_s_value: 1000 # S parameter for M3 (pen down force)
+  feed_rate: 2000        # F parameter for G1 (draw speed mm/min)
+
 bounds:
   enforce: true
-  mode: clamp           # clamp | reject | warn
+  mode: clamp            # clamp | reject | warn
+
 vision:
   enabled: false
   reference_image: null
   preview_feedback: false
   max_feedback_iterations: 1
+
 brush:
   enabled: false
-  charge_position: [10.0, 10.0]
-  strokes_before_reload: 10
+  charge_position: [10.0, 10.0]  # where the paint/ink is (X, Y in mm)
+  dip_height: 0.0                # Z height to dip into ink
+  dip_duration: 0.5              # seconds holding in ink
+  drip_duration: 1.0             # seconds dripping after lift
+  strokes_before_reload: 10      # dip every N strokes
+  pause_after_move: 0.1          # seconds between brush moves
+
 serial:
   port: /dev/ttyUSB0
   baud_rate: 115200
+
 workflow:
   output_directory: output
+  multipass:
+    enabled: false
+    outline_style: precise
+    detail_style: artistic
+
 visualization:
   drawing_color: blue
   line_width: 1.0
 ```
-
-See [docs/configuration.md](docs/configuration.md) for all options.
 
 ## LLM providers
 
@@ -183,7 +262,110 @@ See [docs/configuration.md](docs/configuration.md) for all options.
 | `azure`  | `gpt-4o` | `GPT4_API_KEY`, `GPT4_ENDPOINT`, `GPT4_API_VERSION` |
 | `gemini` | `gemini-1.5-flash` | `GOOGLE_API_KEY` |
 
-All providers support multimodal (vision) with optional packages. See [docs/llm-providers.md](docs/llm-providers.md) for setup details.
+```bash
+# Use a specific provider
+promptplot draw "a cat" --provider openai --model gpt-4o --simulate
+
+# Ollama is the default (no API key needed, runs locally)
+promptplot draw "a spiral" --simulate
+```
+
+All providers support multimodal (vision) with optional packages.
+
+## Quality scoring
+
+Every generated drawing can be scored on quality:
+
+```bash
+# Score during generation
+promptplot draw "a flower" --simulate --min-grade B
+
+# Score an existing file
+promptplot score drawing.gcode
+
+# Score with preview
+promptplot preview drawing.gcode --score --stats
+```
+
+Metrics:
+- **Canvas utilization** — % of drawable area used
+- **Draw/travel ratio** — drawing distance vs wasted pen-up travel
+- **Stroke count** — number of continuous draw sequences
+- **Pen lift count** — number of M5 commands
+- **Estimated time** — based on total distance and feed rate
+- **Grade** — A through F based on utilization and efficiency
+
+The `--min-grade` flag on `draw` rejects output below the threshold and
+won't send it to the plotter.
+
+## Drawing memory
+
+PromptPlot remembers successful drawings. When you generate a new drawing,
+it checks memory for similar past prompts and uses them as few-shot examples
+to improve quality.
+
+Memory is stored at `~/.promptplot/memory/drawings.jsonl`. Only drawings
+graded A or B are saved automatically.
+
+## Multi-pass generation
+
+For complex prompts, `--multipass` generates in two passes:
+
+1. **Outline pass** — clean structure and main shapes (precise style)
+2. **Detail pass** — texture, fill, and fine detail (artistic style)
+
+The two passes are merged and post-processed together.
+
+```bash
+promptplot draw "a detailed cityscape" --multipass --simulate
+```
+
+## Style transfer
+
+Use an existing GCode file as a style reference. The system extracts stroke
+characteristics (length, density, direction variance) and instructs the LLM
+to match that style:
+
+```bash
+promptplot generate "draw a tree" --style-from reference.gcode --visualize
+```
+
+## Brush / paint mode
+
+For plotters with a brush instead of a pen, enable brush mode to automatically
+insert paint recharging sequences:
+
+```bash
+promptplot plot drawing.gcode --brush --port /dev/cu.usbserial-10
+```
+
+Or configure in YAML:
+
+```yaml
+brush:
+  enabled: true
+  charge_position: [10.0, 10.0]  # where the paint is
+  strokes_before_reload: 10       # dip every 10 strokes
+  dip_duration: 0.5               # hold in paint for 0.5s
+  drip_duration: 1.0              # drip for 1s after lifting
+```
+
+The postprocessor inserts a sequence every N strokes:
+pen up → travel to paint station → dip → hold → lift → drip pause → return to drawing.
+
+## Post-processing pipeline
+
+Every GCode program passes through six stages (in order):
+
+0. **Arc approximation** — convert G2/G3 arcs to short G1 line segments
+1. **Bounds validation** — clamp, reject, or warn on out-of-bounds coordinates
+2. **Pen safety** — enforce M5 before G0 travel, M3 before G1 draw, return home
+3. **Stroke optimization** — nearest-neighbor reorder to minimize pen lifts and travel
+4. **Paint dips** — ink reload sequences every N strokes (brush mode only)
+5. **Pen dwells** — G4 delays after M3/M5 for pen settle time
+
+In live mode (`--live`), per-command validation applies bounds clamping and
+pen safety in real time as each command is generated and sent.
 
 ## Hardware setup
 
@@ -199,37 +381,13 @@ promptplot plotter list-ports
 promptplot plotter connect --port /dev/cu.usbserial-10
 
 # Plot
-promptplot plot drawing.gcode --port /dev/cu.usbserial-10
+promptplot draw "a spiral" --port /dev/cu.usbserial-10
 ```
 
-See [docs/hardware.md](docs/hardware.md) for detailed setup.
-
-## Post-processing pipeline
-
-Every GCode program passes through five stages (in order):
-
-0. **Bounds validation** — clamp, reject, or warn on out-of-bounds coordinates
-1. **Pen safety** — enforce M5 before G0 moves, M3 before G1, return home
-2. **Stroke optimization** — nearest-neighbor reorder to minimize pen lifts
-3. **Paint dips** — ink reload sequences every N strokes (brush mode)
-4. **Pen dwells** — G4 delays after M3/M5 for pen settle time
-
-See [docs/postprocessing.md](docs/postprocessing.md) for details.
-
-## Style presets
-
-Control the artistic character of generated drawings:
-
-| Style | Description |
-|-------|-------------|
-| `artistic` | Full canvas, varied density, hatching, organic detail (default) |
-| `precise` | Clean geometry, sharp corners, consistent spacing |
-| `sketch` | Overlapping strokes, hand-drawn feel, loose lines |
-| `minimal` | Few strokes, negative space, essential lines only |
-
-```bash
-promptplot generate "draw a portrait" --style sketch
-```
+Serial ports by platform:
+- macOS: `/dev/cu.usbserial-*` (e.g. `/dev/cu.usbserial-1420`)
+- Linux: `/dev/ttyUSB0`
+- Windows: `COM3`
 
 ## Python API
 
@@ -237,15 +395,25 @@ promptplot generate "draw a portrait" --style sketch
 import asyncio
 from promptplot import (
     PromptPlotConfig, get_config, BatchGCodeWorkflow,
-    FilePipeline, SimulatedPlotter, get_llm_provider,
+    LiveDrawWorkflow, SimulatedPlotter, get_llm_provider,
+    score_gcode,
 )
 
 async def main():
     config = get_config()
     llm = get_llm_provider(config.llm)
+
+    # Batch generation
     wf = BatchGCodeWorkflow(llm=llm, config=config)
     result = await wf.run(prompt="draw a triangle")
     print(result["gcode"])
+
+    # Live drawing to simulated plotter
+    plotter = SimulatedPlotter()
+    await plotter.connect()
+    live = LiveDrawWorkflow(llm=llm, config=config, plotter=plotter)
+    result = await live.run("draw a spiral")
+    await plotter.disconnect()
 
 asyncio.run(main())
 ```
