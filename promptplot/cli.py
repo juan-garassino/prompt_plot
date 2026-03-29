@@ -257,6 +257,177 @@ def preview(ctx, filepath, output, stats, show_score):
         _print_score(report)
 
 
+@cli.command()
+@click.argument("prompt")
+@click.option("--port", default=None, help="Serial port (auto-detect if omitted)")
+@click.option("--baud", default=115200, help="Baud rate")
+@click.option("--simulate", is_flag=True, help="Simulated plotter (no hardware)")
+@click.option("--provider", default=None, help="LLM provider")
+@click.option("--model", default=None, help="Model name")
+@click.option("--style", default="artistic",
+              type=click.Choice(["artistic", "precise", "sketch", "minimal"]))
+@click.option("--multipass", is_flag=True, help="Multi-pass generation")
+@click.option("--save", "-o", default=None, help="Also save GCode to file")
+@click.option("--preview", "save_preview", is_flag=True, help="Save preview PNG")
+@click.option("--min-grade", default="D",
+              type=click.Choice(["A", "B", "C", "D", "F"]),
+              help="Minimum quality grade to proceed to plotter")
+@click.pass_context
+def draw(ctx, prompt, port, baud, simulate, provider, model, style,
+         multipass, save, save_preview, min_grade):
+    """Generate and draw in one shot: prompt → LLM → quality check → plotter.
+
+    This is the main command for going from a text description to a physical drawing.
+
+    Examples:
+
+        promptplot draw "a spiral" --simulate
+
+        promptplot draw "a cat" --port /dev/cu.usbserial-1420
+
+        promptplot draw "detailed cityscape" --multipass --min-grade B
+    """
+    config = ctx.obj["config"]
+
+    if provider:
+        config.llm.default_provider = provider
+    if model:
+        setattr(config.llm, f"{config.llm.default_provider}_model", model)
+    if port:
+        config.serial.port = port
+    if baud:
+        config.serial.baud_rate = baud
+    if multipass:
+        config.workflow.multipass.enabled = True
+
+    grade_order = {"A": 4, "B": 3, "C": 2, "D": 1, "F": 0}
+
+    async def _run():
+        from .workflow import BatchGCodeWorkflow
+        from .llm import get_llm_provider
+        from .models import GCodeProgram
+        from .scoring import score_gcode
+        from .postprocess import run_pipeline
+        from .plotter import SimulatedPlotter, SerialPlotter
+
+        # --- Phase 1: Generate ---
+        console.print()
+        console.print(f"[bold blue]prompt[/bold blue] [dim]→[/dim] {prompt}")
+        console.print()
+
+        t0 = time.time()
+        llm = get_llm_provider(config.llm)
+        wf = BatchGCodeWorkflow(llm=llm, config=config, style=style)
+
+        with console.status("[bold cyan]Generating GCode from LLM...", spinner="dots"):
+            result = await wf.run(prompt=prompt)
+
+        program = GCodeProgram(**result["program"])
+        gen_time = time.time() - t0
+        console.print(
+            f"  [green]generated[/green] {len(program.commands)} commands "
+            f"in {gen_time:.1f}s"
+        )
+
+        # --- Phase 2: Score ---
+        report = score_gcode(program, config.paper)
+        grade_color = {
+            "A": "bold green", "B": "green", "C": "yellow",
+            "D": "red", "F": "bold red",
+        }.get(report.grade, "white")
+        console.print(
+            f"  [cyan]quality[/cyan]   "
+            f"grade [{grade_color}]{report.grade}[/{grade_color}]  "
+            f"utilization {report.canvas_utilization:.0%}  "
+            f"strokes {report.stroke_count}  "
+            f"draw/travel {report.draw_travel_ratio:.1f}"
+        )
+
+        # --- Phase 3: Quality gate ---
+        if grade_order.get(report.grade, 0) < grade_order.get(min_grade, 0):
+            console.print(
+                f"\n  [bold red]Grade {report.grade} below minimum {min_grade} — "
+                f"not sending to plotter.[/bold red]"
+            )
+            console.print("  [dim]Tip: lower --min-grade or try --multipass for richer output.[/dim]")
+            # Still save if requested
+            if save:
+                Path(save).write_text(result["gcode"])
+                console.print(f"  [green]saved[/green]     {save}")
+            return
+
+        # --- Phase 4: Preview (optional) ---
+        if save_preview:
+            try:
+                from .visualizer import GCodeVisualizer
+                viz = GCodeVisualizer(config)
+                preview_path = (save or "drawing").replace(".gcode", "") + ".png"
+                viz.preview(program, preview_path)
+                console.print(f"  [green]preview[/green]   {preview_path}")
+            except ImportError:
+                pass
+
+        # --- Phase 5: Save GCode (optional) ---
+        if save:
+            Path(save).parent.mkdir(parents=True, exist_ok=True)
+            Path(save).write_text(result["gcode"])
+            console.print(f"  [green]saved[/green]     {save}")
+
+        # --- Phase 6: Stream to plotter ---
+        console.print()
+        if simulate:
+            plotter = SimulatedPlotter(command_delay=0.02)
+            console.print("  [yellow]simulated[/yellow] plotter (no hardware)")
+        else:
+            plotter = SerialPlotter(
+                port=config.serial.port,
+                baud_rate=config.serial.baud_rate,
+                timeout=config.serial.timeout,
+            )
+            console.print(f"  [cyan]connecting[/cyan] {config.serial.port} @ {config.serial.baud_rate}")
+
+        from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn
+
+        async with plotter:
+            console.print(f"  [green]connected[/green]  {plotter.port}")
+            console.print()
+
+            errors_list = []
+
+            with Progress(
+                TextColumn("  [bold]{task.description}"),
+                BarColumn(bar_width=40),
+                TextColumn("{task.completed}/{task.total}"),
+                TimeElapsedColumn(),
+                console=console,
+            ) as progress:
+                task = progress.add_task("drawing", total=len(program.commands))
+
+                async def on_command(idx, total, gcode, ok):
+                    progress.update(task, completed=idx + 1)
+                    if not ok:
+                        errors_list.append((idx, gcode))
+
+                success, err_count = await plotter.stream_program(
+                    program, on_command=on_command,
+                )
+
+            console.print()
+            console.print(
+                f"  [green]done[/green]      "
+                f"{success} ok, {err_count} errors"
+            )
+            if errors_list:
+                for idx, gcode in errors_list[:5]:
+                    console.print(f"  [red]error[/red]     cmd {idx}: {gcode}")
+
+            # --- Phase 7: Final quality summary ---
+            console.print()
+            _print_score(report)
+
+    asyncio.run(_run())
+
+
 @cli.group(name="config")
 def config_group():
     """Configuration management."""

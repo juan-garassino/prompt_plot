@@ -14,7 +14,7 @@ import time
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Optional, List, Tuple, Any
+from typing import Optional, List, Tuple, Any, Callable, Awaitable
 
 from .models import GCodeCommand, GCodeProgram
 from .config import SerialConfig
@@ -94,11 +94,22 @@ class BasePlotter(ABC):
     async def send_command(self, command: str) -> bool:
         ...
 
-    async def stream_program(self, program: GCodeProgram) -> Tuple[int, int]:
-        """Stream an entire program, returning (success_count, error_count)."""
+    async def stream_program(
+        self,
+        program: GCodeProgram,
+        on_command: Optional[Callable[[int, int, str, bool], Awaitable[None]]] = None,
+    ) -> Tuple[int, int]:
+        """Stream an entire program, returning (success_count, error_count).
+
+        Args:
+            program: The GCode program to stream.
+            on_command: Optional async callback(index, total, gcode_str, success)
+                        called after each command is sent.
+        """
         success = 0
         errors = 0
-        for cmd in program.commands:
+        total = len(program.commands)
+        for i, cmd in enumerate(program.commands):
             gcode = cmd.to_gcode()
             if gcode == "COMPLETE":
                 continue
@@ -107,6 +118,8 @@ class BasePlotter(ABC):
                 success += 1
             else:
                 errors += 1
+            if on_command is not None:
+                await on_command(i, total, gcode, ok)
         return success, errors
 
     @property
@@ -218,10 +231,16 @@ class SerialPlotter(BasePlotter):
             self.status.is_busy = False
             return False
 
-    async def stream_program(self, program: GCodeProgram) -> Tuple[int, int]:
+    async def stream_program(
+        self,
+        program: GCodeProgram,
+        on_command: Optional[Callable[[int, int, str, bool], Awaitable[None]]] = None,
+    ) -> Tuple[int, int]:
         """Stream with backpressure via Dispatcher."""
         success = 0
         errors = 0
+        sent_idx = 0
+        total = len(program.commands)
         self._dispatcher._active = True
 
         for cmd in program.commands:
@@ -239,6 +258,9 @@ class SerialPlotter(BasePlotter):
                     success += 1
                 else:
                     errors += 1
+                if on_command is not None:
+                    await on_command(sent_idx, total, queued, ok)
+                sent_idx += 1
 
         # Drain remaining
         while True:
@@ -250,6 +272,9 @@ class SerialPlotter(BasePlotter):
                 success += 1
             else:
                 errors += 1
+            if on_command is not None:
+                await on_command(sent_idx, total, queued, ok)
+            sent_idx += 1
 
         self._dispatcher._active = False
         return success, errors
