@@ -5,19 +5,20 @@ from rich.panel import Panel
 from rich.layout import Layout
 
 from promptplot.config import PromptPlotConfig
-from promptplot.tui import TUIState, _header, _command_log, _footer, _build_layout
+from promptplot.engine import DrawingSession
+from promptplot.tui import _header, _command_log, _footer, _build_layout
 
 
-class TestTUIState:
+class TestDrawingSessionInTUI:
     def test_default_state(self):
-        state = TUIState(PromptPlotConfig())
+        state = DrawingSession(PromptPlotConfig())
         assert state.phase == "idle"
         assert state.connected is False
         assert state.sent == 0
         assert state.grade == "-"
 
     def test_paper_string(self):
-        state = TUIState(PromptPlotConfig())
+        state = DrawingSession(PromptPlotConfig())
         assert "210" in state.paper
         assert "297" in state.paper
 
@@ -25,7 +26,7 @@ class TestTUIState:
 class TestLayoutBuilders:
     @pytest.fixture
     def state(self):
-        return TUIState(PromptPlotConfig())
+        return DrawingSession(PromptPlotConfig())
 
     def test_header_idle(self, state):
         panel = _header(state)
@@ -55,13 +56,16 @@ class TestLayoutBuilders:
         assert isinstance(panel, Panel)
 
     def test_footer_generating(self, state):
-        state.phase = "generating"
+        from promptplot.engine import Phase
+        state.set_phase(Phase.GENERATING)
         state.elapsed = 3.5
         panel = _footer(state)
         assert isinstance(panel, Panel)
 
     def test_footer_done(self, state):
-        state.phase = "done"
+        from promptplot.engine import Phase
+        state.set_phase(Phase.GENERATING)
+        state.set_phase(Phase.DONE)
         state.grade = "B"
         state.utilization = 0.65
         state.strokes = 12
@@ -75,7 +79,8 @@ class TestLayoutBuilders:
         assert isinstance(layout, Layout)
 
     def test_build_layout_streaming(self, state):
-        state.phase = "streaming"
+        from promptplot.engine import Phase
+        state.set_phase(Phase.STREAMING)
         state.connected = True
         state.sent = 15
         for i in range(20):

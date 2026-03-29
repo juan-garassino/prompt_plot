@@ -12,59 +12,24 @@ Launch via: promptplot ui [--simulate] [--port /dev/cu.usbserial-1420]
 
 import asyncio
 import time
-from collections import deque
 from typing import Optional
 
-from rich.console import Console, Group
+from rich.console import Console
 from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
-from rich.text import Text
 from rich.prompt import Prompt
 
 from .config import PromptPlotConfig, get_config
-
-
-# ---------------------------------------------------------------------------
-# State
-# ---------------------------------------------------------------------------
-
-class TUIState:
-    """Mutable state shared between the UI renderer and async workflows."""
-
-    def __init__(self, config: PromptPlotConfig):
-        self.config = config
-        # Connection
-        self.plotter_type: str = "disconnected"
-        self.plotter_port: str = ""
-        self.connected: bool = False
-        # Model
-        self.provider: str = config.llm.default_provider
-        self.model: str = getattr(config.llm, f"{config.llm.default_provider}_model", "?")
-        # Paper
-        self.paper: str = f"{config.paper.width:.0f}x{config.paper.height:.0f}mm"
-        # Drawing state
-        self.prompt: str = ""
-        self.mode: str = ""  # "batch" / "live" / ""
-        self.phase: str = "idle"  # idle / generating / streaming / done
-        self.commands: deque = deque(maxlen=200)
-        self.sent: int = 0
-        self.errors: int = 0
-        self.skipped: int = 0
-        self.elapsed: float = 0.0
-        # Quality
-        self.grade: str = "-"
-        self.utilization: float = 0.0
-        self.strokes: int = 0
-        self.draw_travel: float = 0.0
+from .engine import DrawingSession, Phase
 
 
 # ---------------------------------------------------------------------------
 # Layout builders
 # ---------------------------------------------------------------------------
 
-def _header(state: TUIState) -> Panel:
+def _header(state: DrawingSession) -> Panel:
     tbl = Table.grid(padding=(0, 3))
     tbl.add_column(min_width=20)
     tbl.add_column(min_width=20)
@@ -85,7 +50,7 @@ def _header(state: TUIState) -> Panel:
     return Panel(tbl, title="[bold]promptplot[/bold]", border_style="blue", height=3)
 
 
-def _command_log(state: TUIState) -> Panel:
+def _command_log(state: DrawingSession) -> Panel:
     lines = []
     for entry in list(state.commands)[-30:]:
         idx, gcode, status, warns = entry
@@ -103,8 +68,12 @@ def _command_log(state: TUIState) -> Panel:
     if not lines:
         if state.phase == "idle":
             lines = ["", "  [dim]Type a prompt below to start drawing.[/dim]", ""]
+        elif state.phase == "planning":
+            lines = ["", "  [dim]Planning composition...[/dim]", ""]
         elif state.phase == "generating":
             lines = ["", "  [dim]Generating...[/dim]", ""]
+        elif state.phase == "paused":
+            lines = ["", "  [yellow]Paused — resume to continue drawing.[/yellow]", ""]
 
     content = "\n".join(lines)
     title = f"commands — {state.sent} sent"
@@ -116,14 +85,22 @@ def _command_log(state: TUIState) -> Panel:
     return Panel(content, title=title, border_style="dim", height=35)
 
 
-def _footer(state: TUIState) -> Panel:
+def _footer(state: DrawingSession) -> Panel:
     if state.phase == "idle":
         content = "[dim]Waiting for prompt...[/dim]"
+    elif state.phase == "planning":
+        content = f"[magenta]Planning composition...[/magenta]  {state.elapsed:.1f}s"
     elif state.phase == "generating":
         content = f"[cyan]Generating GCode...[/cyan]  {state.elapsed:.1f}s"
     elif state.phase == "streaming":
         content = (
             f"[green]Streaming[/green]  "
+            f"{state.sent} sent  "
+            f"{state.elapsed:.1f}s"
+        )
+    elif state.phase == "paused":
+        content = (
+            f"[yellow]Paused[/yellow]  "
             f"{state.sent} sent  "
             f"{state.elapsed:.1f}s"
         )
@@ -144,7 +121,7 @@ def _footer(state: TUIState) -> Panel:
     return Panel(content, border_style="dim", height=3)
 
 
-def _build_layout(state: TUIState) -> Layout:
+def _build_layout(state: DrawingSession) -> Layout:
     layout = Layout()
     layout.split_column(
         Layout(name="header", size=3),
@@ -161,7 +138,7 @@ def _build_layout(state: TUIState) -> Layout:
 # Drawing runners
 # ---------------------------------------------------------------------------
 
-async def _run_live_draw(state: TUIState, prompt: str, plotter, live_display: Live):
+async def _run_live_draw(state: DrawingSession, prompt: str, plotter, live_display: Live):
     """Run LiveDrawWorkflow and update TUI state in real time."""
     from .workflow import LiveDrawWorkflow
     from .llm import get_llm_provider
@@ -170,12 +147,7 @@ async def _run_live_draw(state: TUIState, prompt: str, plotter, live_display: Li
 
     state.prompt = prompt
     state.mode = "live"
-    state.phase = "streaming"
-    state.commands.clear()
-    state.sent = 0
-    state.errors = 0
-    state.skipped = 0
-    state.grade = "-"
+    state.set_phase(Phase.STREAMING)
     t0 = time.time()
 
     llm = get_llm_provider(state.config.llm)
@@ -208,17 +180,15 @@ async def _run_live_draw(state: TUIState, prompt: str, plotter, live_display: Li
     g1_cmds = [c for c in program.commands if c.command == "G1"]
     if g1_cmds:
         report = score_gcode(program, state.config.paper)
-        state.grade = report.grade
-        state.utilization = report.canvas_utilization
-        state.strokes = report.stroke_count
-        state.draw_travel = report.draw_travel_ratio
+        state.set_quality(report.grade, report.canvas_utilization,
+                          report.stroke_count, report.draw_travel_ratio)
 
-    state.phase = "done"
+    state.set_phase(Phase.DONE)
     live_display.update(_build_layout(state))
     return result
 
 
-async def _run_batch_draw(state: TUIState, prompt: str, plotter, live_display: Live):
+async def _run_batch_draw(state: DrawingSession, prompt: str, plotter, live_display: Live):
     """Run BatchGCodeWorkflow + stream to plotter, updating TUI state."""
     from .workflow import BatchGCodeWorkflow
     from .llm import get_llm_provider
@@ -227,12 +197,7 @@ async def _run_batch_draw(state: TUIState, prompt: str, plotter, live_display: L
 
     state.prompt = prompt
     state.mode = "batch"
-    state.phase = "generating"
-    state.commands.clear()
-    state.sent = 0
-    state.errors = 0
-    state.skipped = 0
-    state.grade = "-"
+    state.set_phase(Phase.GENERATING)
     live_display.update(_build_layout(state))
     t0 = time.time()
 
@@ -250,13 +215,11 @@ async def _run_batch_draw(state: TUIState, prompt: str, plotter, live_display: L
     g1_cmds = [c for c in program.commands if c.command == "G1"]
     if g1_cmds:
         report = score_gcode(program, state.config.paper)
-        state.grade = report.grade
-        state.utilization = report.canvas_utilization
-        state.strokes = report.stroke_count
-        state.draw_travel = report.draw_travel_ratio
+        state.set_quality(report.grade, report.canvas_utilization,
+                          report.stroke_count, report.draw_travel_ratio)
 
     # Stream to plotter
-    state.phase = "streaming"
+    state.set_phase(Phase.STREAMING)
     live_display.update(_build_layout(state))
 
     cmd_idx = [0]
@@ -279,7 +242,7 @@ async def _run_batch_draw(state: TUIState, prompt: str, plotter, live_display: L
         await plotter.stream_program(program, on_command=on_command)
 
     state.elapsed = time.time() - t0
-    state.phase = "done"
+    state.set_phase(Phase.DONE)
     state.connected = False
     live_display.update(_build_layout(state))
     return result
@@ -298,7 +261,7 @@ def run_tui(
 ):
     """Launch the PromptPlot TUI."""
     console = Console()
-    state = TUIState(config)
+    state = DrawingSession(config)
 
     if simulate:
         state.plotter_type = "simulated"
@@ -320,16 +283,14 @@ def run_tui(
     console.clear()
 
     while True:
-        # Show current layout in idle state
-        state.phase = "idle"
-        state.commands.clear()
-        state.sent = 0
-        state.errors = 0
-        state.skipped = 0
-        state.grade = "-"
-        state.utilization = 0.0
-        state.strokes = 0
-        state.draw_travel = 0.0
+        # Reset for next drawing
+        state.reset()
+
+        if simulate:
+            state.plotter_type = "simulated"
+        elif port:
+            state.plotter_type = "serial"
+            state.plotter_port = port
 
         # Print the idle screen
         console.print(_build_layout(state))
@@ -362,7 +323,6 @@ def run_tui(
                 continue
             elif cmd in ("/style", "/s"):
                 if len(parts) > 1 and parts[1] in ("artistic", "precise", "sketch", "minimal"):
-                    # Would need to pass style through — for now just note it
                     console.print(f"  [green]Style: {parts[1]}[/green]")
                 else:
                     console.print("  [dim]Styles: artistic, precise, sketch, minimal[/dim]")

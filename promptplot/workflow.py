@@ -1,5 +1,5 @@
 """
-LlamaIndex Workflows for PromptPlot v3.0
+Workflows for PromptPlot v3.0
 
 LLM-driven GCode generation workflows:
 - BatchGCodeWorkflow: full program in one LLM call -> validate -> postprocess -> return
@@ -12,16 +12,15 @@ from pathlib import Path
 from typing import Union, Optional, List, Dict, Any
 from datetime import datetime
 
-from llama_index.core.workflow import (
-    Event, StartEvent, StopEvent, Workflow, step, Context,
-)
+from .engine import Event, StartEvent, StopEvent, Workflow, step, Context, DrawingSession, Phase, PenState
 from pydantic import ValidationError as PydanticValidationError
 
-from .models import GCodeCommand, GCodeProgram, WorkflowResult
+from .models import GCodeCommand, GCodeProgram, WorkflowResult, CompositionPlan
 from .config import get_config, PromptPlotConfig
 from .llm import (
     LLMProvider, get_llm_provider,
     build_gcode_prompt, build_reflection_prompt, build_next_command_prompt,
+    build_composition_plan_prompt,
     GCODE_PROGRAM_TEMPLATE, REFLECTION_PROMPT,
 )
 from .postprocess import run_pipeline
@@ -60,6 +59,11 @@ class RefinementEvent(Event):
     program: GCodeProgram
     prompt: str
     iteration: int
+
+
+class PlanEvent(Event):
+    plan: Any = None
+    prompt: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +206,8 @@ class BatchGCodeWorkflow(Workflow):
     def __init__(self, llm: Optional[LLMProvider] = None,
                  config: Optional[PromptPlotConfig] = None,
                  max_retries: int = 3, style: str = "artistic",
-                 style_profile: Optional[Any] = None, **kwargs):
+                 style_profile: Optional[Any] = None,
+                 session: Optional[DrawingSession] = None, **kwargs):
         kwargs.setdefault("timeout", 10000)
         super().__init__(**kwargs)
         self.config = config or get_config()
@@ -211,9 +216,10 @@ class BatchGCodeWorkflow(Workflow):
         self.style = style
         self.style_profile = style_profile
         self.memory = DrawingMemory()
+        self.session = session
 
     @step
-    async def start(self, ctx: Context, ev: StartEvent) -> GenerateGCodeEvent:
+    async def start(self, ctx: Context, ev: StartEvent) -> Union[GenerateGCodeEvent, PlanEvent]:
         prompt = getattr(ev, "prompt", "draw a simple square")
         logger.workflow_start("G-Code Generation Workflow", prompt)
         await ctx.set("max_retries", self.max_retries)
@@ -223,7 +229,46 @@ class BatchGCodeWorkflow(Workflow):
             "Max retries": self.max_retries,
             "Prompt": prompt,
         })
+        if self.session:
+            self.session.prompt = prompt
+
+        if self.config.workflow.planning_enabled:
+            if self.session:
+                self.session.set_phase(Phase.PLANNING)
+            return PlanEvent(prompt=prompt)
+
+        if self.session:
+            self.session.set_phase(Phase.GENERATING)
         return GenerateGCodeEvent(prompt=prompt)
+
+    @step
+    async def plan_composition(self, ctx: Context, ev: PlanEvent) -> GenerateGCodeEvent:
+        """LLM-driven composition planning step."""
+        logger.step_start("Composition Planning")
+        try:
+            plan_prompt = build_composition_plan_prompt(
+                ev.prompt, self.config.paper, self.style,
+            )
+            response = await self.llm.acomplete(plan_prompt)
+            cleaned = _clean_llm_output(response)
+            json_str = _extract_json(cleaned)
+            import json as _json
+            plan_data = _json.loads(json_str)
+            plan = CompositionPlan(**plan_data)
+
+            # Validate bounds
+            violations = plan.validate_bounds(self.config.paper.width, self.config.paper.height)
+            if violations:
+                logger.step_warning(f"Plan bounds violations: {len(violations)}")
+
+            await ctx.set("composition_plan", plan)
+            logger.step_success(f"Composition plan: {len(plan.subjects)} subjects")
+        except Exception as e:
+            logger.step_warning(f"Planning failed, proceeding without plan: {e}")
+
+        if self.session:
+            self.session.set_phase(Phase.GENERATING)
+        return GenerateGCodeEvent(prompt=ev.prompt)
 
     @step
     async def generate_gcode(self, ctx: Context,
@@ -283,6 +328,11 @@ class BatchGCodeWorkflow(Workflow):
                     style_profile=self.style_profile,
                     memory_entry=memory_entry,
                 )
+
+        # Inject composition plan guidance if available
+        composition_plan = await ctx.get("composition_plan")
+        if composition_plan is not None:
+            prompt += f"\n\n{composition_plan.to_prompt_guidance()}\n"
 
         logger.llm_call(type(self.llm).__name__, "", ev.prompt[:50])
         response = await self.llm.acomplete(prompt)
@@ -435,8 +485,16 @@ class BatchGCodeWorkflow(Workflow):
                     command_count=report.command_count,
                 )
                 logger.step_info(f"Drawing saved to memory (grade {report.grade})")
+            if self.session:
+                self.session.set_quality(
+                    report.grade, report.canvas_utilization,
+                    report.stroke_count, report.draw_travel_ratio,
+                )
         except Exception:
             pass
+
+        if self.session:
+            self.session.set_phase(Phase.DONE)
 
         return StopEvent(result={
             "prompt": ev.prompt,
@@ -464,7 +522,7 @@ class StreamingGCodeWorkflow(Workflow):
         self.max_steps = max_steps
 
     async def generate_gcode(self, prompt: str) -> WorkflowResult:
-        """Run streaming generation (not using LlamaIndex events for simplicity)."""
+        """Run streaming generation (not using workflow events for simplicity)."""
         commands: List[GCodeCommand] = []
         logger.stream_start("Streaming G-Code Generation", prompt, self.max_steps)
 
@@ -535,34 +593,28 @@ class LiveDrawWorkflow:
         plotter: Optional[BasePlotter] = None,
         max_steps: int = 80,
         on_step: Optional[Callable[[int, int, str, bool, List[str]], Awaitable[None]]] = None,
+        session: Optional[DrawingSession] = None,
     ):
-        """
-        Args:
-            llm: LLM provider for command generation.
-            config: Full PromptPlot config.
-            plotter: Connected plotter (SimulatedPlotter or SerialPlotter).
-            max_steps: Maximum number of LLM calls before forced completion.
-            on_step: Async callback(step_num, max_steps, gcode_str, sent_ok, warnings)
-                     called after each command is validated and sent (or skipped).
-        """
         self.config = config or get_config()
         self.llm = llm or get_llm_provider(self.config.llm)
         self.plotter = plotter
         self.max_steps = max_steps
         self.on_step = on_step
+        self.session = session
 
     async def run(self, prompt: str) -> Dict[str, Any]:
-        """Execute the live draw loop.
-
-        Returns dict with: prompt, commands (list[GCodeCommand]), sent_count,
-        error_count, skipped_count, gcode (str), success (bool).
-        """
+        """Execute the live draw loop."""
         commands_sent: List[GCodeCommand] = []
         all_commands: List[GCodeCommand] = []
         sent_count = 0
         error_count = 0
         skipped = 0
-        pen_is_down = False
+        pen_state = PenState()
+
+        if self.session:
+            self.session.prompt = prompt
+            self.session.mode = "live"
+            self.session.set_phase(Phase.STREAMING)
 
         # Start with pen up
         if self.plotter:
@@ -590,6 +642,8 @@ class LiveDrawWorkflow:
             except Exception as e:
                 if self.on_step:
                     await self.on_step(step_num, self.max_steps, f"LLM error: {e}", False, [])
+                if self.session:
+                    self.session.log_command(step_num, f"LLM error: {e}", "err")
                 error_count += 1
                 continue
 
@@ -601,6 +655,8 @@ class LiveDrawWorkflow:
             if isinstance(result, Exception):
                 if self.on_step:
                     await self.on_step(step_num, self.max_steps, f"parse error", False, [str(result)])
+                if self.session:
+                    self.session.log_command(step_num, "parse error", "skip")
                 skipped += 1
                 continue
 
@@ -608,6 +664,8 @@ class LiveDrawWorkflow:
                 # Got a full program instead of single command — skip
                 if self.on_step:
                     await self.on_step(step_num, self.max_steps, "unexpected format", False, [])
+                if self.session:
+                    self.session.log_command(step_num, "unexpected format", "skip")
                 skipped += 1
                 continue
 
@@ -615,11 +673,13 @@ class LiveDrawWorkflow:
             if result.command == "COMPLETE":
                 if self.on_step:
                     await self.on_step(step_num, self.max_steps, "COMPLETE", True, [])
+                if self.session:
+                    self.session.log_command(step_num, "COMPLETE", "DONE")
                 break
 
             # Per-command validation: bounds clamping + pen safety
             fixed_cmd, warnings, prefix_cmds = validate_single_command(
-                result, self.config.paper, pen_is_down,
+                result, self.config.paper, pen_state,
             )
 
             # Send prefix commands (pen safety fixes) to plotter
@@ -629,9 +689,9 @@ class LiveDrawWorkflow:
                     ok = await self.plotter.send_command(gcode)
                     all_commands.append(pcmd)
                     if pcmd.command == "M3":
-                        pen_is_down = True
+                        pen_state.set_down()
                     elif pcmd.command == "M5":
-                        pen_is_down = False
+                        pen_state.set_up()
                     if ok:
                         sent_count += 1
                     else:
@@ -649,14 +709,17 @@ class LiveDrawWorkflow:
                 all_commands.append(fixed_cmd)
                 # Track pen state
                 if fixed_cmd.command == "M3":
-                    pen_is_down = True
+                    pen_state.set_down()
                 elif fixed_cmd.command == "M5":
-                    pen_is_down = False
+                    pen_state.set_up()
             else:
                 error_count += 1
 
             if self.on_step:
                 await self.on_step(step_num, self.max_steps, gcode_str, ok, warnings)
+            if self.session:
+                status = "ok" if ok else "err"
+                self.session.log_command(step_num, gcode_str, status, warnings)
 
         # End with pen up + home
         if self.plotter:
@@ -670,6 +733,10 @@ class LiveDrawWorkflow:
                 sent_count += 1
 
         program = GCodeProgram(commands=all_commands)
+
+        if self.session:
+            self.session.set_phase(Phase.DONE)
+
         return {
             "prompt": prompt,
             "commands": all_commands,

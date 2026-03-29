@@ -169,6 +169,73 @@ class GCodeProgram(BaseModel):
         return counts
 
 
+# ---------------------------------------------------------------------------
+# Composition Planning (Feature 5)
+# ---------------------------------------------------------------------------
+
+class CompositionSubject(BaseModel):
+    """A single subject/element in a composition plan."""
+    name: str
+    description: str = ""
+    x: float       # center X position
+    y: float       # center Y position
+    width: float
+    height: float
+    density: str = "medium"  # sparse/medium/dense
+    priority: int = 1
+
+    @field_validator("density")
+    @classmethod
+    def validate_density(cls, v):
+        if v not in ("sparse", "medium", "dense"):
+            raise ValueError(f"density must be sparse/medium/dense, got {v}")
+        return v
+
+
+class CompositionPlan(BaseModel):
+    """LLM-generated composition plan for structured drawing."""
+    subjects: List[CompositionSubject]
+    style: str = "artistic"
+    estimated_commands: int = 50
+    notes: Optional[str] = None
+
+    @field_validator("subjects")
+    @classmethod
+    def validate_subjects_not_empty(cls, v):
+        if not v:
+            raise ValueError("CompositionPlan must have at least one subject")
+        return v
+
+    def validate_bounds(self, paper_w: float, paper_h: float) -> List[str]:
+        """Check subjects fit within paper bounds. Returns list of violations."""
+        violations = []
+        for s in self.subjects:
+            x_min = s.x - s.width / 2
+            x_max = s.x + s.width / 2
+            y_min = s.y - s.height / 2
+            y_max = s.y + s.height / 2
+            if x_min < 0 or x_max > paper_w:
+                violations.append(f"Subject '{s.name}' X range [{x_min:.1f}, {x_max:.1f}] outside [0, {paper_w:.1f}]")
+            if y_min < 0 or y_max > paper_h:
+                violations.append(f"Subject '{s.name}' Y range [{y_min:.1f}, {y_max:.1f}] outside [0, {paper_h:.1f}]")
+        return violations
+
+    def to_prompt_guidance(self) -> str:
+        """Convert plan to structured text for injection into GCode prompt."""
+        lines = ["COMPOSITION PLAN (follow these positions and sizes):"]
+        for i, s in enumerate(self.subjects, 1):
+            lines.append(
+                f"  {i}. {s.name}: center ({s.x:.1f}, {s.y:.1f}), "
+                f"size {s.width:.1f}x{s.height:.1f}mm, "
+                f"density={s.density}, priority={s.priority}"
+            )
+            if s.description:
+                lines.append(f"     {s.description}")
+        if self.notes:
+            lines.append(f"  Notes: {self.notes}")
+        return "\n".join(lines)
+
+
 class WorkflowResult(BaseModel):
     """Standardized workflow execution result."""
 

@@ -15,10 +15,11 @@ Pipeline order (critical — dwells MUST be last):
 
 import math
 import logging
-from typing import List, Tuple
+from typing import List, Tuple, Union
 
 from .models import GCodeCommand, GCodeProgram
 from .config import PenConfig, BrushConfig, PaperConfig, PromptPlotConfig
+from .engine import PenState
 
 _log = logging.getLogger(__name__)
 
@@ -93,7 +94,7 @@ def validate_bounds(
 def validate_single_command(
     cmd: GCodeCommand,
     paper: PaperConfig,
-    pen_is_down: bool,
+    pen_is_down: Union[bool, "PenState"],
 ) -> tuple[GCodeCommand, list[str], list[GCodeCommand]]:
     """Validate and fix a single command for live streaming.
 
@@ -102,6 +103,10 @@ def validate_single_command(
         prefix_commands: any pen safety commands to insert BEFORE this command
             (e.g., M5 before a G0 travel, M3 before a G1 draw)
     """
+    # Normalize PenState to bool for internal logic
+    if isinstance(pen_is_down, PenState):
+        pen_is_down = pen_is_down.is_down
+
     warnings: list[str] = []
     prefix: list[GCodeCommand] = []
 
@@ -193,32 +198,32 @@ def ensure_pen_safety(commands: List[GCodeCommand],
     """
     s_value = pen_config.pen_down_s_value if pen_config else 1000
     result: List[GCodeCommand] = []
-    pen_down = False
+    pen_state = PenState()
 
     if not commands or commands[0].command != "M5":
         result.append(GCodeCommand(command="M5"))
 
     for cmd in commands:
         if cmd.command == "M3":
-            pen_down = True
+            pen_state.set_down()
             result.append(cmd)
         elif cmd.command == "M5":
-            pen_down = False
+            pen_state.set_up()
             result.append(cmd)
         elif cmd.command == "G0":
-            if pen_down:
+            if pen_state.is_down:
                 result.append(GCodeCommand(command="M5"))
-                pen_down = False
+                pen_state.set_up()
             result.append(cmd)
         elif cmd.command == "G1":
-            if not pen_down:
+            if pen_state.is_up:
                 result.append(GCodeCommand(command="M3", s=s_value))
-                pen_down = True
+                pen_state.set_down()
             result.append(cmd)
         else:
             result.append(cmd)
 
-    if pen_down:
+    if pen_state.is_down:
         result.append(GCodeCommand(command="M5"))
 
     last_g0 = None
@@ -240,19 +245,19 @@ def extract_strokes(commands: List[GCodeCommand]) -> List[List[GCodeCommand]]:
     """Extract individual strokes (M3 ... G1s ... M5) from a command list."""
     strokes: List[List[GCodeCommand]] = []
     current: List[GCodeCommand] = []
-    pen_down = False
+    pen_state = PenState()
 
     for cmd in commands:
         if cmd.command == "M3":
-            pen_down = True
+            pen_state.set_down()
             current = [cmd]
         elif cmd.command == "M5":
             if current:
                 current.append(cmd)
                 strokes.append(current)
                 current = []
-            pen_down = False
-        elif pen_down and cmd.command == "G1":
+            pen_state.set_up()
+        elif pen_state.is_down and cmd.command == "G1":
             current.append(cmd)
 
     if current:

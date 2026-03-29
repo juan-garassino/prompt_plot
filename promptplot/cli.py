@@ -274,9 +274,11 @@ def preview(ctx, filepath, output, stats, show_score):
 @click.option("--min-grade", default="D",
               type=click.Choice(["A", "B", "C", "D", "F"]),
               help="Minimum quality grade to proceed to plotter (batch mode only)")
+@click.option("--resume", is_flag=True, help="Resume from last checkpoint")
+@click.option("--plan", "planning", is_flag=True, help="Enable LLM composition planning phase")
 @click.pass_context
 def draw(ctx, prompt, port, baud, simulate, provider, model, style,
-         multipass, live, max_steps, save, save_preview, min_grade):
+         multipass, live, max_steps, save, save_preview, min_grade, resume, planning):
     """Generate and draw in one shot: prompt → LLM → quality check → plotter.
 
     Two modes:
@@ -309,6 +311,8 @@ def draw(ctx, prompt, port, baud, simulate, provider, model, style,
         config.serial.baud_rate = baud
     if multipass:
         config.workflow.multipass.enabled = True
+    if planning:
+        config.workflow.planning_enabled = True
 
     grade_order = {"A": 4, "B": 3, "C": 2, "D": 1, "F": 0}
 
