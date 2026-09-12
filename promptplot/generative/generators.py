@@ -3069,6 +3069,43 @@ def lissajous_swarm(
 # ---------------------------------------------------------------------------
 
 
+def _catmull_subdivide(pts, pens=None, subdiv=3):
+    """Smooth a polyline with uniform Catmull-Rom subdivision (pens follow points)."""
+    n = len(pts)
+    if n < 4:
+        return pts, pens
+    out_p, out_pen = [], []
+    for i in range(n - 1):
+        p0 = pts[max(i - 1, 0)]
+        p1, p2 = pts[i], pts[i + 1]
+        p3 = pts[min(i + 2, n - 1)]
+        out_p.append(p1)
+        if pens is not None:
+            out_pen.append(pens[i])
+        for k in range(1, subdiv):
+            t = k / subdiv
+            t2, t3 = t * t, t * t * t
+            x = 0.5 * (
+                2 * p1[0]
+                + (-p0[0] + p2[0]) * t
+                + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2
+                + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3
+            )
+            y = 0.5 * (
+                2 * p1[1]
+                + (-p0[1] + p2[1]) * t
+                + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2
+                + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3
+            )
+            out_p.append((x, y))
+            if pens is not None:
+                out_pen.append(pens[i])
+    out_p.append(pts[-1])
+    if pens is not None:
+        out_pen.append(pens[-1])
+    return out_p, out_pen
+
+
 def _carlson_rf(x, y, z):
     """Carlson symmetric elliptic integral R_F (duplication algorithm)."""
     x, y, z = max(0.0, x), max(0.0, y), max(0.0, z)
@@ -3411,9 +3448,11 @@ def black_hole(
             for px, py in pts
         ]
         if colors <= 1 or not ws:
+            spts, _ = _catmull_subdivide(spts)
             out += _poly(spts, color=(colors - 1 if colors > 1 else None), f=feed)
             continue
         pens = [pen_of(w) for w in ws]
+        spts, pens = _catmull_subdivide(spts, pens)
         # absorb runs shorter than 4 vertices to avoid pen thrash
         i = 0
         while i < len(pens):
