@@ -52,6 +52,9 @@ def test_all_generators_registered():
         "line_halftone",
         "scribble_portrait",
         "sparkle_grid",
+        "iso_city",
+        "rounded_circuits",
+        "lissajous_swarm",
     ]:
         assert expected in gens
 
@@ -86,6 +89,9 @@ def test_all_generators_registered():
         "line_halftone",
         "scribble_portrait",
         "sparkle_grid",
+        "iso_city",
+        "rounded_circuits",
+        "lissajous_swarm",
     ],
 )
 def test_generator_deterministic_and_nonempty(name):
@@ -134,6 +140,9 @@ def test_different_seed_differs(name):
         "line_halftone",
         "scribble_portrait",
         "sparkle_grid",
+        "iso_city",
+        "rounded_circuits",
+        "lissajous_swarm",
     ],
 )
 def test_generator_within_bounds(name):
@@ -187,3 +196,82 @@ def test_anaglyph_layers_duplicates_with_pen_tags():
     for c in out:
         if c.x is not None:
             assert BOUNDS[0] - 0.5 <= c.x <= BOUNDS[2] + 0.5
+
+
+def _mk_gradient_png(tmp_path, name="grad.png", dark_left=True):
+    PIL = pytest.importorskip("PIL.Image")
+    img = PIL.new("L", (60, 40))
+    for x in range(60):
+        v = int(255 * (x / 59)) if dark_left else int(255 * (1 - x / 59))
+        for y in range(40):
+            img.putpixel((x, y), v)
+    p = tmp_path / name
+    img.save(p)
+    return str(p)
+
+
+def test_line_halftone_stays_inside_image_band(tmp_path):
+    img = _mk_gradient_png(tmp_path)
+    from promptplot.generative.generators import _image_tone_grid
+    from promptplot.generative import SeededRNG
+    rng = SeededRNG(3)
+    gw, gh, off_x, off_y, _ = _image_tone_grid(SeededRNG(3), BOUNDS, img, 1.6, False)
+    top = off_y + gh * 1.6
+    cmds = run_generator("line_halftone", BOUNDS, seed=3, params={"image": img, "pitch": 1.6})
+    assert cmds
+    for c in cmds:
+        if c.y is not None:
+            assert c.y <= top + 0.6, f"command above image band: y={c.y} top={top}"
+
+
+def test_line_halftone_dark_runs_are_multi_pass(tmp_path):
+    img = _mk_gradient_png(tmp_path)
+    cmds = run_generator("line_halftone", BOUNDS, seed=3, params={"image": img, "pitch": 1.6})
+    # count distinct x positions per ~vertical stroke: dark side should produce
+    # parallel passes offset by <1mm around some lines
+    xs = sorted({c.x for c in cmds if c.command == "G0" and c.x is not None})
+    close_pairs = sum(1 for a, b in zip(xs, xs[1:]) if 0.1 < b - a < 0.6)
+    assert close_pairs >= 3, f"expected multi-pass offsets, close pairs={close_pairs}"
+
+
+def test_sparkle_grid_spurs_never_overlap():
+    cmds = run_generator("sparkle_grid", BOUNDS, seed=9, params={"fill": 1.0})
+    # collect 2-point axis-aligned strokes (the spurs) grouped by their line
+    horiz = {}
+    vert = {}
+    stroke = []
+    for c in cmds:
+        if c.command == "G0":
+            stroke = [c]
+        elif c.command == "G1":
+            stroke.append(c)
+        elif c.command == "M5" and len(stroke) == 2:
+            a, b = stroke
+            if a.y == b.y:
+                horiz.setdefault(a.y, []).append(tuple(sorted((a.x, b.x))))
+            elif a.x == b.x:
+                vert.setdefault(a.x, []).append(tuple(sorted((a.y, b.y))))
+    for groups in (horiz, vert):
+        for key, ivs in groups.items():
+            ivs = sorted(ivs)
+            for (a1, b1), (a2, b2) in zip(ivs, ivs[1:]):
+                assert a2 >= b1 - 0.01, f"overlapping spurs on line {key}: {(a1,b1)} vs {(a2,b2)}"
+
+
+@pytest.mark.parametrize("system", [
+    "lorenz", "rossler", "halvorsen", "aizawa", "rabinovich_fabrikant",
+    "chen", "newton_leipnik", "burke_shaw", "finance", "three_scroll", "qi",
+])
+def test_every_attractor_system_healthy(system):
+    cmds = run_generator("strange_attractor", BOUNDS, seed=5,
+                         params={"system": system, "steps": 6000})
+    a = [c.to_gcode() for c in cmds]
+    b = [c.to_gcode() for c in run_generator("strange_attractor", BOUNDS, seed=5,
+                                             params={"system": system, "steps": 6000})]
+    assert len(cmds) > 50, f"{system} produced too little"
+    assert a == b, f"{system} not deterministic"
+    for c in cmds:
+        if c.x is not None:
+            assert BOUNDS[0] - 0.5 <= c.x <= BOUNDS[2] + 0.5
+        if c.y is not None:
+            assert BOUNDS[1] - 0.5 <= c.y <= BOUNDS[3] + 0.5

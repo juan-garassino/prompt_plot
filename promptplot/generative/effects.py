@@ -76,3 +76,100 @@ def anaglyph_layers(
                 nc.color = L
             out.append(nc)
     return out
+
+
+def limit_ink_density(
+    commands: List[GCodeCommand],
+    cell: float = 1.0,
+    max_passes: int = 8,
+    min_run: float = 2.0,
+    decimate: float = 2.0,
+) -> List[GCodeCommand]:
+    """Cap how many times the pen may pass over any ``cell``-mm spot.
+
+    A deterministic post-process applicable to ANY generator's output: strokes
+    are re-sampled and split wherever a cell has already been inked
+    ``max_passes`` times, so dense knots (attractor/harmonograph convergence
+    zones, interference pileups) thin out instead of chewing through the paper.
+    """
+    counts: dict = {}
+
+    def cell_of(x, y):
+        return (int(x / cell), int(y / cell))
+
+    out: List[GCodeCommand] = []
+    i = 0
+    n = len(commands)
+    while i < n:
+        c = commands[i]
+        if c.command != "M3":
+            out.append(c)
+            i += 1
+            continue
+        m3 = c
+        # stroke start = trailing G0 we already emitted
+        start = None
+        if out and out[-1].command == "G0" and out[-1].x is not None:
+            start = (out[-1].x, out[-1].y)
+            out.pop()
+        j = i + 1
+        g1s = []
+        while j < n and commands[j].command == "G1":
+            g1s.append(commands[j])
+            j += 1
+        if j < n and commands[j].command == "M5":
+            j += 1
+        template = g1s[0] if g1s else None
+        path = ([start] if start else []) + [(g.x, g.y) for g in g1s if g.x is not None]
+
+        # never densify beyond the stroke's native vertex spacing
+        path_len = sum(
+            math.hypot(bpt[0] - apt[0], bpt[1] - apt[1]) for apt, bpt in zip(path, path[1:])
+        )
+        dec = max(decimate, 0.95 * path_len / max(1, len(path) - 1))
+
+        runs = []
+        cur: list = []
+        prev_cell = None
+        for (xa, ya), (xb, yb) in zip(path, path[1:]):
+            seg_len = math.hypot(xb - xa, yb - ya)
+            ns = max(1, int(seg_len / 0.4))
+            for k in range(1, ns + 1):
+                px = xa + (xb - xa) * k / ns
+                py = ya + (yb - ya) * k / ns
+                cl = cell_of(px, py)
+                if cl != prev_cell:
+                    prev_cell = cl
+                    cnt = counts.get(cl, 0)
+                    if cnt >= max_passes:
+                        if len(cur) >= 2:
+                            runs.append(cur)
+                        cur = []
+                        continue
+                    counts[cl] = cnt + 1
+                cur.append((px, py)) if cur else cur.extend([(px, py)])
+        if len(cur) >= 2:
+            runs.append(cur)
+
+        for r in runs:
+            # decimate resampled points back to a plottable polyline
+            slim = [r[0]]
+            for pnt in r[1:-1]:
+                if math.hypot(pnt[0] - slim[-1][0], pnt[1] - slim[-1][1]) >= dec:
+                    slim.append(pnt)
+            slim.append(r[-1])
+            total_len = sum(
+                math.hypot(bpt[0] - apt[0], bpt[1] - apt[1]) for apt, bpt in zip(slim, slim[1:])
+            )
+            if len(slim) < 2 or total_len < min_run:
+                continue
+            out.append(GCodeCommand(command="G0", x=round(slim[0][0], 2), y=round(slim[0][1], 2)))
+            out.append(m3.model_copy())
+            for pnt in slim[1:]:
+                g = template.model_copy() if template else GCodeCommand(command="G1", f=1500)
+                g.x = round(pnt[0], 2)
+                g.y = round(pnt[1], 2)
+                out.append(g)
+            out.append(GCodeCommand(command="M5"))
+        i = j
+    return out

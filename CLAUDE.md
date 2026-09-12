@@ -117,9 +117,10 @@ config-aware prompts, bounds validation, multimodal vision feedback, style prese
 **seeded generative art** (deterministic-from-seed `art` command: tiled_field, ripple_field, flow_field,
 maze, truchet, wave_bands, stipple, waves_with_circles, crosshatch_weave, turning_weave, wave_gradient,
 interference_field, frequency_lens, hitomezashi, harmonograph, vortex_field, moire_layers,
-strange_attractor, domain_warp, contour_field, superformula_bloom, lissajous_carpet,
-scribble_halftone, comic_panels, line_halftone, scribble_portrait, sparkle_grid — 27 total;
-plus the `--anaglyph`/`--glitch` red-cyan offset effect applicable to any generator),
+strange_attractor (11 systems), domain_warp, contour_field, superformula_bloom, lissajous_carpet,
+scribble_halftone (shape-aware), comic_panels, line_halftone, scribble_portrait, sparkle_grid,
+iso_city, rounded_circuits, lissajous_swarm — 33 total;
+plus effects applicable to any generator: `--anaglyph`/`--glitch` red-cyan offset, and `--max-ink N` ink-density cap — no spot gets more than N pen passes),
 **SVG + DXF import** (split by stroke color / DXF layer → color layers),
 selectable paper size (A3/A4/A5/A6 via `--paper`),
 quality scoring with letter grades (A–F), drawing memory for few-shot learning,
@@ -200,9 +201,15 @@ peaks), `flow_field` (evenly-spaced non-overlapping streamlines, Jobard–Lefebv
 `contour_field` (marching-squares topographic isolines of noise/blobs/ridge fields),
 `superformula_bloom` (nested rotating superformula shells — botanical mandala),
 `lissajous_carpet` (the classic Lissajous frequency table as a grid of curve cells),
-`scribble_halftone` / `line_halftone` / `scribble_portrait` (image-driven: photo tones → dashes / line-screen / continuous scribble; `--param image=path`, Pillow via the `vision` extra; procedural fbm fallback without an image),
+`scribble_halftone` / `line_halftone` / `scribble_portrait` (image-driven: photo tones → dashes / line-screen / continuous scribble; `--param image=path`, Pillow via the `vision` extra; procedural fbm fallback without an image).
+Image fit rule: pictures **cover-fit** the drawable area — auto-rotated 90° to match the paper's orientation, filling everything inside the margins, center-cropping overflow (`_image_tone_grid`).
+`scribble_halftone` is **shape-aware** by default: dash direction follows the image's contour tangents (Sobel + structure tensor), blends into a noise field in flat tone, cross-hatches darks. `line_halftone` plays with effective pen width (dark runs drawn as doubled/tripled parallel passes). `scribble_portrait` leaves highlights as blank paper (steep capacity curve).
 `comic_panels` (seeded comic-page layout, max 3 panels, default pool vortex+contours; `subs` overrides),
-`sparkle_grid` (mid-century atomic stars, nested pens + long spurs).
+`sparkle_grid` (mid-century atomic stars on a STRICT grid; tight shells (`shell_gap`), slim arms (`slim` exponent), per-gridline interval registry keeps spur arms from overlapping ink; tip relief avoids pooling),
+`iso_city` (voxel city, unit-gridded faces, hidden lines removed via front-to-back occupancy-mask claiming; `projection=2pt|1pt|iso` — real vanishing-point perspective by default, `persp` controls strength),
+`rounded_circuits` (guillotine regions filled with serpentine conveyor-belt bands — parallel lines snaking through rounded U-turns, pink/blue interlock),
+`lissajous_swarm` (phase-swept Lissajous family — sheared 3D tube/butterfly moiré, red/black split).
+`strange_attractor` systems (formCollapse catalog; divergent variants replaced with classical dynamics): lorenz, rossler, halvorsen, aizawa, rabinovich_fabrikant, chen, newton_leipnik, burke_shaw, finance, three_scroll, qi.
 Effects (`generative/effects.py`): `--anaglyph [--anaglyph-offset MM] [--glitch N]` duplicates ANY generator into offset red/cyan pen layers with seeded glitch bands.
 Paper safety: `harmonograph`/`strange_attractor` have an `overdraw` cap (default 6 hits per 0.8mm cell) so converging lines can't chew through the paper.
 `art --port …` streams Leo-ready: heartbeat off + mandatory pen-up limits trace before inking.

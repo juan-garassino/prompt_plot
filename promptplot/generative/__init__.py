@@ -5,7 +5,7 @@ strokes that flow through the normal postprocess / preview / streaming pipeline.
 """
 
 from .rng import SeededRNG
-from .effects import anaglyph_layers
+from .effects import anaglyph_layers, limit_ink_density
 from .registry import (
     GENERATOR_REGISTRY,
     list_generators,
@@ -18,6 +18,7 @@ from .registry import (
 __all__ = [
     "SeededRNG",
     "anaglyph_layers",
+    "limit_ink_density",
     "GENERATOR_REGISTRY",
     "list_generators",
     "get_generator_schema",

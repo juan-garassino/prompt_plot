@@ -42,6 +42,9 @@ GENERATOR_REGISTRY = {
     "line_halftone": _g.line_halftone,
     "scribble_portrait": _g.scribble_portrait,
     "sparkle_grid": _g.sparkle_grid,
+    "iso_city": _g.iso_city,
+    "rounded_circuits": _g.rounded_circuits,
+    "lissajous_swarm": _g.lissajous_swarm,
 }
 
 _SKIP_PARAMS = {"rng", "bounds"}

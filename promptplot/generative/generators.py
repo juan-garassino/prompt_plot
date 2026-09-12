@@ -1179,6 +1179,65 @@ _ATTRACTOR_SYSTEMS = {
         (0.1, 0.0, 0.0),
         800,
     ),
+    # --- ported from the formCollapse catalog (docs/attractors.md params). ---
+    # burke_shaw / finance / three_scroll / qi use the corrected classical
+    # dynamics (the catalog variants diverge numerically); anishchenko, arnold,
+    # chen_celikovsky, rayleigh_benard, tsucs1, liu_chen and the discrete maps
+    # are omitted — degenerate or divergent in every probed form.
+    "rabinovich_fabrikant": (
+        lambda x, y, z: (
+            y * (z - 1 + x * x) + 0.10 * x,
+            x * (3 * z + 1 - x * x) + 0.10 * y,
+            -2 * z * (0.14 + x * y),
+        ),
+        0.01,
+        (-1.0, 0.0, 0.5),
+        1000,
+    ),
+    "chen": (
+        lambda x, y, z: (35 * (y - x), (28 - 35) * x - x * z + 28 * y, x * y - 3 * z),
+        0.002,
+        (-0.1, 0.5, -0.6),
+        1000,
+    ),
+    "newton_leipnik": (
+        lambda x, y, z: (
+            -0.4 * x + y + 10 * y * z,
+            -x - 0.4 * y + 5 * x * z,
+            0.175 * z - 5 * x * y,
+        ),
+        0.01,
+        (0.349, 0.0, -0.16),
+        1000,
+    ),
+    "burke_shaw": (
+        lambda x, y, z: (-10 * (x + y), -y - 10 * x * z, 10 * x * y + 4.272),
+        0.003,
+        (1.0, 0.0, 0.0),
+        800,
+    ),
+    "finance": (
+        lambda x, y, z: (z + (y - 0.001) * x, 1 - 0.2 * y - x * x, -x - 1.1 * z),
+        0.01,
+        (1.0, 2.0, -0.5),
+        800,
+    ),
+    "three_scroll": (
+        lambda x, y, z: (
+            40 * (y - x) + 0.16 * x * z,
+            55 * x - x * z + 20 * y,
+            1.833 * z + x * y - 0.65 * x * x,
+        ),
+        0.0008,
+        (0.1, 1.0, 0.1),
+        1200,
+    ),
+    "qi": (
+        lambda x, y, z: (38 * (y - x) + y * z, 80 * x + y - x * z, x * y - 2.666 * z),
+        0.001,
+        (3.0, 2.0, 20.0),
+        800,
+    ),
 }
 
 
@@ -1196,7 +1255,9 @@ def strange_attractor(
     """A strange attractor traced as one continuous line (controlled chaos).
 
     Systems ported from the formCollapse catalog: ``lorenz``, ``rossler``,
-    ``halvorsen``, ``aizawa``. RK4-integrated; the seed jitters the initial
+    ``halvorsen``, ``aizawa``, ``rabinovich_fabrikant``, ``chen``,
+    ``newton_leipnik``, ``burke_shaw``, ``finance``, ``three_scroll``, ``qi``.
+    RK4-integrated; the seed jitters the initial
     condition and picks the 3D→2D projection angle, so every seed is a different
     view of the same chaos. With ``colors`` > 1 the timeline splits into pens.
     """
@@ -1588,85 +1649,77 @@ def scribble_halftone(
     max_per_cell: int = 3,
     dash_len: float = 3.2,
     gamma: float = 1.4,
-    threshold: float = 0.08,
+    threshold: float = 0.12,
     max_strokes: int = 14000,
     invert: bool = False,
+    shape_aware: bool = True,
+    cross_threshold: float = 0.66,
     feed: int = 1800,
 ) -> List[GCodeCommand]:
-    """Render an image as a field of short scribbled dashes (hatching portrait).
+    """Render an image as a field of short hatching dashes (hatching portrait).
 
-    Darkness drives density: dark areas get up to ``max_per_cell`` crossing
-    dashes per ``cell`` mm; light areas stay blank. Dash positions/angles are
-    seeded, so the same seed + image reproduces exactly. Without ``image`` a
-    procedural fbm tone field is used (standalone demo mode). With multiple
-    pens, tonal bands map to pens (darkest band → pen 0).
-    Requires Pillow for image input (``pip install -e ".[vision]"``).
+    Darkness drives density; with ``shape_aware`` (default) each dash's
+    DIRECTION follows the image: along the local contour tangent where the
+    structure tensor is coherent (edges, brows, lids), blending into a seeded
+    smooth noise field in flat tone — the drawing behaves like a field shaped
+    by the picture. Dash length grows with coherence (long strokes along
+    edges, short ticks in flat shade). Cells darker than ``cross_threshold``
+    get a second family of dashes rotated 60–90° (cross-hatched shadows).
+    Without ``image`` a procedural fbm field is used. Tonal bands map to pens
+    (darkest band → pen 0). Requires Pillow for image input.
     """
     x0, y0, x1, y1 = bounds
-    bw, bh = x1 - x0, y1 - y0
+    gw, gh, off_x, off_y, tone = _image_tone_grid(rng, bounds, image, cell, invert)
+    if shape_aware:
+        tangent, coherence = _image_orientation_grid(gw, gh, tone)
 
-    if image:
-        try:
-            from PIL import Image
-        except ImportError:
-            raise RuntimeError("Pillow required for image input: pip install -e '.[vision]'")
-        img = Image.open(image).convert("L")
-        # fit image into bounds preserving aspect, centered
-        iw, ih = img.size
-        s = min(bw / iw, bh / ih)
-        gw = max(2, int(iw * s / cell))
-        gh = max(2, int(ih * s / cell))
-        small = img.resize((gw, gh))
-        px = small.load()
-        off_x = x0 + (bw - gw * cell) / 2.0
-        off_y = y0 + (bh - gh * cell) / 2.0
-
-        def tone(i, j):
-            # image y grows downward; flip so the drawing isn't mirrored
-            v = px[i, gh - 1 - j] / 255.0
-            return v if invert else 1.0 - v
-
-    else:
-        gw = max(2, int(bw / cell))
-        gh = max(2, int(bh / cell))
-        off_x, off_y = x0, y0
-
-        def tone(i, j):
-            return rng.fbm(i * 0.06, j * 0.06, octaves=4)
-
-    # first pass: total demand so we can thin uniformly to max_strokes
+    # first pass: demand so we can thin uniformly to max_strokes
     demand = []
     total = 0
     for j in range(gh):
         for i in range(gw):
-            d = tone(i, j)
-            d = max(0.0, min(1.0, d)) ** gamma
+            d = max(0.0, min(1.0, tone(i, j))) ** gamma
             if d < threshold:
                 continue
             n = max(1, round(d * max_per_cell))
-            demand.append((i, j, d, n))
-            total += n
+            n_cross = round(d * max_per_cell * 0.7) if d > cross_threshold else 0
+            demand.append((i, j, d, n, n_cross))
+            total += n + n_cross
     keep = min(1.0, max_strokes / total) if total else 0.0
 
+    def _angle(i, j):
+        if not shape_aware:
+            return rng.uniform(0, math.pi)
+        th_t = tangent(i, j)
+        c = coherence(i, j) ** 0.7
+        th_n = rng.fbm(i * 0.05, j * 0.05, octaves=3) * math.pi
+        # blend orientations on the doubled-angle circle (they are mod pi)
+        vx = c * math.cos(2 * th_t) + (1 - c) * math.cos(2 * th_n)
+        vy = c * math.sin(2 * th_t) + (1 - c) * math.sin(2 * th_n)
+        return 0.5 * math.atan2(vy, vx) + rng.uniform(-0.14, 0.14)
+
     out: List[GCodeCommand] = []
-    placed = 0
-    for i, j, d, n in demand:
+    for i, j, d, n, n_cross in demand:
         cx = off_x + (i + 0.5) * cell
         cy = off_y + (j + 0.5) * cell
-        for _ in range(n):
-            if keep < 1.0 and rng.random() > keep:
-                continue
-            ang = rng.uniform(0, math.pi)
-            L = dash_len * rng.uniform(0.6, 1.0) * (0.6 + 0.4 * d)
-            jx = cx + rng.uniform(-cell, cell) * 0.45
-            jy = cy + rng.uniform(-cell, cell) * 0.45
-            dx = math.cos(ang) * L / 2
-            dy = math.sin(ang) * L / 2
-            p0 = (_clamp(jx - dx, x0, x1), _clamp(jy - dy, y0, y1))
-            p1 = (_clamp(jx + dx, x0, x1), _clamp(jy + dy, y0, y1))
-            color = min(colors - 1, int((1.0 - d) * colors)) if colors > 1 else None
-            out += _poly([p0, p1], color=color, f=feed)
-            placed += 1
+        c = coherence(i, j) if shape_aware else 0.5
+        for pass_kind in range(2):
+            count = n if pass_kind == 0 else n_cross
+            for _ in range(count):
+                if keep < 1.0 and rng.random() > keep:
+                    continue
+                ang = _angle(i, j)
+                if pass_kind == 1:  # cross-hatch family in dark cells
+                    ang += math.radians(rng.uniform(60.0, 90.0))
+                L = dash_len * (0.55 + 0.75 * c) * rng.uniform(0.65, 1.0) * (0.6 + 0.4 * d)
+                jx = cx + rng.uniform(-cell, cell) * 0.45
+                jy = cy + rng.uniform(-cell, cell) * 0.45
+                dx = math.cos(ang) * L / 2
+                dy = math.sin(ang) * L / 2
+                p0 = (_clamp(jx - dx, x0, x1), _clamp(jy - dy, y0, y1))
+                p1 = (_clamp(jx + dx, x0, x1), _clamp(jy + dy, y0, y1))
+                color = min(colors - 1, int((1.0 - d) * colors)) if colors > 1 else None
+                out += _poly([p0, p1], color=color, f=feed)
     return out
 
 
@@ -1804,9 +1857,15 @@ def comic_panels(
 # ---------------------------------------------------------------------------
 
 
-def _image_tone_grid(rng: SeededRNG, bounds: Bounds, image: str, cell: float, invert: bool):
+def _image_tone_grid(
+    rng: SeededRNG, bounds: Bounds, image: str, cell: float, invert: bool, auto_levels: bool = True
+):
     """Return (gw, gh, off_x, off_y, tone(i, j)) — image fitted to bounds, or a
-    procedural fbm field when no image is given (standalone demo mode)."""
+    procedural fbm field when no image is given (standalone demo mode).
+
+    ``auto_levels`` stretches tones to the 5th–95th percentile of the sampled
+    grid, so washed-out photos still produce blank highlights and solid darks.
+    """
     x0, y0, x1, y1 = bounds
     bw, bh = x1 - x0, y1 - y0
     if image:
@@ -1816,27 +1875,106 @@ def _image_tone_grid(rng: SeededRNG, bounds: Bounds, image: str, cell: float, in
             raise RuntimeError("Pillow required for image input: pip install -e '.[vision]'")
         img = Image.open(image).convert("L")
         iw, ih = img.size
-        s = min(bw / iw, bh / ih)
-        gw = max(2, int(iw * s / cell))
-        gh = max(2, int(ih * s / cell))
+        # auto-rotate: align the image's long side with the paper's long side
+        if (iw >= ih) != (bw >= bh):
+            img = img.transpose(Image.ROTATE_90)
+            iw, ih = ih, iw
+        # cover-fit: fill the WHOLE drawable area (max scale), center-cropping
+        # the overflow so the drawing uses every mm inside the margins
+        sc = max(bw / iw, bh / ih)
+        crop_w = min(iw, bw / sc)
+        crop_h = min(ih, bh / sc)
+        left = (iw - crop_w) / 2.0
+        top = (ih - crop_h) / 2.0
+        img = img.crop((int(left), int(top), int(left + crop_w), int(top + crop_h)))
+        gw = max(2, int(bw / cell))
+        gh = max(2, int(bh / cell))
         small = img.resize((gw, gh))
         px = small.load()
-        off_x = x0 + (bw - gw * cell) / 2.0
-        off_y = y0 + (bh - gh * cell) / 2.0
+        off_x = x0
+        off_y = y0
+        # flip j: image y grows downward
+        T = [[(px[i, gh - 1 - j] / 255.0) for i in range(gw)] for j in range(gh)]
+        if not invert:
+            T = [[1.0 - v for v in row] for row in T]
+    else:
+        gw = max(2, int(bw / cell))
+        gh = max(2, int(bh / cell))
+        off_x, off_y = x0, y0
+        T = [[rng.fbm(i * 0.06, j * 0.06, octaves=4) for i in range(gw)] for j in range(gh)]
 
-        def tone(i, j):
-            v = px[i, gh - 1 - j] / 255.0  # flip: image y grows downward
-            return v if invert else 1.0 - v
-
-        return gw, gh, off_x, off_y, tone
-
-    gw = max(2, int(bw / cell))
-    gh = max(2, int(bh / cell))
+    if auto_levels:
+        flat = sorted(v for row in T for v in row)
+        p5 = flat[int(0.05 * (len(flat) - 1))]
+        p95 = flat[int(0.95 * (len(flat) - 1))]
+        span = max(1e-6, p95 - p5)
+        T = [[min(1.0, max(0.0, (v - p5) / span)) for v in row] for row in T]
 
     def tone(i, j):
-        return rng.fbm(i * 0.06, j * 0.06, octaves=4)
+        return T[j][i]
 
-    return gw, gh, x0, y0, tone
+    return gw, gh, off_x, off_y, tone
+
+
+def _image_orientation_grid(gw: int, gh: int, tone):
+    """Per-cell contour direction + coherence from the tone grid.
+
+    Sobel gradients, then a 3×3-smoothed structure tensor:
+    ``theta = 0.5*atan2(2*Jxy, Jxx - Jyy)`` is the dominant gradient direction;
+    the contour tangent is theta + 90°. Coherence in [0,1] says how organized
+    the local structure is (1 = strong edge, 0 = flat tone).
+    Returns (tangent(i, j) -> radians, coherence(i, j) -> 0..1).
+    """
+
+    def t(i, j):
+        return tone(min(gw - 1, max(0, i)), min(gh - 1, max(0, j)))
+
+    gx = [[0.0] * gw for _ in range(gh)]
+    gy = [[0.0] * gw for _ in range(gh)]
+    for j in range(gh):
+        for i in range(gw):
+            gx[j][i] = (
+                t(i + 1, j - 1)
+                + 2 * t(i + 1, j)
+                + t(i + 1, j + 1)
+                - t(i - 1, j - 1)
+                - 2 * t(i - 1, j)
+                - t(i - 1, j + 1)
+            ) / 8.0
+            gy[j][i] = (
+                t(i - 1, j + 1)
+                + 2 * t(i, j + 1)
+                + t(i + 1, j + 1)
+                - t(i - 1, j - 1)
+                - 2 * t(i, j - 1)
+                - t(i + 1, j - 1)
+            ) / 8.0
+
+    def tensors(i, j):
+        jxx = jyy = jxy = 0.0
+        for dj in (-1, 0, 1):
+            for di in (-1, 0, 1):
+                ii = min(gw - 1, max(0, i + di))
+                jj = min(gh - 1, max(0, j + dj))
+                a, b = gx[jj][ii], gy[jj][ii]
+                jxx += a * a
+                jyy += b * b
+                jxy += a * b
+        return jxx, jyy, jxy
+
+    def tangent(i, j):
+        jxx, jyy, jxy = tensors(i, j)
+        theta = 0.5 * math.atan2(2 * jxy, jxx - jyy)  # gradient direction
+        return theta + math.pi / 2  # contour tangent
+
+    def coherence(i, j):
+        jxx, jyy, jxy = tensors(i, j)
+        tr = jxx + jyy
+        if tr < 1e-9:
+            return 0.0
+        return min(1.0, math.sqrt((jxx - jyy) ** 2 + 4 * jxy * jxy) / tr)
+
+    return tangent, coherence
 
 
 # ---------------------------------------------------------------------------
@@ -1850,68 +1988,77 @@ def line_halftone(
     colors: int = 1,
     image: str = "",
     pitch: float = 1.6,
-    seg: float = 1.8,
     gamma: float = 1.3,
-    threshold: float = 0.08,
+    threshold: float = 0.10,
     direction: str = "v",
     invert: bool = False,
+    width_gap: float = 0.45,
+    width2_threshold: float = 0.62,
+    width3_threshold: float = 0.88,
     feed: int = 1800,
 ) -> List[GCodeCommand]:
     """Image rendered as a vertical (or horizontal) line screen.
 
-    Parallel lines at ``pitch`` mm; along each line, dark tones draw solid runs,
-    midtones break into dashes (duty cycle ∝ darkness), highlights stay blank —
-    the classic line-screen photo look (forest-print style). Without ``image``
-    a procedural field is used. Tonal bands map to pens (darkest → pen 0).
+    Parallel lines at ``pitch`` mm sampled on a square pitch grid: dark tones
+    draw solid runs, midtones break into dashes (duty ∝ darkness), highlights
+    stay blank. Dark runs get pen-width play: ≥``width2_threshold`` draws a
+    doubled parallel pass (±``width_gap``/2), ≥``width3_threshold`` a tripled
+    one — thick where the image is dark, hairline where light. Tonal bands map
+    to pens (darkest → pen 0). Without ``image`` a procedural field is used.
     """
     x0, y0, x1, y1 = bounds
     gw, gh, off_x, off_y, tone = _image_tone_grid(rng, bounds, image, pitch, invert)
 
     vertical = direction != "h"
-    out: List[GCodeCommand] = []
     n_lines = gw if vertical else gh
     n_steps = gh if vertical else gw
+    region_end = (off_y + gh * pitch) if vertical else (off_x + gw * pitch)
+
+    out: List[GCodeCommand] = []
     for li in range(n_lines):
-        run_start = None
-        run_d = 0.0
+        line_pos = (off_x + (li + 0.5) * pitch) if vertical else (off_y + (li + 0.5) * pitch)
+        run: list = []  # [start, end, max_d] of the open run
 
-        def flush(end_pos):
-            nonlocal run_start, run_d
-            if run_start is None:
+        def emit():
+            if not run:
                 return
-            a, b = run_start, end_pos
-            if b - a > 0.3:
-                d = run_d
-                color = min(colors - 1, int((1.0 - d) * colors)) if colors > 1 else None
+            a, b, d = run[0], run[1], run[2]
+            run.clear()
+            if b - a < 0.3:
+                return
+            color = min(colors - 1, int((1.0 - d) * colors)) if colors > 1 else None
+            if d >= width3_threshold:
+                offs = (-width_gap, 0.0, width_gap)
+            elif d >= width2_threshold:
+                offs = (-width_gap / 2, width_gap / 2)
+            else:
+                offs = (0.0,)
+            for o in offs:
                 if vertical:
-                    xpos = off_x + (li + 0.5) * pitch
-                    out.extend(_poly([(xpos, a), (xpos, b)], color=color, f=feed))
+                    xp = _clamp(line_pos + o, x0, x1)
+                    out.extend(_poly([(xp, a), (xp, b)], color=color, f=feed))
                 else:
-                    ypos = off_y + (li + 0.5) * pitch
-                    out.extend(_poly([(a, ypos), (b, ypos)], color=color, f=feed))
-            run_start = None
-            run_d = 0.0
+                    yp = _clamp(line_pos + o, y0, y1)
+                    out.extend(_poly([(a, yp), (b, yp)], color=color, f=feed))
 
-        for si in range(n_steps):
-            i, j = (li, si) if vertical else (si, li)
+        for sj in range(n_steps):
+            i, j = (li, sj) if vertical else (sj, li)
             d = max(0.0, min(1.0, tone(i, j))) ** gamma
-            pos0 = (off_y if vertical else off_x) + si * seg * (1.0 if seg else 1.0)
-            pos0 = (off_y + si * seg) if vertical else (off_x + si * seg)
-            hi_lim = y1 if vertical else x1
-            if pos0 > hi_lim:
-                break
+            cell_a = (off_y if vertical else off_x) + sj * pitch
             if d < threshold:
-                flush(pos0)
+                emit()
                 continue
             duty = min(1.0, d * 1.25)
-            if run_start is None:
-                run_start = pos0 + seg * (1.0 - duty) / 2.0
-                run_d = d
-            run_d = max(run_d, d)
-            seg_end = min(pos0 + seg * (0.5 + duty / 2.0), hi_lim)
+            a = cell_a + pitch * (1.0 - duty) / 2.0
+            b = min(cell_a + pitch * (0.5 + duty / 2.0), region_end)
+            if run:
+                run[1] = b
+                run[2] = max(run[2], d)
+            else:
+                run[:] = [a, b, d]
             if duty < 0.92:
-                flush(seg_end)
-        flush(hi_lim)
+                emit()
+        emit()
     return out
 
 
@@ -1926,10 +2073,11 @@ def scribble_portrait(
     colors: int = 1,
     image: str = "",
     cell: float = 2.8,
-    passes: float = 2.0,
-    radius: int = 4,
-    gamma: float = 1.5,
-    threshold: float = 0.12,
+    passes: float = 3.0,
+    radius: int = 2,
+    gamma: float = 2.0,
+    threshold: float = 0.30,
+    contrast: float = 1.0,
     smooth: int = 2,
     max_points: int = 9000,
     invert: bool = False,
@@ -1937,10 +2085,12 @@ def scribble_portrait(
 ) -> List[GCodeCommand]:
     """Continuous looping scribble whose density follows image darkness.
 
-    A wandering path hops between nearby dark cells (each cell has an ink budget
-    ∝ darkness), then gets corner-cut smoothing — the hand-scribbled portrait
-    look. With multiple pens, tonal bands are scribbled dark-first (pen 0 =
-    darkest). Without ``image`` a procedural field is used.
+    Highlights stay BLANK paper: cells below ``threshold`` get no ink at all;
+    capacity rises steeply with darkness (``d**1.8 * passes``), and the walk is
+    short-ranged (``radius`` cells) with cap²-weighted steps so the path hugs
+    dark regions instead of wandering — the hand-scribbled portrait look. With
+    multiple pens, tonal bands are scribbled dark-first (pen 0 = darkest).
+    ``contrast`` multiplies the auto-leveled tone before gamma.
     """
     x0, y0, x1, y1 = bounds
     gw, gh, off_x, off_y, tone = _image_tone_grid(rng, bounds, image, cell, invert)
@@ -1950,10 +2100,13 @@ def scribble_portrait(
     n_bands = max(1, colors)
     for j in range(gh):
         for i in range(gw):
-            d = max(0.0, min(1.0, tone(i, j))) ** gamma
+            d = min(1.0, max(0.0, tone(i, j)) * contrast) ** gamma
             if d < threshold:
                 continue
-            caps[(i, j)] = max(1, round(d * passes))
+            cap = round(d**1.8 * passes)
+            if cap < 1:
+                continue
+            caps[(i, j)] = cap
             band_of[(i, j)] = min(n_bands - 1, int((1.0 - d) * n_bands))
 
     def chaikin(pts):
@@ -1998,7 +2151,7 @@ def scribble_portrait(
                         cap = caps.get(c, 0)
                         if cap > 0 and c != cur:
                             cand.append(c)
-                            wts.append(cap / (1.0 + abs(di) + abs(dj)))
+                            wts.append(cap * cap / (1.0 + abs(di) + abs(dj)))
                 if not cand:
                     break
                 cur = rng.choices(cand, weights=wts, k=1)[0]
@@ -2025,52 +2178,571 @@ def sparkle_grid(
     shells: int = 4,
     spur_frac: float = 1.7,
     points: int = 72,
+    jitter: float = 0.0,
+    tip_relief: float = 0.03,
+    shell_gap: float = 0.055,
+    slim: float = 3.6,
     feed: int = 1500,
 ) -> List[GCodeCommand]:
-    """Four-pointed 'atomic sparkle' stars on a jittered grid with long spurs.
+    """Four-pointed 'atomic sparkle' stars on a STRICT grid with guarded spurs.
 
-    Each star is a stack of nested astroid outlines (x=a·cos³t, y=b·sin³t) with
-    seeded size/elongation, plus long horizontal/vertical spur lines reaching
-    toward neighbours. With multiple pens, outer shells take pen 0 and inner
-    shells the later pens (navy→red→yellow in the reference).
+    Stars sit exactly on the lattice (``jitter`` defaults to 0) with sizes
+    quantized to {0.35, 0.5, 0.62}·cell, so spur arms from different stars run
+    along shared grid lines like the reference. An interval registry per grid
+    row/column prevents any two ink segments from overlapping on the same line
+    (paper protection): spurs claim only free sub-intervals (1mm safety margin,
+    skipped when under 3mm). Inner shells skip the last ``tip_relief`` of the
+    approach to each tip so the 4 tips don't pool ink. Outer shells pen 0,
+    inner shells later pens. Shells hug the outline (``shell_gap`` apart) and
+    arms are slimmed by the ``slim`` exponent for an elegant profile.
     """
+
+    def _sp(v):
+        return math.copysign(abs(v) ** slim, v)
+
     x0, y0, x1, y1 = bounds
     cols = max(1, int((x1 - x0) / cell))
     rws = max(1, int((y1 - y0) / cell))
     ox = x0 + ((x1 - x0) - cols * cell) / 2.0
     oy = y0 + ((y1 - y0) - rws * cell) / 2.0
 
+    # interval registries: ink already placed along each grid row / column
+    row_iv: dict = {}
+    col_iv: dict = {}
+
+    def _key(v):
+        return round(v, 2)
+
+    def _claim(registry, key, lo, hi, margin=1.0, min_len=3.0):
+        """Clip [lo,hi] against existing intervals; register and return the
+        free sub-interval starting at lo, or None."""
+        if hi - lo < min_len:
+            return None
+        ivs = registry.setdefault(key, [])
+        end = hi
+        for a, b in ivs:
+            if a - margin < lo < b + margin:  # start sits inside existing ink
+                return None
+            if lo < a:
+                end = min(end, a - margin)
+        if end - lo < min_len:
+            return None
+        ivs.append((lo, end))
+        return lo, end
+
+    def _register(registry, key, lo, hi):
+        registry.setdefault(key, []).append((lo, hi))
+
     out: List[GCodeCommand] = []
     for rj in range(rws):
         for ci in range(cols):
             if rng.random() > fill:
                 continue
-            cx = ox + (ci + 0.5) * cell + rng.uniform(-0.15, 0.15) * cell
-            cy = oy + (rj + 0.5) * cell + rng.uniform(-0.15, 0.15) * cell
-            a = cell * rng.uniform(0.32, 0.62)
-            b = a * rng.uniform(0.8, 1.25)
+            cx = ox + (ci + 0.5) * cell + rng.uniform(-jitter, jitter) * cell
+            cy = oy + (rj + 0.5) * cell + rng.uniform(-jitter, jitter) * cell
+            a = cell * rng.choice([0.35, 0.5, 0.62])
+            b = a
+            # reserve the star body extents on its own axes
+            _register(row_iv, _key(cy), cx - a, cx + a)
+            _register(col_iv, _key(cx), cy - b, cy + b)
+
             n_sh = rng.randint(2, max(2, shells))
             for sh in range(n_sh):
-                s = 1.0 - sh * (0.72 / n_sh)
-                pts = []
-                for k in range(points + 1):
-                    t = 2 * math.pi * k / points
-                    pts.append(
-                        (
-                            _clamp(cx + a * s * math.cos(t) ** 3, x0, x1),
-                            _clamp(cy + b * s * math.sin(t) ** 3, y0, y1),
+                sc = 1.0 - sh * shell_gap
+                relief = 0.0 if sh == 0 else tip_relief * 2 * math.pi
+                if relief <= 0:
+                    pts = []
+                    for k in range(points + 1):
+                        t = 2 * math.pi * k / points
+                        pts.append(
+                            (
+                                _clamp(cx + a * sc * _sp(math.cos(t)), x0, x1),
+                                _clamp(cy + b * sc * _sp(math.sin(t)), y0, y1),
+                            )
+                        )
+                    arcs = [pts]
+                else:
+                    # 4 arcs between tips (tips at t = 0, pi/2, pi, 3pi/2)
+                    arcs = []
+                    seg_pts = max(8, points // 4)
+                    for q in range(4):
+                        t0 = q * math.pi / 2 + relief
+                        t1 = (q + 1) * math.pi / 2 - relief
+                        arc = []
+                        for k in range(seg_pts + 1):
+                            t = t0 + (t1 - t0) * k / seg_pts
+                            arc.append(
+                                (
+                                    _clamp(cx + a * sc * _sp(math.cos(t)), x0, x1),
+                                    _clamp(cy + b * sc * _sp(math.sin(t)), y0, y1),
+                                )
+                            )
+                        arcs.append(arc)
+                color = (sh * colors) // n_sh if colors > 1 else None
+                for arc in arcs:
+                    out += _poly(arc, color=color, f=feed)
+
+            # guarded axis spurs (pen 0) along the shared grid lines
+            for dx, dy, arm in ((1, 0, a), (-1, 0, a), (0, 1, b), (0, -1, b)):
+                if rng.random() >= 0.75:
+                    continue
+                L = arm * spur_frac * rng.uniform(0.5, 1.5)
+                start = arm * 1.02
+                if dx != 0:
+                    lo = cx + dx * start if dx > 0 else cx + dx * (start + L)
+                    hi = cx + dx * (start + L) if dx > 0 else cx + dx * start
+                    got = _claim(row_iv, _key(cy), min(lo, hi), max(lo, hi))
+                    if got:
+                        p0 = (_clamp(got[0], x0, x1), cy)
+                        p1 = (_clamp(got[1], x0, x1), cy)
+                        out += _poly([p0, p1], color=0 if colors > 1 else None, f=feed)
+                else:
+                    lo = cy + dy * start if dy > 0 else cy + dy * (start + L)
+                    hi = cy + dy * (start + L) if dy > 0 else cy + dy * start
+                    got = _claim(col_iv, _key(cx), min(lo, hi), max(lo, hi))
+                    if got:
+                        p0 = (cx, _clamp(got[0], y0, y1))
+                        p1 = (cx, _clamp(got[1], y0, y1))
+                        out += _poly([p0, p1], color=0 if colors > 1 else None, f=feed)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 28. iso city  (axonometric voxel city, gridded faces, hidden lines removed)
+# ---------------------------------------------------------------------------
+
+
+def iso_city(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 1,
+    cols: int = 12,
+    rows: int = 12,
+    block: int = 2,
+    max_h: int = 12,
+    base_max: int = 4,
+    tower_prob: float = 0.16,
+    ground_frac: float = 0.24,
+    noise_scale: float = 0.55,
+    projection: str = "2pt",
+    persp: float = 0.55,
+    mask_res: float = 0.4,
+    sample_step: float = 0.25,
+    min_run: float = 0.7,
+    feed: int = 1500,
+) -> List[GCodeCommand]:
+    """Voxel city with gridded faces, hidden lines removed, in real perspective.
+
+    A seeded heightmap of block towers; every visible face (top + camera-facing
+    sides) is drawn as its unit voxel grid. ``projection``: ``2pt`` (default —
+    two vanishing points, verticals near-vertical), ``1pt`` (single central
+    vanishing point), or ``iso`` (classic 30° axonometric). ``persp`` (0..1)
+    controls how aggressive the perspective is. Visibility: front-to-back
+    occupancy-mask claiming — nearer columns draw, then claim their silhouettes
+    (dilated, which also dedups shared edges); farther lines clip against the
+    mask. Height bands map to pens when multiple colors are used.
+    """
+    x0, y0, x1, y1 = bounds
+
+    # -- heightmap (fixed loop order for determinism) --
+    n = [
+        [rng.fbm(i * noise_scale + 7.31, j * noise_scale + 3.17, octaves=3) for j in range(rows)]
+        for i in range(cols)
+    ]
+    lo = min(min(r) for r in n)
+    hi = max(max(r) for r in n)
+    span = (hi - lo) or 1.0
+    H = [[0] * rows for _ in range(cols)]
+    for j in range(rows):
+        for i in range(cols):
+            n01 = (n[i][j] - lo) / span
+            h = 0 if n01 < ground_frac else 1 + int(n01 * base_max)
+            if h and rng.random() < tower_prob:
+                h = min(max_h, h + rng.randint(max_h // 3, max_h - 1))
+            H[i][j] = h
+    hmax = max(1, max(max(r) for r in H))
+
+    # -- projector: world (a, c, z) in voxel units -> unfitted screen coords --
+    SX, SY, SZ = cols * block, rows * block, float(hmax)
+    if projection == "iso":
+        KX, KY, KZ = 0.8660254, 0.5, 1.0
+
+        def raw(a, c, z):
+            return ((a - c) * KX, (a + c) * KY + z * KZ)
+
+        cam = None
+    else:
+        az = math.pi / 4 if projection == "2pt" else 0.0
+        T = (SX / 2.0, SY / 2.0, SZ * 0.3)
+        dist = max(SX, SY) * (2.8 - 1.9 * max(0.0, min(1.0, persp)))
+        cam = (
+            T[0] + dist * math.sin(az),
+            T[1] - dist * math.cos(az),
+            SZ * 0.6 + max(SX, SY) * 0.55,
+        )
+        fx, fy, fz = T[0] - cam[0], T[1] - cam[1], T[2] - cam[2]
+        fl = math.sqrt(fx * fx + fy * fy + fz * fz)
+        fx, fy, fz = fx / fl, fy / fl, fz / fl
+        rx_, ry_, rz_ = fy, -fx, 0.0  # f x up(0,0,1)
+        rl = math.hypot(rx_, ry_) or 1.0
+        rx_, ry_ = rx_ / rl, ry_ / rl
+        ux_ = ry_ * fz - rz_ * fy
+        uy_ = rz_ * fx - rx_ * fz
+        uz_ = rx_ * fy - ry_ * fx
+
+        def raw(a, c, z):
+            dx, dy, dz = a - cam[0], c - cam[1], z - cam[2]
+            depth = dx * fx + dy * fy + dz * fz
+            return ((dx * rx_ + dy * ry_) / depth, (dx * ux_ + dy * uy_ + dz * uz_) / depth)
+
+    # -- fit raw projection into bounds (uniform scale, centered) --
+    samples = []
+    for i in range(cols + 1):
+        for j in range(rows + 1):
+            samples.append(raw(i * block, j * block, 0.0))
+    for i in range(cols):
+        for j in range(rows):
+            a0, c0, h = i * block, j * block, H[i][j]
+            if h:
+                for da, dc in ((0, 0), (block, 0), (block, block), (0, block)):
+                    samples.append(raw(a0 + da, c0 + dc, float(h)))
+    sxs = [pt[0] for pt in samples]
+    sys_ = [pt[1] for pt in samples]
+    sw = (max(sxs) - min(sxs)) or 1.0
+    sh = (max(sys_) - min(sys_)) or 1.0
+    sc = 0.96 * min((x1 - x0) / sw, (y1 - y0) / sh)
+    ox = (x0 + x1) / 2.0 - (min(sxs) + max(sxs)) / 2.0 * sc
+    oy = (y0 + y1) / 2.0 - (min(sys_) + max(sys_)) / 2.0 * sc
+
+    def P(a, c, z):
+        px, py = raw(a, c, z)
+        return (ox + px * sc, oy + py * sc)
+
+    # -- occupancy mask --
+    q = mask_res
+    nxm = int((x1 - x0) / q) + 2
+    nym = int((y1 - y0) / q) + 2
+    mask = [bytearray(nxm) for _ in range(nym)]
+
+    def free(px, py):
+        mj = int((py - y0) / q)
+        mi = int((px - x0) / q)
+        if mj < 0 or mj >= nym or mi < 0 or mi >= nxm:
+            return True
+        return mask[mj][mi] == 0
+
+    def claim_quad(q0, q1, q2, q3):
+        """Dilated fill of a convex quad (screen coords)."""
+        pts = [q0, q1, q2, q3]
+        area2 = 0.0
+        for k in range(4):
+            xA, yA = pts[k]
+            xB, yB = pts[(k + 1) % 4]
+            area2 += xA * yB - xB * yA
+        if abs(area2) < 1e-9:
+            return
+        if area2 < 0:
+            pts = [q0, q3, q2, q1]
+        g = 0.6 * q
+        edges = []
+        for k in range(4):
+            xA, yA = pts[k]
+            xB, yB = pts[(k + 1) % 4]
+            ex, ey = xB - xA, yB - yA
+            el = math.hypot(ex, ey) or 1.0
+            edges.append((xA, yA, ex / el, ey / el))
+        mi0 = max(0, int((min(pt[0] for pt in pts) - g - x0) / q))
+        mi1 = min(nxm - 1, int((max(pt[0] for pt in pts) + g - x0) / q) + 1)
+        mj0 = max(0, int((min(pt[1] for pt in pts) - g - y0) / q))
+        mj1 = min(nym - 1, int((max(pt[1] for pt in pts) + g - y0) / q) + 1)
+        for mj in range(mj0, mj1 + 1):
+            py = y0 + (mj + 0.5) * q
+            row = mask[mj]
+            for mi in range(mi0, mi1 + 1):
+                px = x0 + (mi + 0.5) * q
+                ok = True
+                for xA, yA, tx, ty in edges:
+                    # signed distance to edge (CCW interior has cross >= 0)
+                    if (px - xA) * ty - (py - yA) * tx < -g:
+                        ok = False
+                        break
+                if ok:
+                    row[mi] = 1
+
+    def clip_emit(A, B, color):
+        L = math.hypot(B[0] - A[0], B[1] - A[1])
+        nseg = max(1, int(L / sample_step))
+        first = last = None
+        for k in range(nseg + 1):
+            t = k / nseg
+            px = A[0] + (B[0] - A[0]) * t
+            py = A[1] + (B[1] - A[1]) * t
+            if free(px, py):
+                if first is None:
+                    first = (px, py)
+                last = (px, py)
+            else:
+                if (
+                    first is not None
+                    and math.hypot(last[0] - first[0], last[1] - first[1]) >= min_run
+                ):
+                    out.extend(
+                        _poly(
+                            [
+                                (_clamp(first[0], x0, x1), _clamp(first[1], y0, y1)),
+                                (_clamp(last[0], x0, x1), _clamp(last[1], y0, y1)),
+                            ],
+                            color=color,
+                            f=feed,
                         )
                     )
-                color = (sh * colors) // n_sh if colors > 1 else None
-                out += _poly(pts, color=color, f=feed)
-            # long axis spurs (pen 0), sometimes reaching the neighbour cell
-            for dx, dy, arm in ((1, 0, a), (-1, 0, a), (0, 1, b), (0, -1, b)):
-                if rng.random() < 0.75:
-                    L = arm * spur_frac * rng.uniform(0.5, 1.5)
-                    p0 = (_clamp(cx + dx * arm * 0.9, x0, x1), _clamp(cy + dy * arm * 0.9, y0, y1))
-                    p1 = (
-                        _clamp(cx + dx * (arm * 0.9 + L), x0, x1),
-                        _clamp(cy + dy * (arm * 0.9 + L), y0, y1),
-                    )
-                    out += _poly([p0, p1], color=0 if colors > 1 else None, f=feed)
+                first = last = None
+        if first is not None and math.hypot(last[0] - first[0], last[1] - first[1]) >= min_run:
+            out.extend(
+                _poly(
+                    [
+                        (_clamp(first[0], x0, x1), _clamp(first[1], y0, y1)),
+                        (_clamp(last[0], x0, x1), _clamp(last[1], y0, y1)),
+                    ],
+                    color=color,
+                    f=feed,
+                )
+            )
+
+    # -- column ordering: nearest first --
+    order = []
+    for j in range(rows):
+        for i in range(cols):
+            a0, c0 = i * block, j * block
+            if cam is None:
+                key = i + j  # iso: front = small i+j
+            else:
+                key = (a0 + block / 2 - cam[0]) ** 2 + (c0 + block / 2 - cam[1]) ** 2
+            order.append((key, i, j))
+    order.sort()
+
+    def face_world(origin, eu, ev, nu, nv):
+        """Grid segments for a face: origin + s·eu + t·ev, s∈[0,nu], t∈[0,nv]."""
+        segs = []
+        for k in range(nu + 1):
+            segs.append(
+                (
+                    (origin[0] + eu[0] * k, origin[1] + eu[1] * k, origin[2] + eu[2] * k),
+                    (
+                        origin[0] + eu[0] * k + ev[0] * nv,
+                        origin[1] + eu[1] * k + ev[1] * nv,
+                        origin[2] + eu[2] * k + ev[2] * nv,
+                    ),
+                )
+            )
+        for k in range(nv + 1):
+            segs.append(
+                (
+                    (origin[0] + ev[0] * k, origin[1] + ev[1] * k, origin[2] + ev[2] * k),
+                    (
+                        origin[0] + ev[0] * k + eu[0] * nu,
+                        origin[1] + ev[1] * k + eu[1] * nu,
+                        origin[2] + ev[2] * k + eu[2] * nu,
+                    ),
+                )
+            )
+        return segs
+
+    out: List[GCodeCommand] = []
+    for _key, i, j in order:
+        h = H[i][j]
+        a0, c0 = float(i * block), float(j * block)
+        b = float(block)
+        col = _color_for(colors, idx=min(colors - 1, (h * colors) // (hmax + 1)))
+
+        faces = []  # (origin, eu, ev, nu, nv) in world units
+        faces.append(((a0, c0, float(h)), (1, 0, 0), (0, 1, 0), block, block))  # top
+        if h > 0:
+            sides = [
+                ((a0, c0, 0.0), (0, 1, 0), (0, 0, 1), block, h, (-1.0, 0.0)),  # -i face
+                ((a0 + b, c0, 0.0), (0, 1, 0), (0, 0, 1), block, h, (1.0, 0.0)),  # +i
+                ((a0, c0, 0.0), (1, 0, 0), (0, 0, 1), block, h, (0.0, -1.0)),  # -j
+                ((a0, c0 + b, 0.0), (1, 0, 0), (0, 0, 1), block, h, (0.0, 1.0)),  # +j
+            ]
+            for origin, eu, ev, nu, nv, normal in sides:
+                if cam is None:
+                    visible = normal in ((-1.0, 0.0), (0.0, -1.0))
+                else:
+                    fcx = origin[0] + eu[0] * nu / 2 + ev[0] * nv / 2
+                    fcy = origin[1] + eu[1] * nu / 2 + ev[1] * nv / 2
+                    visible = (cam[0] - fcx) * normal[0] + (cam[1] - fcy) * normal[1] > 0
+                if visible:
+                    faces.append((origin, eu, ev, nu, nv))
+
+        quads = []
+        for origin, eu, ev, nu, nv in faces:
+            for A, Bw in face_world(origin, eu, ev, nu, nv):
+                clip_emit(P(*A), P(*Bw), col)
+            qpts = [
+                P(*origin),
+                P(origin[0] + eu[0] * nu, origin[1] + eu[1] * nu, origin[2] + eu[2] * nu),
+                P(
+                    origin[0] + eu[0] * nu + ev[0] * nv,
+                    origin[1] + eu[1] * nu + ev[1] * nv,
+                    origin[2] + eu[2] * nu + ev[2] * nv,
+                ),
+                P(origin[0] + ev[0] * nv, origin[1] + ev[1] * nv, origin[2] + ev[2] * nv),
+            ]
+            quads.append(qpts)
+        for qpts in quads:
+            claim_quad(*qpts)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 29. rounded circuits  (guillotine regions filled with concentric rounded insets)
+# ---------------------------------------------------------------------------
+
+
+def rounded_circuits(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 2,
+    pitch: float = 2.2,
+    band_lines: int = 4,
+    min_region: float = 45.0,
+    max_region: float = 110.0,
+    feed: int = 1600,
+) -> List[GCodeCommand]:
+    """Conveyor-belt fill: regions of serpentine bands with rounded U-turns.
+
+    The drawable area is guillotine-split into large regions; each region is
+    filled by ONE serpentine path that snakes along its long axis with
+    semicircular folds, drawn as ``band_lines`` parallel copies ``pitch`` apart —
+    a continuous belt winding through the region. Orientations alternate and
+    each region takes a seeded pen (2 pens → the pink/blue interlock).
+    """
+    x0, y0, x1, y1 = bounds
+
+    rects = [(x0, y0, x1, y1)]
+    final = []
+    while rects:
+        rx0, ry0, rx1, ry1 = rects.pop()
+        w, h = rx1 - rx0, ry1 - ry0
+        must_split = w > max_region or h > max_region
+        may_split = min(w, h) > 2 * min_region and rng.random() < 0.45
+        if must_split or may_split:
+            if w >= h:
+                c = rx0 + w * rng.uniform(0.35, 0.65)
+                rects.append((rx0, ry0, c, ry1))
+                rects.append((c, ry0, rx1, ry1))
+            else:
+                c = ry0 + h * rng.uniform(0.35, 0.65)
+                rects.append((rx0, ry0, rx1, c))
+                rects.append((rx0, c, rx1, ry1))
+        else:
+            final.append((rx0, ry0, rx1, ry1))
+
+    out: List[GCodeCommand] = []
+    for rx0, ry0, rx1, ry1 in final:
+        w, h = rx1 - rx0, ry1 - ry0
+        color = rng.randint(0, colors - 1) if colors > 1 else None
+        K = band_lines
+        half = (K - 1) / 2.0 * pitch
+        # legs run along the LONG axis (seeded flips keep it lively)
+        along_x = w >= h
+        if rng.random() < 0.25:
+            along_x = not along_x
+        margin = half + pitch
+        if along_x:
+            la, lb = rx0 + margin, rx1 - margin  # leg extent
+            p_lo, p_hi = ry0 + margin, ry1 - margin  # fold travel
+        else:
+            la, lb = ry0 + margin, ry1 - margin
+            p_lo, p_hi = rx0 + margin, rx1 - margin
+        if lb - la < pitch or p_hi - p_lo < pitch:
+            continue
+        span = p_hi - p_lo
+        S_min = 2 * half + 2.4 * pitch  # fold pitch floor so bands never overlap
+        n_legs = max(2, int(span / S_min) + 1)
+        S = span / (n_legs - 1)
+
+        def skeleton(off):
+            """One belt line: the serpentine translated ``off`` across the legs."""
+            pts = []
+            for leg in range(n_legs):
+                pos = p_lo + leg * S + off
+                if leg % 2 == 0:
+                    pts_leg = [(la, pos), (lb, pos)]
+                else:
+                    pts_leg = [(lb, pos), (la, pos)]
+                pts.extend(pts_leg)
+                if leg < n_legs - 1:
+                    # semicircular fold at the leg's far end
+                    fold_x = lb if leg % 2 == 0 else la
+                    cy_f = p_lo + leg * S + S / 2.0 + off
+                    a0 = -math.pi / 2 if leg % 2 == 0 else math.pi * 1.5
+                    for k in range(1, 12):
+                        a = a0 + math.pi * k / 12 * (1 if leg % 2 == 0 else -1)
+                        pts.append(
+                            (fold_x + (S / 2.0) * math.cos(a), cy_f + (S / 2.0) * math.sin(a))
+                        )
+            if not along_x:
+                pts = [(py, px) for px, py in pts]
+            return [(_clamp(px, x0, x1), _clamp(py, y0, y1)) for px, py in pts]
+
+        for k in range(K):
+            off = (k - (K - 1) / 2.0) * pitch
+            out += _poly(skeleton(off), color=color, f=feed)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 30. lissajous swarm  (phase-swept Lissajous families -> 3D tube/butterfly)
+# ---------------------------------------------------------------------------
+
+
+def lissajous_swarm(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 2,
+    curves: int = 90,
+    points: int = 420,
+    sweep: float = 3.14159,
+    detune: float = 0.04,
+    scale_min: float = 0.5,
+    feed: int = 1700,
+) -> List[GCodeCommand]:
+    """A phase-swept family of Lissajous curves — the 'subversion' surface look.
+
+    ``curves`` closed Lissajous figures share the same frequency pair but sweep
+    their phase (and slightly detune + grow in scale), so the family reads as a
+    sheared 3D tube/butterfly built from line moiré. The whole composition gets
+    a seeded rotation. With 2 pens, the first half of the sweep takes pen 0 and
+    the second pen 1 (the classic red/black split).
+    """
+    x0, y0, x1, y1 = bounds
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    A = (x1 - x0) / 2.0 * 0.94
+    B = (y1 - y0) / 2.0 * 0.94
+
+    fa = rng.randint(1, 4)
+    fb = rng.randint(2, 6)
+    if fb == fa:
+        fb += 1
+    phase0 = rng.uniform(0, 2 * math.pi)
+    rot = rng.uniform(0, math.pi)
+    cr, sr = math.cos(rot), math.sin(rot)
+
+    out: List[GCodeCommand] = []
+    for kc in range(curves):
+        f = kc / max(1, curves - 1)
+        delta = phase0 + sweep * f
+        db = detune * (f - 0.5)
+        s = scale_min + (1.0 - scale_min) * f
+        pts = []
+        for k in range(points + 1):
+            t = 2 * math.pi * k / points
+            lx = A * s * math.sin(fa * t + delta)
+            ly = B * s * math.sin((fb + db) * t)
+            px = cx + lx * cr - ly * sr
+            py = cy + lx * sr + ly * cr
+            pts.append((_clamp(px, x0, x1), _clamp(py, y0, y1)))
+        color = (kc * colors) // curves if colors > 1 else None
+        out += _poly(pts, color=color, f=feed)
     return out

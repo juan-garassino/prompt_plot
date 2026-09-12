@@ -102,10 +102,20 @@ promptplot draw "a banner" --paper a3 --orientation landscape --simulate
 **Seeded generative art (deterministic, no LLM):**
 
 ```bash
-promptplot art --list                                       # list generators + params
+promptplot art --list                                       # list all 32 generators + params
 promptplot art tiled_field --seed 12345 --colors 3 --simulate --preview
 promptplot art ripple_field --seed now --paper a4 --preview # timestamp seed, printed for repro
+promptplot art iso_city --seed 7 --paper a4 --preview       # voxel city, hidden lines removed
+promptplot art vortex_field --seed 5 --anaglyph --glitch 3  # red/cyan 3D-glitch effect (any generator)
 # same seed + params → byte-identical GCode every time
+```
+
+**Draw a photo (dashes follow the picture's contours; cover-fits the paper):**
+
+```bash
+promptplot art scribble_halftone --param image=photo.jpg --paper a4 --preview
+promptplot art line_halftone     --param image=photo.jpg --preview   # line-screen, variable pen width
+promptplot art scribble_portrait --param image=photo.jpg --preview   # continuous scribble
 ```
 
 **Import an SVG or DXF and draw it split by color/layer:**

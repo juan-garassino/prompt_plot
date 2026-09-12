@@ -71,6 +71,13 @@ def _parse_params(pairs):
     type=int,
     help="Seeded glitch bands that tear sideways (with --anaglyph)",
 )
+@click.option(
+    "--max-ink",
+    "max_ink",
+    default=0,
+    type=int,
+    help="Cap pen passes per mm² (paper protection post-process; 0 = off)",
+)
 @click.option("--simulate", is_flag=True, help="Simulated plotter (no hardware)")
 @click.option("--preview", "save_preview", is_flag=True, help="Save a color-coded preview PNG")
 @click.option("--save", "-o", default=None, help="Save GCode to this path")
@@ -91,6 +98,7 @@ def art(
     anaglyph,
     anaglyph_offset,
     glitch_bands,
+    max_ink,
     simulate,
     save_preview,
     save,
@@ -190,6 +198,15 @@ def art(
         console.print(
             f"[bold blue]anaglyph[/bold blue]  → {layer_count} layers, offset {anaglyph_offset}mm"
             + (f", {glitch_bands} glitch bands" if glitch_bands else "")
+        )
+
+    if max_ink > 0:
+        from ..generative import limit_ink_density
+
+        before = len(raw)
+        raw = limit_ink_density(raw, max_passes=max_ink)
+        console.print(
+            f"[bold blue]max-ink[/bold blue]   → ≤{max_ink} passes/mm² ({before}→{len(raw)} cmds)"
         )
 
     program = merge_chunks([raw], config)
