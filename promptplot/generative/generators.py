@@ -3251,10 +3251,13 @@ def black_hole(
     dot_cell: float = 0.55,
     dot_cap: int = 6,
     isco_line: bool = True,
+    rotate: float = 0.0,
     flow_rings: int = 88,
     dash_mm: float = 2.4,
     flow_gamma: float = 1.35,
     flow_spacing: float = 1.35,
+    bg_lines: int = 0,
+    ghost_every: int = 1,
     double_thresh: float = 0.74,
     feed: int = 1600,
 ) -> List[GCodeCommand]:
@@ -3288,9 +3291,15 @@ def black_hole(
     t_direct = _luminet_b_table(inc, 0, alphas, all_r)
     t_ghost = _luminet_b_table(inc, 1, alphas, all_r) if ghost else {}
 
+    rot_r = math.radians(rotate)
+    cos_t, sin_t = math.cos(rot_r), math.sin(rot_r)
+
     def screen(alpha, b):
-        # eventHorizon convention: X = b·cos(alpha - pi/2), Y = b·sin(alpha - pi/2)
-        return (b * math.cos(alpha - math.pi / 2), b * math.sin(alpha - math.pi / 2))
+        # eventHorizon convention: X = b·cos(alpha - pi/2), Y = b·sin(alpha - pi/2),
+        # then tilted by `rotate` degrees (the backdrop stays page-aligned)
+        px = b * math.cos(alpha - math.pi / 2)
+        py = b * math.sin(alpha - math.pi / 2)
+        return (px * cos_t - py * sin_t, px * sin_t + py * cos_t)
 
     # fill root-finder gaps by circular interpolation over alpha (both tables,
     # every radius) so curves stay continuous and the dot grain has no wedges
@@ -3328,10 +3337,14 @@ def black_hole(
 
     curves = []  # (pts, per-vertex flux weight list)
     if mode in ("lines", "both"):
-        for r in rings:
+        for ri, r in enumerate(rings):
             fs = flux(r)
             for tbl, rot in ((t_direct, 0.0), (t_ghost, math.pi)):
                 if not tbl:
+                    continue
+                # ghost images compress into a narrow b-range: thin them so
+                # the under-bulb keeps pen-width spacing
+                if tbl is t_ghost and ri % ghost_every:
                     continue
                 bs = [tbl.get((alpha, r), float("nan")) for alpha in alphas]
                 if sum(1 for b in bs if math.isfinite(b)) < len(bs) * 0.5:
@@ -3414,14 +3427,17 @@ def black_hole(
             placed += 1
 
         if isco_line and t_ghost:
-            # the crisp lensed arc of the disk's inner edge (ghost ISCO image)
-            r_in = dot_rgrid[0]
-            bs = [t_ghost.get((alpha, r_in), float("nan")) for alpha in alphas]
-            if sum(1 for b in bs if math.isfinite(b)) > len(bs) * 0.5:
-                pts = [
-                    screen(alpha + math.pi, b) for alpha, b in zip(alphas, bs) if math.isfinite(b)
-                ]
-                curves.append((pts, None))
+            # crisp lensed rings of the inner disk (ghost images) — together
+            # with the critical curve these read as the bright photon ring
+            for r_in in dot_rgrid[:3]:
+                bs = [t_ghost.get((alpha, r_in), float("nan")) for alpha in alphas]
+                if sum(1 for b in bs if math.isfinite(b)) > len(bs) * 0.5:
+                    pts = [
+                        screen(alpha + math.pi, b)
+                        for alpha, b in zip(alphas, bs)
+                        if math.isfinite(b)
+                    ]
+                    curves.append((pts, None))
 
     if mode == "flow":
         # strokes ride the lensed isoradials; dash duty follows observed flux —
@@ -3508,20 +3524,63 @@ def black_hole(
                     stroke_t.append(t)
             flush()
 
-    # shadow (photon ring critical curve)
+        if bg_lines:
+            # spacetime backdrop: continuous light-bending arcs clipped against
+            # a smooth silhouette of the disk (per-angle max radius + padding),
+            # so each line flows unbroken and a clean halo hugs the drawing
+            ex = 1.30 * max(abs(pt[0]) for pts, _ in ring_data for pt in pts)
+            ey = ex * (y1 - y0) / max(1.0, (x1 - x0))
+            NB = 72
+            sil = [0.0] * NB
+            for pts, _ in ring_data:
+                for px_, py_ in pts:
+                    bi = int(((math.atan2(py_, px_) + math.pi) / (2 * math.pi)) * NB) % NB
+                    r_ = math.hypot(px_, py_)
+                    if r_ > sil[bi]:
+                        sil[bi] = r_
+            pad = 2.6
+            base = math.sqrt(27.0) + pad
+
+            def blocked(px_, py_):
+                bi = int(((math.atan2(py_, px_) + math.pi) / (2 * math.pi)) * NB) % NB
+                lim = max(base, sil[bi] + pad, sil[(bi - 1) % NB] + pad, sil[(bi + 1) % NB] + pad)
+                return math.hypot(px_, py_) < lim
+
+            w_dim = 10.0**lw_lo
+            for li in range(bg_lines):
+                u = -1.0 + 2.0 * (li + 0.5) / bg_lines
+                yl = ey * math.copysign(1.0 - math.cos(abs(u) * math.pi / 2), u)
+                if abs(yl) < 1.0:
+                    continue
+                bend2 = 170.0 / (0.35 + abs(yl) / 5.0)
+                seg_pts = []
+                for k in range(281):
+                    x = -ex + 2.0 * ex * k / 280.0
+                    y = math.copysign(math.sqrt(yl * yl + bend2 / (1.0 + (x / 14.0) ** 2)), yl)
+                    if blocked(x, y):
+                        if len(seg_pts) >= 2:
+                            curves.append((seg_pts, [w_dim] * len(seg_pts)))
+                        seg_pts = []
+                        continue
+                    seg_pts.append((x, y))
+                if len(seg_pts) >= 2:
+                    curves.append((seg_pts, [w_dim] * len(seg_pts)))
+
+    # shadow (photon ring critical curve) — double-passed so the ring reads
     b_crit = math.sqrt(27.0)
-    curves.append(
-        (
-            [
-                (
-                    b_crit * math.cos(2 * math.pi * k / samples),
-                    b_crit * math.sin(2 * math.pi * k / samples),
-                )
-                for k in range(samples + 1)
-            ],
-            None,
+    for bc in (b_crit, b_crit + 0.09):
+        curves.append(
+            (
+                [
+                    (
+                        bc * math.cos(2 * math.pi * k / samples),
+                        bc * math.sin(2 * math.pi * k / samples),
+                    )
+                    for k in range(samples + 1)
+                ],
+                None,
+            )
         )
-    )
 
     xs = [pt[0] for c, _ in curves for pt in c] + [d[0] for d in dot_pts]
     ys = [pt[1] for c, _ in curves for pt in c] + [d[1] for d in dot_pts]
@@ -3692,6 +3751,7 @@ def attention_arcs(
     attn_npz: str = "",
     block: int = 0,
     min_w: float = 0.04,
+    layout: str = "line",
     feed: int = 2000,
 ) -> List[GCodeCommand]:
     """Attention as a musical score: tokens on a baseline, each arc bows from
@@ -3719,8 +3779,52 @@ def attention_arcs(
                 stack = stack / stack.sum(axis=-1, keepdims=True)
         except Exception:
             stack = None
-    xs = [x0 + w * (t + 0.5) / tokens for t in range(tokens)]
     out: List[GCodeCommand] = []
+    if layout == "circle":
+        # chord diagram: tokens around a circle, heavy attention dives
+        # through the middle (control point pulled to the center by weight)
+        ccx, ccy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+        R = 0.46 * min(x1 - x0, y1 - y0)
+        pos = [
+            (
+                ccx + R * math.cos(2 * math.pi * t / tokens - math.pi / 2),
+                ccy + R * math.sin(2 * math.pi * t / tokens - math.pi / 2),
+            )
+            for t in range(tokens)
+        ]
+        for px_, py_ in pos:
+            dx, dy = px_ - ccx, py_ - ccy
+            n = math.hypot(dx, dy) or 1.0
+            out += _poly([(px_, py_), (px_ + 2.5 * dx / n, py_ + 2.5 * dy / n)], color=None, f=feed)
+        for head in range(heads):
+            if stack is not None:
+                A = stack[head % stack.shape[0]]
+            else:
+                A = _attention_matrix(rng, tokens, head % 6, temp, causal, weights, block)
+            color = head % colors if colors > 1 else None
+            for q in range(tokens):
+                row = sorted(range(tokens), key=lambda kk: -A[q][kk])[:topk]
+                for kk in row:
+                    wgt = float(A[q][kk])
+                    if kk == q or wgt < min_w:
+                        continue
+                    (xa, ya), (xb, yb) = pos[kk], pos[q]
+                    pull = min(0.92, 0.25 + 1.4 * wgt)
+                    cxp = ccx + ((xa + xb) / 2.0 - ccx) * (1.0 - pull)
+                    cyp = ccy + ((ya + yb) / 2.0 - ccy) * (1.0 - pull)
+                    passes = 1 + (1 if wgt > 0.25 else 0) + (1 if wgt > 0.5 else 0)
+                    for pp in range(passes):
+                        pts = []
+                        for j in range(23):
+                            t01 = j / 22.0
+                            mt = 1.0 - t01
+                            bx = mt * mt * xa + 2 * mt * t01 * (cxp + 0.4 * pp) + t01 * t01 * xb
+                            by = mt * mt * ya + 2 * mt * t01 * (cyp + 0.4 * pp) + t01 * t01 * yb
+                            pts.append((_clamp(bx, x0, x1), _clamp(by, y0, y1)))
+                        out += _poly(pts, color=color, f=feed)
+        return out
+
+    xs = [x0 + w * (t + 0.5) / tokens for t in range(tokens)]
     for t in range(tokens):
         out += _poly([(xs[t], y_base - 2.2), (xs[t], y_base)], color=None, f=feed)
     for head in range(heads):
@@ -3759,6 +3863,7 @@ def residual_river(
     expand: float = 2.4,
     weave_swaps: int = 7,
     band_frac: float = 0.17,
+    wobble: float = 0.0,
     feed: int = 2200,
 ) -> List[GCodeCommand]:
     """The transformer residual stream as a river: parallel channel lines flow
@@ -3817,7 +3922,10 @@ def residual_river(
             env = 1.0
             if l0 <= x <= l1:
                 env = 1.0 + (expand - 1.0) * math.sin(math.pi * (x - l0) / (l1 - l0)) ** 2
-            pts.append((x, _clamp(cy + u * h0 * env, y0, y1)))
+            yv = cy + u * h0 * env
+            if wobble > 0:
+                yv += wobble * h0 * (rng.fbm(x * 0.015, ch * 3.7) - 0.5) * 2.0
+            pts.append((x, _clamp(yv, y0, y1)))
         color = ch % colors if colors > 1 else None
         out += _poly(pts, color=color, f=feed)
 
@@ -4032,4 +4140,80 @@ def weight_matrix(
                 out += _poly(
                     [(xh, ry), (xh, ry + rh)], color=(colors - 1 if colors > 1 else None), f=feed
                 )
+    return out
+
+
+def attention_matrix(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 1,
+    attn_npz: str = "",
+    tokens: int = 18,
+    min_w: float = 0.07,
+    tick_frac: float = 0.9,
+    labels: bool = True,
+    feed: int = 2400,
+) -> List[GCodeCommand]:
+    """The whole model at a glance: a layers x heads contact sheet of attention
+    matrices, each cell a diagonal tick sized by the attention weight — the
+    weight_matrix tick language applied to a full attention stack.
+
+    ``attn_npz`` = a saved (layers, heads, T, T) stack (real GPT-2 via
+    scripts/extract_gpt2_attention.py); fallback: seeded synthetic 4x4 grid.
+    With 2+ pens, strong weights (>0.4) take pen 0, the rest pen 1.
+    """
+    import numpy as np
+
+    x0, y0, x1, y1 = bounds
+    stack = None
+    if attn_npz:
+        try:
+            stack = np.load(attn_npz)["attn"]  # (L, H, T, T)
+        except Exception:
+            stack = None
+    if stack is None:
+        L = H = 4
+        stack = np.stack(
+            [
+                np.stack([_attention_matrix(rng, tokens, h, 1.0, True, "", 0) for h in range(H)])
+                for _ in range(L)
+            ]
+        )
+    L, H, T, _ = stack.shape
+
+    lab_w = 7.0 if labels else 0.0
+    gap = 1.8
+    W_all = (x1 - x0) - lab_w
+    H_all = (y1 - y0) - lab_w
+    pw = (W_all - gap * (H - 1)) / H
+    ph = (H_all - gap * (L - 1)) / L
+    cw, ch = pw / T, ph / T
+    half = min(cw, ch) * tick_frac / 2.0
+    px0 = x0 + lab_w
+    label_pen = (colors - 1) if colors > 1 else None
+
+    out: List[GCodeCommand] = []
+    for l in range(L):
+        ry = y0 + (L - 1 - l) * (ph + gap)
+        if labels:
+            out += _stroke_text(f"L{l}", x0, ry + ph / 2 - 1.2, 2.6, color=label_pen, f=feed)
+        for h in range(H):
+            rx = px0 + h * (pw + gap)
+            if labels and l == 0:
+                out += _stroke_text(
+                    f"H{h}", rx + pw / 2 - 2.5, y0 + H_all + 1.6, 2.6, color=label_pen, f=feed
+                )
+            A = stack[l][h]
+            for q in range(T):
+                cy_ = ry + ch * (T - 1 - q + 0.5)
+                for kk in range(T):
+                    w = float(A[q][kk])
+                    if w < min_w:
+                        continue
+                    ln = half * min(1.0, w)
+                    if ln < 0.12:
+                        ln = 0.12
+                    cx_ = rx + cw * (kk + 0.5)
+                    color = (0 if w > 0.4 else 1) % colors if colors > 1 else None
+                    out += _poly([(cx_ - ln, cy_ - ln), (cx_ + ln, cy_ + ln)], color=color, f=feed)
     return out
