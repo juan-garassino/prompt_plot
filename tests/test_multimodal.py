@@ -1,7 +1,7 @@
 """Tests for multimodal provider fallback behavior."""
 
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from pathlib import Path
 
 from promptplot.llm import LLMProvider, OllamaProvider
@@ -14,8 +14,8 @@ class FakeProvider(LLMProvider):
     def provider_name(self) -> str:
         return "fake"
 
-    def _create_llm_instance(self):
-        return MagicMock()
+    async def acomplete(self, prompt: str) -> str:
+        return "fake response"
 
 
 class TestMultimodalFallback:
@@ -50,13 +50,10 @@ class TestMultimodalFallback:
 
 class TestOllamaMultimodalFallback:
     @pytest.mark.asyncio
-    async def test_ollama_no_multimodal_package(self):
-        """Ollama falls back to text when multimodal package is not installed."""
-        with patch("promptplot.llm.OLLAMA_MULTIMODAL_AVAILABLE", False):
-            provider = OllamaProvider(model="llama3.2:3b", request_timeout=5000)
-            provider.acomplete = AsyncMock(return_value="text only")
-            result = await provider.acomplete_multimodal(
-                "test prompt", [Path("/tmp/test.png")]
-            )
-            assert result == "text only"
-            provider.acomplete.assert_awaited_once()
+    async def test_ollama_no_images_falls_back(self):
+        """Ollama falls back to text when no images provided."""
+        provider = OllamaProvider(model="llama3.2:3b", request_timeout=5000)
+        provider.acomplete = AsyncMock(return_value="text only")
+        result = await provider.acomplete_multimodal("test prompt", None)
+        assert result == "text only"
+        provider.acomplete.assert_awaited_once()

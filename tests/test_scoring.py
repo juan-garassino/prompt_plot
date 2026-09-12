@@ -100,6 +100,38 @@ class TestScoreGCode:
         d = report.to_dict()
         assert "grade" in d
         assert "canvas_utilization" in d
+        assert "composition_score" in d
+        assert "failure_reasons" in d
+
+    def test_subscores_present(self, good_program, paper):
+        report = score_gcode(good_program, paper)
+        assert 0.0 <= report.composition_score <= 1.0
+        assert 0.0 <= report.structure_score <= 1.0
+        assert 0.0 <= report.texture_score <= 1.0
+        assert 0.0 <= report.efficiency_score <= 1.0
+        assert 0.0 <= report.figurative_score <= 1.0
+        assert 0.0 <= report.abstract_score <= 1.0
+
+    def test_central_clustering_penalty(self, paper):
+        clustered = _prog([
+            {"command": "M5"},
+            {"command": "G0", "x": 100, "y": 145},
+            {"command": "M3", "s": 1000},
+            {"command": "G1", "x": 105, "y": 145, "f": 2000},
+            {"command": "G1", "x": 105, "y": 150, "f": 2000},
+            {"command": "G1", "x": 100, "y": 150, "f": 2000},
+            {"command": "G1", "x": 100, "y": 145, "f": 2000},
+            {"command": "M5"},
+        ])
+        report = score_gcode(clustered, paper)
+        assert report.central_clustering_penalty > 0
+        assert "central_clustering" in report.failure_reasons
+
+    def test_mode_specific_scoring(self, good_program, paper):
+        fig_report = score_gcode(good_program, paper, creative_mode="figurative")
+        abs_report = score_gcode(good_program, paper, creative_mode="abstract")
+        assert fig_report.creative_mode == "figurative"
+        assert abs_report.creative_mode == "abstract"
 
 
 class TestExtractStyleProfile:

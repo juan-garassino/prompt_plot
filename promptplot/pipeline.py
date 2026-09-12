@@ -13,6 +13,7 @@ from .models import GCodeCommand, GCodeProgram
 from .config import PromptPlotConfig, get_config
 from .postprocess import run_pipeline
 from .plotter import BasePlotter, SimulatedPlotter
+from .engine import PenState
 from .logger import WorkflowLogger
 
 from rich.console import Console
@@ -126,3 +127,37 @@ class FilePipeline:
             "Processed": len(processed.commands),
         })
         return processed
+
+
+def load_and_continue(
+    prior_gcode_path: str,
+    new_commands: list,
+    config: PromptPlotConfig,
+) -> GCodeProgram:
+    """Load a prior .gcode, derive final pen state, append new commands with safe travel."""
+    pipeline = FilePipeline(config)
+    prior = pipeline.load_gcode_file(prior_gcode_path)
+    pen = PenState()
+    last_x, last_y = 0.0, 0.0
+    for cmd in prior.commands:
+        if cmd.command == "M3":
+            pen.set_down()
+        elif cmd.command == "M5":
+            pen.set_up()
+        elif cmd.command in ("G0", "G1"):
+            if cmd.x is not None:
+                last_x = cmd.x
+            if cmd.y is not None:
+                last_y = cmd.y
+    merged = list(prior.commands)
+    if pen.is_down:
+        merged.append(GCodeCommand(command="M5"))
+    merged.extend(new_commands)
+    return GCodeProgram(
+        commands=merged,
+        metadata={
+            **(prior.metadata or {}),
+            "continued_from": prior_gcode_path,
+            "resume_position": [last_x, last_y],
+        },
+    )

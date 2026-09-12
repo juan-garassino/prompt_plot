@@ -30,43 +30,42 @@ class TestValidateBounds:
         assert len(result.commands) == len(program.commands)
 
     def test_out_of_bounds_x_clamp(self):
-        """Out-of-bounds X in clamp mode should be clamped to paper width."""
+        """Out-of-bounds G1 X should be clamped to drawable area (respects margin)."""
         program = _make_program([
             {"command": "M5"},
             {"command": "G1", "x": 500, "y": 50, "f": 2000},
             {"command": "M5"},
         ])
-        paper = PaperConfig(width=210, height=297)
+        paper = PaperConfig(width=210, height=297)  # margin_x=10 → drawable x1=200
         result, violations = validate_bounds(program, paper, mode="clamp")
         assert len(violations) > 0
-        # The G1 command should be clamped
         g1_cmd = [c for c in result.commands if c.command == "G1"][0]
-        assert g1_cmd.x == 210.0
+        assert g1_cmd.x == 200.0
 
     def test_out_of_bounds_y_clamp(self):
-        """Out-of-bounds Y in clamp mode should be clamped."""
+        """Out-of-bounds G1 Y should be clamped to drawable area (respects margin)."""
         program = _make_program([
             {"command": "M5"},
             {"command": "G1", "x": 50, "y": 500, "f": 2000},
             {"command": "M5"},
         ])
-        paper = PaperConfig(width=210, height=297)
+        paper = PaperConfig(width=210, height=297)  # margin_y=10 → drawable y1=287
         result, violations = validate_bounds(program, paper, mode="clamp")
         g1_cmd = [c for c in result.commands if c.command == "G1"][0]
-        assert g1_cmd.y == 297.0
+        assert g1_cmd.y == 287.0
 
     def test_negative_coordinates_clamp(self):
-        """Negative coordinates should be clamped to 0."""
+        """Negative G1 coordinates should be clamped to drawable area min (margin)."""
         program = _make_program([
             {"command": "M5"},
             {"command": "G1", "x": -10, "y": -20, "f": 2000},
             {"command": "M5"},
         ])
-        paper = PaperConfig(width=210, height=297)
+        paper = PaperConfig(width=210, height=297)  # margin=10 → drawable min 10,10
         result, violations = validate_bounds(program, paper, mode="clamp")
         g1_cmd = [c for c in result.commands if c.command == "G1"][0]
-        assert g1_cmd.x == 0.0
-        assert g1_cmd.y == 0.0
+        assert g1_cmd.x == 10.0
+        assert g1_cmd.y == 10.0
 
     def test_out_of_bounds_reject_mode(self):
         """Out-of-bounds command in reject mode should be removed."""
@@ -99,15 +98,19 @@ class TestValidateBounds:
         assert g1_cmd.x == 500
 
     def test_exactly_at_boundary(self):
-        """Coordinates exactly at paper boundary should pass."""
+        """Coordinates exactly at drawable area boundary should pass.
+
+        G0(0,0) is machine home — allowed by machine extents.
+        G1(200,287) is exactly at drawable area edge (210-10, 297-10) — allowed.
+        """
         program = _make_program([
             {"command": "M5"},
             {"command": "G0", "x": 0, "y": 0},
             {"command": "M3", "s": 1000},
-            {"command": "G1", "x": 210, "y": 297, "f": 2000},
+            {"command": "G1", "x": 200, "y": 287, "f": 2000},
             {"command": "M5"},
         ])
-        paper = PaperConfig(width=210, height=297)
+        paper = PaperConfig(width=210, height=297)  # margin=10 → drawable [10..200,10..287]
         result, violations = validate_bounds(program, paper)
         assert len(violations) == 0
 

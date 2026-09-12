@@ -101,3 +101,21 @@ class TestGCodeVisualizer:
     def test_construction_without_config(self):
         viz = GCodeVisualizer()
         assert viz.config is None
+
+    def test_analyze_regions_returns_report(self, visualizer, simple_program):
+        report = visualizer.analyze_regions(simple_program, creative_mode="figurative")
+        assert "global" in report
+        assert "regions" in report
+        assert len(report["regions"]) > 0
+
+    def test_save_analysis_artifacts(self, visualizer, simple_program, tmp_path):
+        artifacts = visualizer.save_analysis_artifacts(
+            simple_program,
+            str(tmp_path / "analysis"),
+            creative_mode="abstract",
+        )
+        assert Path(artifacts["preview_path"]).exists()
+        assert Path(artifacts["overlay_path"]).exists()
+        assert Path(artifacts["heatmap_path"]).exists()
+        assert Path(artifacts["json_path"]).exists()
+        assert artifacts["analysis"]["creative_mode"] == "abstract"

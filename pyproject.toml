@@ -53,9 +53,8 @@ dependencies = [
     # Core
     "pydantic>=2.0.0,<3.0.0",
 
-    # LLM integration
-    "llama-index-core>=0.10.0",
-    "llama-index-llms-ollama>=0.1.0",
+    # HTTP client (for Ollama and general use)
+    "httpx>=0.24.0",
 
     # Serial communication
     "pyserial>=3.5,<4.0",
@@ -84,23 +83,30 @@ viz = [
 ]
 
 openai = [
-    "llama-index-llms-openai>=0.1.0",
     "openai>=1.0.0",
 ]
 
 azure = [
-    "llama-index-llms-azure-openai>=0.1.0",
+    "openai>=1.0.0",
 ]
 
 gemini = [
-    "llama-index-llms-gemini>=0.1.0",
     "google-generativeai>=0.3.0",
 ]
 
+anthropic = [
+    "anthropic>=0.39.0",
+]
+
 vision = [
-    "llama-index-multi-modal-llms-openai>=0.1.0",
-    "llama-index-multi-modal-llms-gemini>=0.1.0",
     "Pillow>=9.0.0",
+]
+
+io = [
+    # Full-fidelity vector import (curve flattening, full DXF entity support).
+    # PromptPlot ships stdlib fallback parsers, so these are optional.
+    "svgpathtools>=1.6.0",
+    "ezdxf>=1.1.0",
 ]
 
 [project.urls]
@@ -205,12 +211,14 @@ show_error_codes = true
 
 [[tool.mypy.overrides]]
 module = [
-    "llama_index.*",
     "matplotlib.*",
     "cv2.*",
     "serial.*",
     "ollama.*",
     "azure.*",
+    "anthropic.*",
+    "httpx.*",
+    "google.*",
 ]
 ignore_missing_imports = true
 

@@ -30,8 +30,9 @@ class TestValidateSingleCommand:
         cfg = PromptPlotConfig()
         cmd = GCodeCommand(command="G1", x=999, y=-10, f=2000)
         fixed, warnings, prefix = validate_single_command(cmd, cfg.paper, pen_is_down=True)
-        assert fixed.x == cfg.paper.width  # clamped to max
-        assert fixed.y == 0  # clamped to 0
+        x0, y0, x1, y1 = cfg.paper.get_drawable_area()
+        assert fixed.x == x1  # clamped to drawable area max
+        assert fixed.y == y0  # clamped to drawable area min
         assert len(warnings) == 2
 
     def test_pen_safety_travel_without_pen_up(self):
