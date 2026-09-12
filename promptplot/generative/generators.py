@@ -939,7 +939,7 @@ def hitomezashi(
     return out
 
 
-def _limit_overdraw(pts, cell: float = 0.8, max_hits: int = 6):
+def _limit_overdraw(pts, cell: float = 1.4, max_hits: int = 4):
     """Split a polyline into runs, dropping points where a small ink-density
     cell has already been drawn over ``max_hits`` times — protects the paper
     at convergence points of attractors/harmonographs."""
@@ -975,7 +975,7 @@ def harmonograph(
     detune: float = 0.012,
     max_points: int = 9000,
     min_seg: float = 0.6,
-    overdraw: int = 6,
+    overdraw: int = 4,
     feed: int = 1800,
 ) -> List[GCodeCommand]:
     """A damped double-pendulum (harmonograph) curve — one continuous stroke.
@@ -1249,7 +1249,7 @@ def strange_attractor(
     steps: int = 26000,
     min_seg: float = 0.5,
     max_points: int = 9000,
-    overdraw: int = 6,
+    overdraw: int = 4,
     feed: int = 1800,
 ) -> List[GCodeCommand]:
     """A strange attractor traced as one continuous line (controlled chaos).
@@ -2293,7 +2293,7 @@ def sparkle_grid(
     points: int = 72,
     jitter: float = 0.0,
     tip_relief: float = 0.03,
-    shell_gap: float = 0.055,
+    shell_gap: float = 0.26,
     slim: float = 3.6,
     stretch: float = 1.45,
     feed: int = 1500,
@@ -2830,90 +2830,98 @@ def rounded_circuits(
     colors: int = 2,
     pitch: float = 2.2,
     band_lines: int = 6,
-    steps: int = 16,
+    detours: int = 2,
     corner_r: float = -1.0,
     feed: int = 1600,
 ) -> List[GCodeCommand]:
-    """ONE closed conveyor belt: a self-crossing tour with big round turns.
+    """ONE closed conveyor belt: a page-filling self-crossing tour, round turns.
 
-    The centerline is a seeded closed 90°-turn walk on a coarse grid — it may
-    CROSS itself (belts overlap like real conveyors) before closing the loop.
-    It is drawn as ``band_lines`` concentric offsets ``pitch`` apart; the corner
-    radius is auto-sized (``corner_r`` < 0) large enough that every line keeps a
-    perfectly constant offset through every turn (concentric arcs, no pinching).
-    Lines split across pens in bands.
+    The centerline visits a seeded anchor in every quadrant of the page (plus
+    ``detours`` waypoints between anchors), routed axis-aligned with the LONG
+    paper direction first — so the belt spans the whole sheet, crosses itself,
+    and closes into a single loop. Drawn as ``band_lines`` concentric offsets
+    ``pitch`` apart with auto-sized round corners that keep the offset constant
+    through every turn. Lines split across pens in bands.
     """
     x0, y0, x1, y1 = bounds
     K = max(2, band_lines)
     half = (K - 1) / 2.0 * pitch
 
-    # grid pitch: legs far enough apart that adjacent bands never touch
     G = max(2.6 * pitch + 2 * half, (K - 1) * pitch + 2.4 * pitch)
     r_eff = corner_r if corner_r > 0 else 0.42 * G
     m = half + r_eff * 0.2 + 2.0
     gx0, gy0 = x0 + m, y0 + m
-    ncx = max(2, int((x1 - x0 - 2 * m) / G))
-    ncy = max(2, int((y1 - y0 - 2 * m) / G))
+    ncx = max(3, int((x1 - x0 - 2 * m) / G))
+    ncy = max(3, int((y1 - y0 - 2 * m) / G))
+    long_is_y = (y1 - y0) >= (x1 - x0)
 
     def node(i, j):
         return (gx0 + i * G, gy0 + j * G)
 
-    # ── seeded closed 90°-turn walk (crossings allowed) ──
-    ci, cj = rng.randint(0, ncx), rng.randint(0, ncy)
-    start_n = (ci, cj)
-    d = rng.choice([(1, 0), (-1, 0), (0, 1), (0, -1)])
-    nodes = [start_n]
-    for _ in range(max(6, steps)):
-        run = rng.randint(1, 3)
-        ni, nj = ci + d[0] * run, cj + d[1] * run
-        ni = max(0, min(ncx, ni))
-        nj = max(0, min(ncy, nj))
-        if (ni, nj) != (ci, cj):
-            ci, cj = ni, nj
-            nodes.append((ci, cj))
-        # turn 90° (seeded side), away from walls when pinned
-        opts = [(-d[1], d[0]), (d[1], -d[0])]
-        rng.shuffle(opts)
-        for cand in opts:
-            ti, tj = ci + cand[0], cj + cand[1]
-            if 0 <= ti <= ncx and 0 <= tj <= ncy:
-                d = cand
-                break
-    # close the loop with up to two axis legs back to the start
-    if ci != start_n[0]:
-        nodes.append((start_n[0], cj))
-    if cj != start_n[1]:
-        nodes.append((start_n[0], start_n[1]))
+    def make_walk():
+        """Closed rectilinear tour through all four page quadrants."""
+        third_x = max(1, ncx // 3)
+        third_y = max(1, ncy // 3)
+        anchors = [
+            (rng.randint(0, third_x), rng.randint(0, third_y)),  # bottom-left
+            (rng.randint(ncx - third_x, ncx), rng.randint(0, third_y)),  # bottom-right
+            (rng.randint(ncx - third_x, ncx), rng.randint(ncy - third_y, ncy)),  # top-right
+            (rng.randint(0, third_x), rng.randint(ncy - third_y, ncy)),  # top-left
+        ]
+        first = rng.randint(0, 3)
+        if rng.random() < 0.5:
+            anchors = anchors[::-1]
+        seq = anchors[first:] + anchors[:first]
 
-    # merge collinear runs + drop zero edges; need perpendicular consecutive edges
-    verts = []
-    for nd in nodes:
-        pt = node(*nd)
-        if verts and abs(pt[0] - verts[-1][0]) < 1e-6 and abs(pt[1] - verts[-1][1]) < 1e-6:
-            continue
-        if len(verts) >= 2:
-            ax, ay = verts[-2]
-            bx, by = verts[-1]
-            if (abs(ax - bx) < 1e-6 and abs(bx - pt[0]) < 1e-6) or (
-                abs(ay - by) < 1e-6 and abs(by - pt[1]) < 1e-6
-            ):
-                verts[-1] = pt
+        waypoints = []
+        for a, bnext in zip(seq, seq[1:] + [seq[0]]):
+            waypoints.append(a)
+            for _ in range(max(0, detours)):
+                if rng.random() < 0.7:
+                    waypoints.append((rng.randint(0, ncx), rng.randint(0, ncy)))
+        # route axis-aligned, LONG axis first (long legs along the paper)
+        cells = [waypoints[0]]
+        for tgt in waypoints[1:] + [waypoints[0]]:
+            ci, cj = cells[-1]
+            ti, tj = tgt
+            if long_is_y:
+                if cj != tj:
+                    cells.append((ci, tj))
+                if ci != ti:
+                    cells.append((ti, tj))
+            else:
+                if ci != ti:
+                    cells.append((ti, cj))
+                if cj != tj:
+                    cells.append((ti, tj))
+        if cells[-1] == cells[0]:
+            cells.pop()
+
+        verts = []
+        for nd in cells:
+            pt = node(*nd)
+            if verts and abs(pt[0] - verts[-1][0]) < 1e-6 and abs(pt[1] - verts[-1][1]) < 1e-6:
                 continue
-        verts.append(pt)
-    # closing edge collinearity with first edge
-    if len(verts) >= 3:
-        ax, ay = verts[-1]
-        bx, by = verts[0]
-        cxp, cyp = verts[1]
-        if (abs(ax - bx) < 1e-6 and abs(bx - cxp) < 1e-6) or (
-            abs(ay - by) < 1e-6 and abs(by - cyp) < 1e-6
-        ):
-            verts.pop(0)
-    if len(verts) < 4:
-        verts = [node(0, 0), node(ncx, 0), node(ncx, ncy), node(0, ncy)]
+            if len(verts) >= 2:
+                ax, ay = verts[-2]
+                bx, by = verts[-1]
+                if (abs(ax - bx) < 1e-6 and abs(bx - pt[0]) < 1e-6) or (
+                    abs(ay - by) < 1e-6 and abs(by - pt[1]) < 1e-6
+                ):
+                    verts[-1] = pt
+                    continue
+            verts.append(pt)
+        if len(verts) >= 3:
+            ax, ay = verts[-1]
+            bx, by = verts[0]
+            cxp, cyp = verts[1]
+            if (abs(ax - bx) < 1e-6 and abs(bx - cxp) < 1e-6) or (
+                abs(ay - by) < 1e-6 and abs(by - cyp) < 1e-6
+            ):
+                verts.pop(0)
+        return verts if len(verts) >= 4 else None
 
     def offset_loop(base, o):
-        """Left-shift every edge by o (constant offset; crossings shift too)."""
         nv = len(base)
         shifted = []
         for k in range(nv):
@@ -2922,13 +2930,13 @@ def rounded_circuits(
             dx = 0 if abs(bx - ax) < 1e-6 else (1 if bx > ax else -1)
             dy = 0 if abs(by - ay) < 1e-6 else (1 if by > ay else -1)
             if dy == 0:
-                shifted.append(("h", ay + o * dx, (dx, dy)))
+                shifted.append(("h", ay + o * dx))
             else:
-                shifted.append(("v", ax - o * dy, (dx, dy)))
+                shifted.append(("v", ax - o * dy))
         out_v = []
         for k in range(nv):
-            t_prev, c_prev, _d1 = shifted[k - 1]
-            t_cur, c_cur, _d2 = shifted[k]
+            t_prev, c_prev = shifted[k - 1]
+            t_cur, c_cur = shifted[k]
             if t_prev == t_cur:
                 return None
             xv = c_prev if t_prev == "v" else c_cur
@@ -2977,58 +2985,18 @@ def rounded_circuits(
             band += _poly(rounded_loop(ov, o), color=color, f=feed)
         return band, good
 
-    out, good = emit_band(verts)
-    tries = 0
-    while good < max(2, int(K * 0.7)) and tries < 8:
-        # degenerate walk (offsets collapsed) — reroll a fresh tour
-        tries += 1
-        ci, cj = rng.randint(0, ncx), rng.randint(0, ncy)
-        start_n = (ci, cj)
-        d = rng.choice([(1, 0), (-1, 0), (0, 1), (0, -1)])
-        nodes = [start_n]
-        for _ in range(max(6, steps)):
-            run = rng.randint(1, 3)
-            ni, nj = max(0, min(ncx, ci + d[0] * run)), max(0, min(ncy, cj + d[1] * run))
-            if (ni, nj) != (ci, cj):
-                ci, cj = ni, nj
-                nodes.append((ci, cj))
-            opts = [(-d[1], d[0]), (d[1], -d[0])]
-            rng.shuffle(opts)
-            for cand in opts:
-                if 0 <= ci + cand[0] <= ncx and 0 <= cj + cand[1] <= ncy:
-                    d = cand
-                    break
-        if ci != start_n[0]:
-            nodes.append((start_n[0], cj))
-        if cj != start_n[1]:
-            nodes.append((start_n[0], start_n[1]))
-        verts2 = []
-        for nd in nodes:
-            pt = node(*nd)
-            if verts2 and abs(pt[0] - verts2[-1][0]) < 1e-6 and abs(pt[1] - verts2[-1][1]) < 1e-6:
-                continue
-            if len(verts2) >= 2:
-                ax, ay = verts2[-2]
-                bx, by = verts2[-1]
-                if (abs(ax - bx) < 1e-6 and abs(bx - pt[0]) < 1e-6) or (
-                    abs(ay - by) < 1e-6 and abs(by - pt[1]) < 1e-6
-                ):
-                    verts2[-1] = pt
-                    continue
-            verts2.append(pt)
-        if len(verts2) >= 3:
-            ax, ay = verts2[-1]
-            bx, by = verts2[0]
-            cxp, cyp = verts2[1]
-            if (abs(ax - bx) < 1e-6 and abs(bx - cxp) < 1e-6) or (
-                abs(ay - by) < 1e-6 and abs(by - cyp) < 1e-6
-            ):
-                verts2.pop(0)
-        if len(verts2) >= 4:
-            cand_out, cand_good = emit_band(verts2)
-            if cand_good > good:
-                out, good = cand_out, cand_good
-    return out
+    best: List[GCodeCommand] = []
+    best_good = 0
+    for _try in range(8):
+        verts = make_walk()
+        if verts is None:
+            continue
+        cand, good = emit_band(verts)
+        if good > best_good:
+            best, best_good = cand, good
+        if best_good >= K:
+            break
+    return best
 
 
 # ---------------------------------------------------------------------------
@@ -3097,8 +3065,132 @@ def lissajous_swarm(
 
 
 # ---------------------------------------------------------------------------
-# 31. black hole  (Luminet 1979 isoradials — ported from eventHorizon)
+# 31. black hole  (Luminet 1979 — EXACT elliptic solver, from eventHorizon)
 # ---------------------------------------------------------------------------
+
+
+def _carlson_rf(x, y, z):
+    """Carlson symmetric elliptic integral R_F (duplication algorithm)."""
+    x, y, z = max(0.0, x), max(0.0, y), max(0.0, z)
+    for _ in range(80):
+        sx, sy, sz = math.sqrt(x), math.sqrt(y), math.sqrt(z)
+        lam = sx * sy + sy * sz + sz * sx
+        x, y, z = (x + lam) / 4, (y + lam) / 4, (z + lam) / 4
+        avg = (x + y + z) / 3
+        if avg > 0 and max(abs(x - avg), abs(y - avg), abs(z - avg)) < 1e-10 * avg:
+            break
+    return 1.0 / math.sqrt(avg)
+
+
+def _ellip_f(phi, m):
+    """Incomplete elliptic integral of the first kind F(phi | m)."""
+    sph = math.sin(phi)
+    return sph * _carlson_rf(math.cos(phi) ** 2, 1.0 - m * sph * sph, 1.0)
+
+
+def _ellip_k(m):
+    return _ellip_f(math.pi / 2, m)
+
+
+def _jacobi_sn(u, m):
+    """Jacobi sn(u | m) via the AGM / descending Landen transformation."""
+    if m < 1e-12:
+        return math.sin(u)
+    if m > 1.0 - 1e-12:
+        return math.tanh(u)
+    a = [1.0]
+    b = [math.sqrt(1.0 - m)]
+    c = [math.sqrt(m)]
+    while abs(c[-1]) > 1e-12 and len(a) < 30:
+        an = (a[-1] + b[-1]) / 2.0
+        bn = math.sqrt(a[-1] * b[-1])
+        cn = (a[-1] - b[-1]) / 2.0
+        a.append(an)
+        b.append(bn)
+        c.append(cn)
+    n = len(a) - 1
+    phi = (2.0**n) * a[n] * u
+    for k in range(n, 0, -1):
+        phi = (phi + math.asin(max(-1.0, min(1.0, c[k] * math.sin(phi) / a[k])))) / 2.0
+    return math.sin(phi)
+
+
+def _luminet_b_table(inclination, n, alphas, radii):
+    """Exact impact parameter b(alpha, r) for image order n (Luminet eq. 13).
+
+    Root-solves the periastron P per (alpha, r) using the same equations as
+    eventHorizon/physics/geodesics.py, with per-P quantities precomputed and
+    the alpha->2pi-alpha mirror symmetry exploited. M = 1.
+    """
+    tan_i = math.tan(inclination) or 1e-9
+
+    # P grid with precomputed elliptic quantities
+    P_N = 110
+    P_hi = max(70.0, 2.2 * max(radii))
+    Ps = [3.001 + (P_hi - 3.001) * (k / (P_N - 1)) ** 1.6 for k in range(P_N)]
+    pre = []
+    for P in Ps:
+        Q = math.sqrt((P - 2.0) * (P + 6.0))
+        k2 = max(0.0, min(0.999999, (Q - P + 6.0) / (2.0 * Q)))
+        num = (Q - P + 2.0) / (Q - P + 6.0)
+        zeta_inf = math.asin(math.sqrt(max(0.0, min(1.0, num))))
+        pre.append((P, Q, k2, math.sqrt(P / Q), _ellip_f(zeta_inf, k2), _ellip_k(k2)))
+
+    def r_inv(entry, gamma):
+        P, Q, k2, sq_pq, F_inf, K_k = entry
+        if n == 0:
+            u = gamma / (2.0 * sq_pq) + F_inf
+        else:
+            u = (gamma - 2.0 * n * math.pi) / (2.0 * sq_pq) - F_inf + 2.0 * K_k
+        snv = _jacobi_sn(u, k2)
+        return (1.0 / (4.0 * P)) * (-(Q - P + 2.0) + (Q - P + 6.0) * snv * snv)
+
+    half = [a for a in alphas if a <= math.pi + 1e-9]
+    table = {}
+    for r in radii:
+        for alpha in half:
+            ca = math.cos(alpha)
+            gamma = math.acos(ca / math.sqrt(ca * ca + 1.0 / (tan_i * tan_i)))
+            # scan for sign change of f(P) = 1 - r * r_inv(P)
+            prev_f = None
+            prev_e = None
+            root_P = None
+            for entry in pre:
+                fv = 1.0 - r * r_inv(entry, gamma)
+                if prev_f is not None and math.isfinite(fv) and math.isfinite(prev_f):
+                    if (prev_f < 0) != (fv < 0):
+                        lo, hi = prev_e, entry
+                        loP, hiP = lo[0], hi[0]
+                        f_lo = prev_f
+                        for _ in range(38):
+                            midP = (loP + hiP) / 2.0
+                            Q = math.sqrt((midP - 2.0) * (midP + 6.0))
+                            k2 = max(0.0, min(0.999999, (Q - midP + 6.0) / (2.0 * Q)))
+                            num = (Q - midP + 2.0) / (Q - midP + 6.0)
+                            z_inf = math.asin(math.sqrt(max(0.0, min(1.0, num))))
+                            mid = (
+                                midP,
+                                Q,
+                                k2,
+                                math.sqrt(midP / Q),
+                                _ellip_f(z_inf, k2),
+                                _ellip_k(k2),
+                            )
+                            fm = 1.0 - r * r_inv(mid, gamma)
+                            if (f_lo < 0) == (fm < 0):
+                                loP, f_lo = midP, fm
+                            else:
+                                hiP = midP
+                        root_P = (loP + hiP) / 2.0
+                        break
+                prev_f, prev_e = fv, entry
+            if root_P is not None:
+                b = math.sqrt(root_P**3 / (root_P - 2.0))
+            else:
+                b = float("nan")
+            table[(alpha, r)] = b
+            table[(2.0 * math.pi - alpha, r)] = b  # mirror symmetry
+    return table
 
 
 def black_hole(
@@ -3106,95 +3198,130 @@ def black_hole(
     bounds: Bounds,
     colors: int = 1,
     inclination: float = -1.0,
-    n_iso: int = 18,
+    n_iso: int = 16,
     r_min: float = 6.0,
     r_max: float = 30.0,
-    samples: int = 280,
-    ghost_rings: int = 4,
-    under_rings: int = 8,
+    samples: int = 120,
+    ghost: bool = True,
     mode: str = "lines",
-    dots: int = 2600,
+    dots: int = 2400,
     feed: int = 1600,
 ) -> List[GCodeCommand]:
-    """Luminet-1979 black hole — isoradial lines and/or flux-weighted dots.
+    """Luminet-1979 black hole with the EXACT elliptic-integral solver.
 
-    Ported from the 007-eventHorizon project (Schwarzschild disk imaging) using
-    the Beloborodov light-bending approximation (the original uses exact
-    elliptic integrals). Draws the primary disk image (far side lifts over the
-    shadow), the UNDER-image arcs below the shadow (the disk's other face,
-    compressed toward the photon ring), ghost arcs and the critical shadow.
-    ``mode``: ``lines`` | ``dots`` | ``both`` — dots are Novikov–Thorne
-    flux-weighted with Doppler boosting (the bright approaching side), like the
-    eventHorizon scatter render. Seed picks inclination (75–86°) and spacing.
+    Ported from 007-eventHorizon (Luminet eq. 13 impact parameters, eq. 19
+    redshift, Page–Thorne flux): the direct image (n=0) domes over the shadow
+    and the TRUE ghost image (n=1) forms the bright lensed ring below — the
+    full classic picture. ``mode``: ``lines`` | ``dots`` | ``both``; dots are
+    flux-weighted with Doppler boosting. Seed picks inclination (72–85°).
     """
     x0, y0, x1, y1 = bounds
     cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
 
-    inc_deg = inclination if inclination > 0 else rng.uniform(75.0, 86.0)
+    inc_deg = inclination if inclination > 0 else rng.uniform(72.0, 85.0)
     inc = math.radians(inc_deg)
-    sin_i, cos_i = math.sin(inc), math.cos(inc)
-    b_crit = math.sqrt(27.0)
+    sin_i = math.sin(inc)
 
-    def bend(r, phi):
-        """Impact parameter + screen direction for disk point (r, phi)."""
-        cos_psi = sin_i * math.cos(phi)
-        cos_a = 1.0 - (1.0 - cos_psi) * (1.0 - 2.0 / r)
-        cos_a = max(-1.0, min(1.0, cos_a))
-        sin_a = math.sqrt(max(0.0, 1.0 - cos_a * cos_a))
-        b = r * sin_a / math.sqrt(max(1e-9, 1.0 - 2.0 / r))
-        gx = math.sin(phi)
-        gy = -math.cos(phi) * cos_i
-        gl = math.hypot(gx, gy) or 1.0
-        return b, gx / gl, gy / gl
-
-    def flux(r):
-        """Page–Thorne intrinsic flux shape (r in M, ISCO=6M)."""
-        if r <= 6.0001 or r <= 3.0:
-            return 0.0
-        sr, s6, s3 = math.sqrt(r), math.sqrt(6.0), math.sqrt(3.0)
-        ln_term = math.log(((sr - s3) * (s6 + s3)) / ((sr + s3) * (s6 - s3)))
-        return max(0.0, (sr - s6 + (s3 / 2.0) * ln_term) / ((r - 3.0) * r**2.5))
-
-    def one_plus_z(r, phi):
-        beta = math.sqrt(1.0 / max(1e-9, 2.0 * (r - 2.0)))
-        return (1.0 + beta * sin_i * math.sin(phi)) / math.sqrt(max(1e-9, 1.0 - 3.0 / r))
-
-    # ── build all raw geometry in M units first (fit once at the end) ──
     n_rings = max(6, n_iso + rng.randint(-2, 2))
     rings = [r_min * (r_max / r_min) ** (k / max(1, n_rings - 1)) for k in range(n_rings)]
+    alphas = [2.0 * math.pi * k / samples for k in range(samples + 1)]
 
-    curves = []  # (points, band)
+    # r-grid for dot interpolation shares the exact tables with the rings
+    dot_rgrid = (
+        [6.001 * (r_max / 6.001) ** (k / 23.0) for k in range(24)] if mode != "lines" else []
+    )
+    all_r = sorted(set(rings) | set(dot_rgrid))
+    t_direct = _luminet_b_table(inc, 0, alphas, all_r)
+    t_ghost = _luminet_b_table(inc, 1, alphas, all_r) if ghost else {}
+
+    def screen(alpha, b):
+        # eventHorizon convention: X = b·cos(alpha - pi/2), Y = b·sin(alpha - pi/2)
+        return (b * math.cos(alpha - math.pi / 2), b * math.sin(alpha - math.pi / 2))
+
+    curves = []
     if mode in ("lines", "both"):
         for ri, r in enumerate(rings):
-            pts = []
-            for k in range(samples + 1):
-                phi = 2.0 * math.pi * k / samples
-                b, ux, uy = bend(r, phi)
-                pts.append((b * ux, b * uy))
-            curves.append((pts, ri / max(1, n_rings - 1)))
-        # UNDER-image: the disk's far face lensed BELOW the shadow,
-        # compressed toward the photon ring
-        for r in rings[:: max(1, n_rings // max(1, under_rings))]:
-            pts = []
-            for k in range(samples + 1):
-                phi = 2.0 * math.pi * k / samples
-                b, ux, uy = bend(r, phi)
-                b_u = b_crit + (b - b_crit) * 0.28
-                pts.append((b_u * ux, -abs(b_u * uy)))  # always below centre
-            curves.append((pts, 1.0))
-        for gk in range(max(0, ghost_rings)):
-            eps = 0.3 * (gk + 1) / max(1, ghost_rings)
-            pts = []
-            for k in range(samples + 1):
-                phi = 2.0 * math.pi * k / samples
-                psi = math.acos(max(-1.0, min(1.0, sin_i * math.cos(phi))))
-                b2 = b_crit * (1.0 + eps * math.exp(-psi * 2.0))
-                gx = math.sin(phi)
-                gy = math.cos(phi) * cos_i
-                gl = math.hypot(gx, gy) or 1.0
-                pts.append((b2 * gx / gl, b2 * gy / gl))
-            curves.append((pts, 1.0))
-    # shadow always
+            for tbl, band in ((t_direct, ri / max(1, n_rings - 1)), (t_ghost, 1.0)):
+                if not tbl:
+                    continue
+                bs = [tbl.get((alpha, r), float("nan")) for alpha in alphas]
+                nvalid = sum(1 for b in bs if math.isfinite(b))
+                if nvalid < len(bs) * 0.5:
+                    continue
+                # fill root-finder gaps by circular interpolation over alpha
+                nb = len(bs)
+                for k in range(nb):
+                    if math.isfinite(bs[k]):
+                        continue
+                    lo = k
+                    while not math.isfinite(bs[lo % nb]):
+                        lo -= 1
+                    hi = k
+                    while not math.isfinite(bs[hi % nb]):
+                        hi += 1
+                    span = hi - lo
+                    t = (k - lo) / span
+                    bs[k] = bs[lo % nb] + (bs[hi % nb] - bs[lo % nb]) * t
+                pts = [screen(alpha, b) for alpha, b in zip(alphas, bs)]
+                curves.append((pts, band))
+
+    def flux(r):
+        if r <= 6.0001:
+            return 0.0
+        sr, s6, s3 = math.sqrt(r), math.sqrt(6.0), math.sqrt(3.0)
+        ln_t = math.log(((sr + s3) * (s6 - s3)) / ((sr - s3) * (s6 + s3)))
+        return max(0.0, (sr - s6 + (s3 / 3.0) * ln_t) / ((r - 3.0) * r**2.5))
+
+    def bilinear(tbl, alpha, r):
+        # nearest alpha sample + linear in r over dot_rgrid
+        ai = min(range(len(alphas)), key=lambda k: abs(alphas[k] - alpha))
+        a = alphas[ai]
+        for k in range(len(dot_rgrid) - 1):
+            r0g, r1g = dot_rgrid[k], dot_rgrid[k + 1]
+            if r0g <= r <= r1g:
+                b0 = tbl.get((a, r0g), float("nan"))
+                b1 = tbl.get((a, r1g), float("nan"))
+                if math.isfinite(b0) and math.isfinite(b1):
+                    t = (r - r0g) / max(1e-9, r1g - r0g)
+                    return b0 + (b1 - b0) * t
+                return float("nan")
+        return float("nan")
+
+    dot_pts = []
+    if mode in ("dots", "both"):
+        wmax = 0.0
+        for r in dot_rgrid:
+            for alpha in alphas[:: max(1, samples // 24)]:
+                b = t_direct.get((alpha, r), float("nan"))
+                if not math.isfinite(b):
+                    continue
+                opz = (1.0 + math.sqrt(1.0 / r**3) * b * sin_i * math.sin(alpha)) / math.sqrt(
+                    max(1e-9, 1.0 - 3.0 / r)
+                )
+                wmax = max(wmax, flux(r) / opz**4)
+        wmax = wmax or 1.0
+        placed = 0
+        guard = 0
+        while placed < dots and guard < dots * 80:
+            guard += 1
+            ghost_pick = ghost and rng.random() < 0.22
+            tbl = t_ghost if ghost_pick else t_direct
+            r = 6.05 + (r_max - 6.05) * rng.random()
+            alpha = 2.0 * math.pi * rng.random()
+            b = bilinear(tbl, alpha, r)
+            if not math.isfinite(b):
+                continue
+            opz = (1.0 + math.sqrt(1.0 / r**3) * b * sin_i * math.sin(alpha)) / math.sqrt(
+                max(1e-9, 1.0 - 3.0 / r)
+            )
+            w = flux(r) / opz**4
+            if rng.random() * wmax > w:
+                continue
+            dot_pts.append((*screen(alpha, b), min(1.0, w / wmax)))
+            placed += 1
+
+    # shadow (photon ring critical curve)
+    b_crit = math.sqrt(27.0)
     curves.append(
         (
             [
@@ -3208,30 +3335,6 @@ def black_hole(
         )
     )
 
-    dot_pts = []  # (X, Y, band) in M units
-    if mode in ("dots", "both"):
-        # rejection sampling of the observed brightness r·F(r)/(1+z)^4
-        wmax = 0.0
-        for rr in range(40):
-            r = 6.05 + (r_max - 6.05) * rr / 39.0
-            for pp in range(24):
-                phi = 2.0 * math.pi * pp / 24.0
-                wmax = max(wmax, r * flux(r) / one_plus_z(r, phi) ** 4)
-        wmax = wmax or 1.0
-        placed = 0
-        guard = 0
-        while placed < dots and guard < dots * 60:
-            guard += 1
-            r = 6.05 + (r_max - 6.05) * rng.random()
-            phi = 2.0 * math.pi * rng.random()
-            w = r * flux(r) / one_plus_z(r, phi) ** 4
-            if rng.random() * wmax > w:
-                continue
-            b, ux, uy = bend(r, phi)
-            dot_pts.append((b * ux, b * uy, min(1.0, w / wmax)))
-            placed += 1
-
-    # ── fit everything to bounds ──
     xs = [pt[0] for c, _ in curves for pt in c] + [d[0] for d in dot_pts]
     ys = [pt[1] for c, _ in curves for pt in c] + [d[1] for d in dot_pts]
     sc = 0.94 * min((x1 - x0) / (max(xs) - min(xs)), (y1 - y0) / (max(ys) - min(ys)))
@@ -3247,8 +3350,12 @@ def black_hole(
         color = min(colors - 1, int(band * colors)) if colors > 1 else None
         out += _poly(spts, color=color, f=feed)
     for px, py, wgt in dot_pts:
-        dx_ = _clamp(cx + (px - mx) * sc, x0, x1)
-        dy_ = _clamp(cy + (py - my) * sc, y0, y1)
         color = min(colors - 1, int((1.0 - wgt) * colors)) if colors > 1 else None
-        out += _dot(dx_, dy_, r=0.35, color=color, f=feed)
+        out += _dot(
+            _clamp(cx + (px - mx) * sc, x0, x1),
+            _clamp(cy + (py - my) * sc, y0, y1),
+            r=0.35,
+            color=color,
+            f=feed,
+        )
     return out
