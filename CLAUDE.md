@@ -140,11 +140,19 @@ New flags on `draw`: `--plan` (LLM plans composition first), `--resume` (resume 
 `--orchestrate --regions N` (supervisor-worker fan-out), `--colors N` (LLM assigns colors, plotter pauses
 for swaps), `--paper a3|a4|a5|a6 --orientation portrait|landscape`.
 
-### Three controllers
+### Four controllers
 PromptPlot can be driven three ways, sharing the same postprocess/scoring/plotter primitives:
 - **File** — replay curated .gcode from `~/.promptplot/library/` (`promptplot library list|play <name>`).
 - **LLM** — `SupervisorWorkerWorkflow` runs the plan→workers→merge→critique→retry loop in one
   Python process. Drive via `promptplot draw "..." --orchestrate --regions N`.
+- **PromptPlot Agent** — the built-in agentic controller (`promptplot agent`, package
+  `promptplot/agent/`): an LLM-agnostic chat loop (any of the 7 providers via a strict JSON
+  tool-call envelope in `agent/protocol.py`) over a typed toolbox (`agent/tools.py`:
+  list/render generators, render DSL blocks, score, validate, import, memory search).
+  Sessions persist to `~/.promptplot/agent_sessions/<id>/` (transcript.json + trace.jsonl +
+  renders/ + report.md); resume with `--session <id>`. Headless: `promptplot agent -p "..."`.
+  Tools are tiered safe/confirm — hardware tools (Phase B) always trace the frame and require
+  approval. Tests: `tests/test_agent.py` (stub provider, no keys/hardware).
 - **Claude Code** — external orchestrator using the public `promptplot.orchestrate` API
   (`plan_regions`, `generate_region`, `validate_chunk`, `score_chunk`, `merge_chunks`,
   `stream_chunk`, `load_and_continue`). The `pp-orchestrate` skill teaches the loop.

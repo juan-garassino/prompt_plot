@@ -101,6 +101,15 @@ promptplot draw "a banner" --paper a3 --orientation landscape --simulate
 
 **Seeded generative art (deterministic, no LLM):**
 
+### Built-in agent (LLM-agnostic)
+
+```bash
+promptplot agent                       # interactive REPL: renders, scores, iterates
+promptplot agent -p "render truchet seed 8 with 2 colors and report the grade"
+promptplot agent --provider ollama --model llama3.2   # runs fully local
+```
+
+
 ```bash
 promptplot art --list                                       # list all 32 generators + params
 promptplot art tiled_field --seed 12345 --colors 3 --simulate --preview

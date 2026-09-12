@@ -13,5 +13,6 @@ from . import draw  # noqa: F401  (registers draw)
 from . import art  # noqa: F401  (registers art — seeded generative)
 from . import import_cmd  # noqa: F401  (registers import — SVG/DXF)
 from . import manage  # noqa: F401  (registers config/plotter/interactive/ui/library)
+from . import agent  # noqa: F401  (registers agent — agentic controller)
 
 __all__ = ["cli", "main"]

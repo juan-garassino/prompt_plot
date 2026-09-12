@@ -22,6 +22,9 @@ def _parse_params(pairs):
             raise click.BadParameter(f"--param must be key=value, got {pair!r}")
         k, v = pair.split("=", 1)
         k, v = k.strip(), v.strip()
+        if v.lower() in ("true", "false"):
+            out[k] = v.lower() == "true"
+            continue
         try:
             out[k] = int(v)
         except ValueError:

@@ -12,6 +12,7 @@ import inspect
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import generators as _g
+from . import bauhaus as _b
 from .rng import SeededRNG
 
 GENERATOR_REGISTRY = {
@@ -52,6 +53,9 @@ GENERATOR_REGISTRY = {
     "weight_matrix": _g.weight_matrix,
     "attention_matrix": _g.attention_matrix,
     "black_hole_bauhaus": _g.black_hole_bauhaus,
+    "bauhaus_attractor": _b.bauhaus_attractor,
+    "bauhaus_attention": _b.bauhaus_attention,
+    "bauhaus_weights": _b.bauhaus_weights,
 }
 
 _SKIP_PARAMS = {"rng", "bounds"}

@@ -363,7 +363,7 @@ class OpenRouterProvider(LLMProvider):
 
     def __init__(
         self,
-        model: str = "nvidia/llama-3.1-nemotron-70b-instruct",
+        model: str = "nvidia/nemotron-3-super-120b-a12b",
         api_key: Optional[str] = None,
         timeout: int = 120,
         temperature: float = 0.1,

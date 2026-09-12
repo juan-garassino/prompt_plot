@@ -62,6 +62,9 @@ def test_all_generators_registered():
         "weight_matrix",
         "attention_matrix",
         "black_hole_bauhaus",
+        "bauhaus_attractor",
+        "bauhaus_attention",
+        "bauhaus_weights",
     ]:
         assert expected in gens
 
@@ -106,6 +109,9 @@ def test_all_generators_registered():
         "weight_matrix",
         "attention_matrix",
         "black_hole_bauhaus",
+        "bauhaus_attractor",
+        "bauhaus_attention",
+        "bauhaus_weights",
     ],
 )
 def test_generator_deterministic_and_nonempty(name):
@@ -186,6 +192,9 @@ def test_different_seed_differs(name):
         "weight_matrix",
         "attention_matrix",
         "black_hole_bauhaus",
+        "bauhaus_attractor",
+        "bauhaus_attention",
+        "bauhaus_weights",
     ],
 )
 def test_generator_within_bounds(name):
