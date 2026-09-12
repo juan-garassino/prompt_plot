@@ -55,6 +55,7 @@ def test_all_generators_registered():
         "iso_city",
         "rounded_circuits",
         "lissajous_swarm",
+        "black_hole",
     ]:
         assert expected in gens
 
@@ -92,6 +93,7 @@ def test_all_generators_registered():
         "iso_city",
         "rounded_circuits",
         "lissajous_swarm",
+        "black_hole",
     ],
 )
 def test_generator_deterministic_and_nonempty(name):
@@ -143,6 +145,7 @@ def test_different_seed_differs(name):
         "iso_city",
         "rounded_circuits",
         "lissajous_swarm",
+        "black_hole",
     ],
 )
 def test_generator_within_bounds(name):

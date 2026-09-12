@@ -1654,6 +1654,9 @@ def scribble_halftone(
     invert: bool = False,
     shape_aware: bool = True,
     cross_threshold: float = 0.66,
+    channels: str = "mono",
+    _channel: str = "",
+    _pen: int = -1,
     feed: int = 1800,
 ) -> List[GCodeCommand]:
     """Render an image as a field of short hatching dashes (hatching portrait).
@@ -1668,8 +1671,34 @@ def scribble_halftone(
     Without ``image`` a procedural fbm field is used. Tonal bands map to pens
     (darkest band → pen 0). Requires Pillow for image input.
     """
+    if channels == "cmyk" and image and not _channel:
+        outc: List[GCodeCommand] = []
+        for pen_i, ch in enumerate("cmyk"):
+            outc += scribble_halftone(
+                rng,
+                bounds,
+                colors=1,
+                image=image,
+                cell=cell,
+                max_per_cell=max_per_cell,
+                dash_len=dash_len,
+                gamma=gamma,
+                threshold=threshold,
+                max_strokes=max_strokes // 4,
+                invert=invert,
+                shape_aware=shape_aware,
+                cross_threshold=cross_threshold,
+                channels="mono",
+                _channel=ch,
+                _pen=pen_i,
+                feed=feed,
+            )
+        return outc
+
     x0, y0, x1, y1 = bounds
-    gw, gh, off_x, off_y, tone = _image_tone_grid(rng, bounds, image, cell, invert)
+    gw, gh, off_x, off_y, tone = _image_tone_grid(
+        rng, bounds, image, cell, invert, channel=_channel
+    )
     if shape_aware:
         tangent, coherence = _image_orientation_grid(gw, gh, tone)
 
@@ -1718,7 +1747,10 @@ def scribble_halftone(
                 dy = math.sin(ang) * L / 2
                 p0 = (_clamp(jx - dx, x0, x1), _clamp(jy - dy, y0, y1))
                 p1 = (_clamp(jx + dx, x0, x1), _clamp(jy + dy, y0, y1))
-                color = min(colors - 1, int((1.0 - d) * colors)) if colors > 1 else None
+                if _pen >= 0:
+                    color = _pen
+                else:
+                    color = min(colors - 1, int((1.0 - d) * colors)) if colors > 1 else None
                 out += _poly([p0, p1], color=color, f=feed)
     return out
 
@@ -1858,7 +1890,13 @@ def comic_panels(
 
 
 def _image_tone_grid(
-    rng: SeededRNG, bounds: Bounds, image: str, cell: float, invert: bool, auto_levels: bool = True
+    rng: SeededRNG,
+    bounds: Bounds,
+    image: str,
+    cell: float,
+    invert: bool,
+    auto_levels: bool = True,
+    channel: str = "",
 ):
     """Return (gw, gh, off_x, off_y, tone(i, j)) — image fitted to bounds, or a
     procedural fbm field when no image is given (standalone demo mode).
@@ -1873,7 +1911,7 @@ def _image_tone_grid(
             from PIL import Image
         except ImportError:
             raise RuntimeError("Pillow required for image input: pip install -e '.[vision]'")
-        img = Image.open(image).convert("L")
+        img = Image.open(image).convert("RGB")
         iw, ih = img.size
         # auto-rotate: align the image's long side with the paper's long side
         if (iw >= ih) != (bw >= bh):
@@ -1893,10 +1931,23 @@ def _image_tone_grid(
         px = small.load()
         off_x = x0
         off_y = y0
-        # flip j: image y grows downward
-        T = [[(px[i, gh - 1 - j] / 255.0) for i in range(gw)] for j in range(gh)]
-        if not invert:
-            T = [[1.0 - v for v in row] for row in T]
+
+        def _val(i, j):
+            r8, g8, b8 = px[i, gh - 1 - j]  # flip: image y grows downward
+            rv, gv, bv = r8 / 255.0, g8 / 255.0, b8 / 255.0
+            if channel:
+                kv = 1.0 - max(rv, gv, bv)
+                if channel == "k":
+                    return kv
+                if channel == "c":
+                    return max(0.0, (1.0 - rv) - kv)
+                if channel == "m":
+                    return max(0.0, (1.0 - gv) - kv)
+                return max(0.0, (1.0 - bv) - kv)  # 'y'
+            lum = 0.299 * rv + 0.587 * gv + 0.114 * bv
+            return lum if invert else 1.0 - lum
+
+        T = [[_val(i, j) for i in range(gw)] for j in range(gh)]
     else:
         gw = max(2, int(bw / cell))
         gh = max(2, int(bh / cell))
@@ -1907,8 +1958,9 @@ def _image_tone_grid(
         flat = sorted(v for row in T for v in row)
         p5 = flat[int(0.05 * (len(flat) - 1))]
         p95 = flat[int(0.95 * (len(flat) - 1))]
-        span = max(1e-6, p95 - p5)
-        T = [[min(1.0, max(0.0, (v - p5) / span)) for v in row] for row in T]
+        if p95 - p5 >= 0.05:  # skip near-empty channels (don't amplify noise)
+            span = p95 - p5
+            T = [[min(1.0, max(0.0, (v - p5) / span)) for v in row] for row in T]
 
     def tone(i, j):
         return T[j][i]
@@ -1995,6 +2047,9 @@ def line_halftone(
     width_gap: float = 0.45,
     width2_threshold: float = 0.62,
     width3_threshold: float = 0.88,
+    channels: str = "mono",
+    _channel: str = "",
+    _pen: int = -1,
     feed: int = 1800,
 ) -> List[GCodeCommand]:
     """Image rendered as a vertical (or horizontal) line screen.
@@ -2006,8 +2061,33 @@ def line_halftone(
     one — thick where the image is dark, hairline where light. Tonal bands map
     to pens (darkest → pen 0). Without ``image`` a procedural field is used.
     """
+    if channels == "cmyk" and image and not _channel:
+        outc: List[GCodeCommand] = []
+        for pen_i, ch in enumerate("cmyk"):
+            outc += line_halftone(
+                rng,
+                bounds,
+                colors=1,
+                image=image,
+                pitch=pitch,
+                gamma=gamma,
+                threshold=threshold,
+                direction=direction,
+                invert=invert,
+                width_gap=width_gap,
+                width2_threshold=width2_threshold,
+                width3_threshold=width3_threshold,
+                channels="mono",
+                _channel=ch,
+                _pen=pen_i,
+                feed=feed,
+            )
+        return outc
+
     x0, y0, x1, y1 = bounds
-    gw, gh, off_x, off_y, tone = _image_tone_grid(rng, bounds, image, pitch, invert)
+    gw, gh, off_x, off_y, tone = _image_tone_grid(
+        rng, bounds, image, pitch, invert, channel=_channel
+    )
 
     vertical = direction != "h"
     n_lines = gw if vertical else gh
@@ -2026,7 +2106,10 @@ def line_halftone(
             run.clear()
             if b - a < 0.3:
                 return
-            color = min(colors - 1, int((1.0 - d) * colors)) if colors > 1 else None
+            if _pen >= 0:
+                color = _pen
+            else:
+                color = min(colors - 1, int((1.0 - d) * colors)) if colors > 1 else None
             if d >= width3_threshold:
                 offs = (-width_gap, 0.0, width_gap)
             elif d >= width2_threshold:
@@ -2081,6 +2164,9 @@ def scribble_portrait(
     smooth: int = 2,
     max_points: int = 9000,
     invert: bool = False,
+    channels: str = "mono",
+    _channel: str = "",
+    _pen: int = -1,
     feed: int = 1800,
 ) -> List[GCodeCommand]:
     """Continuous looping scribble whose density follows image darkness.
@@ -2092,8 +2178,34 @@ def scribble_portrait(
     multiple pens, tonal bands are scribbled dark-first (pen 0 = darkest).
     ``contrast`` multiplies the auto-leveled tone before gamma.
     """
+    if channels == "cmyk" and image and not _channel:
+        outc: List[GCodeCommand] = []
+        for pen_i, ch in enumerate("cmyk"):
+            outc += scribble_portrait(
+                rng,
+                bounds,
+                colors=1,
+                image=image,
+                cell=cell,
+                passes=passes,
+                radius=radius,
+                gamma=gamma,
+                threshold=threshold,
+                contrast=contrast,
+                smooth=smooth,
+                max_points=max_points // 4,
+                invert=invert,
+                channels="mono",
+                _channel=ch,
+                _pen=pen_i,
+                feed=feed,
+            )
+        return outc
+
     x0, y0, x1, y1 = bounds
-    gw, gh, off_x, off_y, tone = _image_tone_grid(rng, bounds, image, cell, invert)
+    gw, gh, off_x, off_y, tone = _image_tone_grid(
+        rng, bounds, image, cell, invert, channel=_channel
+    )
 
     caps = {}
     band_of = {}
@@ -2160,7 +2272,8 @@ def scribble_portrait(
             if len(path) >= 3:
                 pts = chaikin([mm(c) for c in path])
                 total_pts += len(pts)
-                out += _poly(pts, color=band if colors > 1 else None, f=feed)
+                color = _pen if _pen >= 0 else (band if colors > 1 else None)
+                out += _poly(pts, color=color, f=feed)
     return out
 
 
@@ -2182,6 +2295,7 @@ def sparkle_grid(
     tip_relief: float = 0.03,
     shell_gap: float = 0.055,
     slim: float = 3.6,
+    stretch: float = 1.45,
     feed: int = 1500,
 ) -> List[GCodeCommand]:
     """Four-pointed 'atomic sparkle' stars on a STRICT grid with guarded spurs.
@@ -2240,8 +2354,8 @@ def sparkle_grid(
                 continue
             cx = ox + (ci + 0.5) * cell + rng.uniform(-jitter, jitter) * cell
             cy = oy + (rj + 0.5) * cell + rng.uniform(-jitter, jitter) * cell
-            a = cell * rng.choice([0.35, 0.5, 0.62])
-            b = a
+            a = cell * rng.choice([0.3, 0.42, 0.52])
+            b = a * stretch  # elongated, elegant profile
             # reserve the star body extents on its own axes
             _register(row_iv, _key(cy), cx - a, cx + a)
             _register(col_iv, _key(cx), cy - b, cy + b)
@@ -2312,6 +2426,28 @@ def sparkle_grid(
 # ---------------------------------------------------------------------------
 
 
+def _convex_hull(points):
+    """Monotone-chain convex hull (small point sets)."""
+    pts = sorted(set(points))
+    if len(pts) <= 2:
+        return pts
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower = []
+    for pt in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], pt) <= 0:
+            lower.pop()
+        lower.append(pt)
+    upper = []
+    for pt in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], pt) <= 0:
+            upper.pop()
+        upper.append(pt)
+    return lower[:-1] + upper[:-1]
+
+
 def iso_city(
     rng: SeededRNG,
     bounds: Bounds,
@@ -2323,9 +2459,14 @@ def iso_city(
     base_max: int = 4,
     tower_prob: float = 0.16,
     ground_frac: float = 0.24,
-    noise_scale: float = 0.55,
+    noise_scale: float = 0.3,
+    terraces: int = 5,
     projection: str = "2pt",
     persp: float = 0.55,
+    zoom: float = 1.8,
+    height: float = 1.0,
+    lod: float = 3.2,
+    detail: float = 0.22,
     mask_res: float = 0.4,
     sample_step: float = 0.25,
     min_run: float = 0.7,
@@ -2341,6 +2482,11 @@ def iso_city(
     occupancy-mask claiming — nearer columns draw, then claim their silhouettes
     (dilated, which also dedups shared edges); farther lines clip against the
     mask. Height bands map to pens when multiple colors are used.
+
+    ``zoom`` > 1 crops INTO the city (seeded focus point): buildings run off
+    every margin so the frame sits inside the scene — immersive, no visible
+    object boundary. Columns claim their full projected silhouette (convex
+    hull), so blocks are opaque with no see-through inner edges.
     """
     x0, y0, x1, y1 = bounds
 
@@ -2356,7 +2502,12 @@ def iso_city(
     for j in range(rows):
         for i in range(cols):
             n01 = (n[i][j] - lo) / span
-            h = 0 if n01 < ground_frac else 1 + int(n01 * base_max)
+            if n01 < ground_frac:
+                h = 0  # void: streets / plazas
+            else:
+                # terraced plateaus: large connected masses of equal height
+                lvl = 1 + int((n01 - ground_frac) / (1.0 - ground_frac) * (terraces - 1))
+                h = max(1, round((lvl / terraces) ** 1.3 * max_h * 0.6))
             if h and rng.random() < tower_prob:
                 h = min(max_h, h + rng.randint(max_h // 3, max_h - 1))
             H[i][j] = h
@@ -2410,9 +2561,33 @@ def iso_city(
     sys_ = [pt[1] for pt in samples]
     sw = (max(sxs) - min(sxs)) or 1.0
     sh = (max(sys_) - min(sys_)) or 1.0
-    sc = 0.96 * min((x1 - x0) / sw, (y1 - y0) / sh)
-    ox = (x0 + x1) / 2.0 - (min(sxs) + max(sxs)) / 2.0 * sc
-    oy = (y0 + y1) / 2.0 - (min(sys_) + max(sys_)) / 2.0 * sc
+    if zoom > 1.0:
+        # COVER-fit: scale so the scene overflows the frame, then pick a seeded
+        # focus whose window stays inside the scene on left/right/bottom
+        # (the top is allowed to breathe — sky above the towers).
+        sc = max((x1 - x0) / sw, (y1 - y0) / sh) * zoom
+        half_wx = (x1 - x0) / (2.0 * sc)
+        half_wy = (y1 - y0) / (2.0 * sc)
+        fx_lo = min(sxs) + half_wx
+        fx_hi = max(sxs) - half_wx
+        fy_lo = min(sys_) + half_wy
+        fy_hi = max(sys_) - half_wy * 0.3  # top may fall short of the scene
+        fxr = (
+            fx_lo + (fx_hi - fx_lo) * rng.uniform(0.25, 0.75)
+            if fx_hi > fx_lo
+            else (min(sxs) + max(sxs)) / 2
+        )
+        fyr = (
+            fy_lo + (fy_hi - fy_lo) * rng.uniform(0.15, 0.5)
+            if fy_hi > fy_lo
+            else (min(sys_) + max(sys_)) / 2
+        )
+    else:
+        sc = 0.96 * min((x1 - x0) / sw, (y1 - y0) / sh)
+        fxr = (min(sxs) + max(sxs)) / 2.0
+        fyr = (min(sys_) + max(sys_)) / 2.0
+    ox = (x0 + x1) / 2.0 - fxr * sc
+    oy = (y0 + y1) / 2.0 - fyr * sc
 
     def P(a, c, z):
         px, py = raw(a, c, z)
@@ -2431,23 +2606,23 @@ def iso_city(
             return True
         return mask[mj][mi] == 0
 
-    def claim_quad(q0, q1, q2, q3):
-        """Dilated fill of a convex quad (screen coords)."""
-        pts = [q0, q1, q2, q3]
+    def claim_convex(pts):
+        """Dilated fill of a convex polygon (screen coords)."""
+        npts = len(pts)
         area2 = 0.0
-        for k in range(4):
+        for k in range(npts):
             xA, yA = pts[k]
-            xB, yB = pts[(k + 1) % 4]
+            xB, yB = pts[(k + 1) % npts]
             area2 += xA * yB - xB * yA
         if abs(area2) < 1e-9:
             return
         if area2 < 0:
-            pts = [q0, q3, q2, q1]
+            pts = pts[::-1]
         g = 0.6 * q
         edges = []
-        for k in range(4):
+        for k in range(len(pts)):
             xA, yA = pts[k]
-            xB, yB = pts[(k + 1) % 4]
+            xB, yB = pts[(k + 1) % len(pts)]
             ex, ey = xB - xA, yB - yA
             el = math.hypot(ex, ey) or 1.0
             edges.append((xA, yA, ex / el, ey / el))
@@ -2462,14 +2637,38 @@ def iso_city(
                 px = x0 + (mi + 0.5) * q
                 ok = True
                 for xA, yA, tx, ty in edges:
-                    # signed distance to edge (CCW interior has cross >= 0)
-                    if (px - xA) * ty - (py - yA) * tx < -g:
+                    # interior of a CCW polygon: cross(edge_dir, p-A) >= 0
+                    if tx * (py - yA) - ty * (px - xA) < -g:
                         ok = False
                         break
                 if ok:
                     row[mi] = 1
 
+    def clip_rect(A, B):
+        """Liang–Barsky clip of segment A→B to the drawable rect (or None)."""
+        t0, t1 = 0.0, 1.0
+        dx, dy = B[0] - A[0], B[1] - A[1]
+        for pcl, qcl in ((-dx, A[0] - x0), (dx, x1 - A[0]), (-dy, A[1] - y0), (dy, y1 - A[1])):
+            if pcl == 0:
+                if qcl < 0:
+                    return None
+                continue
+            t = qcl / pcl
+            if pcl < 0:
+                if t > t1:
+                    return None
+                t0 = max(t0, t)
+            else:
+                if t < t0:
+                    return None
+                t1 = min(t1, t)
+        return ((A[0] + dx * t0, A[1] + dy * t0), (A[0] + dx * t1, A[1] + dy * t1))
+
     def clip_emit(A, B, color):
+        clipped = clip_rect(A, B)
+        if clipped is None:
+            return
+        A, B = clipped
         L = math.hypot(B[0] - A[0], B[1] - A[1])
         nseg = max(1, int(L / sample_step))
         first = last = None
@@ -2521,10 +2720,14 @@ def iso_city(
             order.append((key, i, j))
     order.sort()
 
-    def face_world(origin, eu, ev, nu, nv):
-        """Grid segments for a face: origin + s·eu + t·ev, s∈[0,nu], t∈[0,nv]."""
+    def face_world(origin, eu, ev, nu, nv, full=True):
+        """Grid segments for a face: origin + s·eu + t·ev, s∈[0,nu], t∈[0,nv].
+
+        ``full=False`` keeps only the outline (LOD for small far blocks)."""
         segs = []
-        for k in range(nu + 1):
+        us = range(nu + 1) if full else (0, nu)
+        vs = range(nv + 1) if full else (0, nv)
+        for k in us:
             segs.append(
                 (
                     (origin[0] + eu[0] * k, origin[1] + eu[1] * k, origin[2] + eu[2] * k),
@@ -2535,7 +2738,7 @@ def iso_city(
                     ),
                 )
             )
-        for k in range(nv + 1):
+        for k in vs:
             segs.append(
                 (
                     (origin[0] + ev[0] * k, origin[1] + ev[1] * k, origin[2] + ev[2] * k),
@@ -2574,23 +2777,45 @@ def iso_city(
                 if visible:
                     faces.append((origin, eu, ev, nu, nv))
 
-        quads = []
+        # LOD: when a unit cell projects smaller than ``lod`` mm, drop the
+        # inner grid — far blocks read as clean boxes instead of mush.
+        pa = P(a0, c0, 0.0)
+        pb = P(a0 + 1.0, c0, 0.0)
+        unit_mm = math.hypot(pb[0] - pa[0], pb[1] - pa[1])
+        full = unit_mm >= lod
         for origin, eu, ev, nu, nv in faces:
-            for A, Bw in face_world(origin, eu, ev, nu, nv):
+            for A, Bw in face_world(origin, eu, ev, nu, nv, full=full):
                 clip_emit(P(*A), P(*Bw), col)
-            qpts = [
-                P(*origin),
-                P(origin[0] + eu[0] * nu, origin[1] + eu[1] * nu, origin[2] + eu[2] * nu),
-                P(
-                    origin[0] + eu[0] * nu + ev[0] * nv,
-                    origin[1] + eu[1] * nu + ev[1] * nv,
-                    origin[2] + eu[2] * nu + ev[2] * nv,
-                ),
-                P(origin[0] + ev[0] * nv, origin[1] + ev[1] * nv, origin[2] + ev[2] * nv),
-            ]
-            quads.append(qpts)
-        for qpts in quads:
-            claim_quad(*qpts)
+            # window detail: inset squares on near (full-LOD) side-face cells
+            if full and detail > 0 and ev[2] == 1:
+                for u in range(nu):
+                    for v in range(nv):
+                        if rng.random() >= detail:
+                            continue
+                        wa, wb = 0.3, 0.7
+                        cs = []
+                        for ua, va in ((wa, wa), (wb, wa), (wb, wb), (wa, wb)):
+                            cs.append(
+                                (
+                                    origin[0] + eu[0] * (u + ua) + ev[0] * (v + va),
+                                    origin[1] + eu[1] * (u + ua) + ev[1] * (v + va),
+                                    origin[2] + eu[2] * (u + ua) + ev[2] * (v + va),
+                                )
+                            )
+                        for k4 in range(4):
+                            clip_emit(P(*cs[k4]), P(*cs[(k4 + 1) % 4]), col)
+        # claim the FULL projected silhouette of the prism (opaque blocks):
+        # convex hull of all projected corners — no seams, nothing behind
+        # ever peeks through inner edges.
+        corners = []
+        for da in (0.0, b):
+            for dc in (0.0, b):
+                corners.append(P(a0 + da, c0 + dc, 0.0))
+                if h > 0:
+                    corners.append(P(a0 + da, c0 + dc, float(h)))
+        hull = _convex_hull(corners)
+        if len(hull) >= 3:
+            claim_convex(hull)
     return out
 
 
@@ -2604,91 +2829,205 @@ def rounded_circuits(
     bounds: Bounds,
     colors: int = 2,
     pitch: float = 2.2,
-    band_lines: int = 4,
-    min_region: float = 45.0,
-    max_region: float = 110.0,
+    band_lines: int = 6,
+    steps: int = 16,
+    corner_r: float = -1.0,
     feed: int = 1600,
 ) -> List[GCodeCommand]:
-    """Conveyor-belt fill: regions of serpentine bands with rounded U-turns.
+    """ONE closed conveyor belt: a self-crossing tour with big round turns.
 
-    The drawable area is guillotine-split into large regions; each region is
-    filled by ONE serpentine path that snakes along its long axis with
-    semicircular folds, drawn as ``band_lines`` parallel copies ``pitch`` apart —
-    a continuous belt winding through the region. Orientations alternate and
-    each region takes a seeded pen (2 pens → the pink/blue interlock).
+    The centerline is a seeded closed 90°-turn walk on a coarse grid — it may
+    CROSS itself (belts overlap like real conveyors) before closing the loop.
+    It is drawn as ``band_lines`` concentric offsets ``pitch`` apart; the corner
+    radius is auto-sized (``corner_r`` < 0) large enough that every line keeps a
+    perfectly constant offset through every turn (concentric arcs, no pinching).
+    Lines split across pens in bands.
     """
     x0, y0, x1, y1 = bounds
+    K = max(2, band_lines)
+    half = (K - 1) / 2.0 * pitch
 
-    rects = [(x0, y0, x1, y1)]
-    final = []
-    while rects:
-        rx0, ry0, rx1, ry1 = rects.pop()
-        w, h = rx1 - rx0, ry1 - ry0
-        must_split = w > max_region or h > max_region
-        may_split = min(w, h) > 2 * min_region and rng.random() < 0.45
-        if must_split or may_split:
-            if w >= h:
-                c = rx0 + w * rng.uniform(0.35, 0.65)
-                rects.append((rx0, ry0, c, ry1))
-                rects.append((c, ry0, rx1, ry1))
-            else:
-                c = ry0 + h * rng.uniform(0.35, 0.65)
-                rects.append((rx0, ry0, rx1, c))
-                rects.append((rx0, c, rx1, ry1))
-        else:
-            final.append((rx0, ry0, rx1, ry1))
+    # grid pitch: legs far enough apart that adjacent bands never touch
+    G = max(2.6 * pitch + 2 * half, (K - 1) * pitch + 2.4 * pitch)
+    r_eff = corner_r if corner_r > 0 else 0.42 * G
+    m = half + r_eff * 0.2 + 2.0
+    gx0, gy0 = x0 + m, y0 + m
+    ncx = max(2, int((x1 - x0 - 2 * m) / G))
+    ncy = max(2, int((y1 - y0 - 2 * m) / G))
 
-    out: List[GCodeCommand] = []
-    for rx0, ry0, rx1, ry1 in final:
-        w, h = rx1 - rx0, ry1 - ry0
-        color = rng.randint(0, colors - 1) if colors > 1 else None
-        K = band_lines
-        half = (K - 1) / 2.0 * pitch
-        # legs run along the LONG axis (seeded flips keep it lively)
-        along_x = w >= h
-        if rng.random() < 0.25:
-            along_x = not along_x
-        margin = half + pitch
-        if along_x:
-            la, lb = rx0 + margin, rx1 - margin  # leg extent
-            p_lo, p_hi = ry0 + margin, ry1 - margin  # fold travel
-        else:
-            la, lb = ry0 + margin, ry1 - margin
-            p_lo, p_hi = rx0 + margin, rx1 - margin
-        if lb - la < pitch or p_hi - p_lo < pitch:
+    def node(i, j):
+        return (gx0 + i * G, gy0 + j * G)
+
+    # ── seeded closed 90°-turn walk (crossings allowed) ──
+    ci, cj = rng.randint(0, ncx), rng.randint(0, ncy)
+    start_n = (ci, cj)
+    d = rng.choice([(1, 0), (-1, 0), (0, 1), (0, -1)])
+    nodes = [start_n]
+    for _ in range(max(6, steps)):
+        run = rng.randint(1, 3)
+        ni, nj = ci + d[0] * run, cj + d[1] * run
+        ni = max(0, min(ncx, ni))
+        nj = max(0, min(ncy, nj))
+        if (ni, nj) != (ci, cj):
+            ci, cj = ni, nj
+            nodes.append((ci, cj))
+        # turn 90° (seeded side), away from walls when pinned
+        opts = [(-d[1], d[0]), (d[1], -d[0])]
+        rng.shuffle(opts)
+        for cand in opts:
+            ti, tj = ci + cand[0], cj + cand[1]
+            if 0 <= ti <= ncx and 0 <= tj <= ncy:
+                d = cand
+                break
+    # close the loop with up to two axis legs back to the start
+    if ci != start_n[0]:
+        nodes.append((start_n[0], cj))
+    if cj != start_n[1]:
+        nodes.append((start_n[0], start_n[1]))
+
+    # merge collinear runs + drop zero edges; need perpendicular consecutive edges
+    verts = []
+    for nd in nodes:
+        pt = node(*nd)
+        if verts and abs(pt[0] - verts[-1][0]) < 1e-6 and abs(pt[1] - verts[-1][1]) < 1e-6:
             continue
-        span = p_hi - p_lo
-        S_min = 2 * half + 2.4 * pitch  # fold pitch floor so bands never overlap
-        n_legs = max(2, int(span / S_min) + 1)
-        S = span / (n_legs - 1)
+        if len(verts) >= 2:
+            ax, ay = verts[-2]
+            bx, by = verts[-1]
+            if (abs(ax - bx) < 1e-6 and abs(bx - pt[0]) < 1e-6) or (
+                abs(ay - by) < 1e-6 and abs(by - pt[1]) < 1e-6
+            ):
+                verts[-1] = pt
+                continue
+        verts.append(pt)
+    # closing edge collinearity with first edge
+    if len(verts) >= 3:
+        ax, ay = verts[-1]
+        bx, by = verts[0]
+        cxp, cyp = verts[1]
+        if (abs(ax - bx) < 1e-6 and abs(bx - cxp) < 1e-6) or (
+            abs(ay - by) < 1e-6 and abs(by - cyp) < 1e-6
+        ):
+            verts.pop(0)
+    if len(verts) < 4:
+        verts = [node(0, 0), node(ncx, 0), node(ncx, ncy), node(0, ncy)]
 
-        def skeleton(off):
-            """One belt line: the serpentine translated ``off`` across the legs."""
-            pts = []
-            for leg in range(n_legs):
-                pos = p_lo + leg * S + off
-                if leg % 2 == 0:
-                    pts_leg = [(la, pos), (lb, pos)]
-                else:
-                    pts_leg = [(lb, pos), (la, pos)]
-                pts.extend(pts_leg)
-                if leg < n_legs - 1:
-                    # semicircular fold at the leg's far end
-                    fold_x = lb if leg % 2 == 0 else la
-                    cy_f = p_lo + leg * S + S / 2.0 + off
-                    a0 = -math.pi / 2 if leg % 2 == 0 else math.pi * 1.5
-                    for k in range(1, 12):
-                        a = a0 + math.pi * k / 12 * (1 if leg % 2 == 0 else -1)
-                        pts.append(
-                            (fold_x + (S / 2.0) * math.cos(a), cy_f + (S / 2.0) * math.sin(a))
-                        )
-            if not along_x:
-                pts = [(py, px) for px, py in pts]
-            return [(_clamp(px, x0, x1), _clamp(py, y0, y1)) for px, py in pts]
+    def offset_loop(base, o):
+        """Left-shift every edge by o (constant offset; crossings shift too)."""
+        nv = len(base)
+        shifted = []
+        for k in range(nv):
+            ax, ay = base[k]
+            bx, by = base[(k + 1) % nv]
+            dx = 0 if abs(bx - ax) < 1e-6 else (1 if bx > ax else -1)
+            dy = 0 if abs(by - ay) < 1e-6 else (1 if by > ay else -1)
+            if dy == 0:
+                shifted.append(("h", ay + o * dx, (dx, dy)))
+            else:
+                shifted.append(("v", ax - o * dy, (dx, dy)))
+        out_v = []
+        for k in range(nv):
+            t_prev, c_prev, _d1 = shifted[k - 1]
+            t_cur, c_cur, _d2 = shifted[k]
+            if t_prev == t_cur:
+                return None
+            xv = c_prev if t_prev == "v" else c_cur
+            yv = c_prev if t_prev == "h" else c_cur
+            out_v.append((xv, yv))
+        return out_v
 
+    def rounded_loop(base, o):
+        nv = len(base)
+        pts = []
+        for k in range(nv):
+            vv = base[k]
+            pa = base[k - 1]
+            pb = base[(k + 1) % nv]
+            d1 = (vv[0] - pa[0], vv[1] - pa[1])
+            d2 = (pb[0] - vv[0], pb[1] - vv[1])
+            l1 = math.hypot(*d1) or 1.0
+            l2 = math.hypot(*d2) or 1.0
+            u1 = (d1[0] / l1, d1[1] / l1)
+            u2 = (d2[0] / l2, d2[1] / l2)
+            turn = u1[0] * u2[1] - u1[1] * u2[0]
+            r = r_eff - o if turn > 0 else r_eff + o
+            r = max(0.2, min(r, l1 / 2 - 0.05, l2 / 2 - 0.05))
+            p_in = (vv[0] - u1[0] * r, vv[1] - u1[1] * r)
+            n1 = (-u1[1], u1[0]) if turn > 0 else (u1[1], -u1[0])
+            cxa = p_in[0] + n1[0] * r
+            cya = p_in[1] + n1[1] * r
+            a0 = math.atan2(p_in[1] - cya, p_in[0] - cxa)
+            sweep = (math.pi / 2) * (1 if turn > 0 else -1)
+            for kk in range(9):
+                a = a0 + sweep * kk / 8
+                pts.append((cxa + r * math.cos(a), cya + r * math.sin(a)))
+        pts.append(pts[0])
+        return [(_clamp(px, x0, x1), _clamp(py, y0, y1)) for px, py in pts]
+
+    def emit_band(base):
+        band: List[GCodeCommand] = []
+        good = 0
         for k in range(K):
-            off = (k - (K - 1) / 2.0) * pitch
-            out += _poly(skeleton(off), color=color, f=feed)
+            o = (k - (K - 1) / 2.0) * pitch
+            ov = offset_loop(base, o)
+            if ov is None:
+                continue
+            good += 1
+            color = (k * colors) // K if colors > 1 else None
+            band += _poly(rounded_loop(ov, o), color=color, f=feed)
+        return band, good
+
+    out, good = emit_band(verts)
+    tries = 0
+    while good < max(2, int(K * 0.7)) and tries < 8:
+        # degenerate walk (offsets collapsed) — reroll a fresh tour
+        tries += 1
+        ci, cj = rng.randint(0, ncx), rng.randint(0, ncy)
+        start_n = (ci, cj)
+        d = rng.choice([(1, 0), (-1, 0), (0, 1), (0, -1)])
+        nodes = [start_n]
+        for _ in range(max(6, steps)):
+            run = rng.randint(1, 3)
+            ni, nj = max(0, min(ncx, ci + d[0] * run)), max(0, min(ncy, cj + d[1] * run))
+            if (ni, nj) != (ci, cj):
+                ci, cj = ni, nj
+                nodes.append((ci, cj))
+            opts = [(-d[1], d[0]), (d[1], -d[0])]
+            rng.shuffle(opts)
+            for cand in opts:
+                if 0 <= ci + cand[0] <= ncx and 0 <= cj + cand[1] <= ncy:
+                    d = cand
+                    break
+        if ci != start_n[0]:
+            nodes.append((start_n[0], cj))
+        if cj != start_n[1]:
+            nodes.append((start_n[0], start_n[1]))
+        verts2 = []
+        for nd in nodes:
+            pt = node(*nd)
+            if verts2 and abs(pt[0] - verts2[-1][0]) < 1e-6 and abs(pt[1] - verts2[-1][1]) < 1e-6:
+                continue
+            if len(verts2) >= 2:
+                ax, ay = verts2[-2]
+                bx, by = verts2[-1]
+                if (abs(ax - bx) < 1e-6 and abs(bx - pt[0]) < 1e-6) or (
+                    abs(ay - by) < 1e-6 and abs(by - pt[1]) < 1e-6
+                ):
+                    verts2[-1] = pt
+                    continue
+            verts2.append(pt)
+        if len(verts2) >= 3:
+            ax, ay = verts2[-1]
+            bx, by = verts2[0]
+            cxp, cyp = verts2[1]
+            if (abs(ax - bx) < 1e-6 and abs(bx - cxp) < 1e-6) or (
+                abs(ay - by) < 1e-6 and abs(by - cyp) < 1e-6
+            ):
+                verts2.pop(0)
+        if len(verts2) >= 4:
+            cand_out, cand_good = emit_band(verts2)
+            if cand_good > good:
+                out, good = cand_out, cand_good
     return out
 
 
@@ -2706,6 +3045,8 @@ def lissajous_swarm(
     sweep: float = 3.14159,
     detune: float = 0.04,
     scale_min: float = 0.5,
+    thick_frac: float = 0.3,
+    thick_gap: float = 0.35,
     feed: int = 1700,
 ) -> List[GCodeCommand]:
     """A phase-swept family of Lissajous curves — the 'subversion' surface look.
@@ -2745,4 +3086,169 @@ def lissajous_swarm(
             pts.append((_clamp(px, x0, x1), _clamp(py, y0, y1)))
         color = (kc * colors) // curves if colors > 1 else None
         out += _poly(pts, color=color, f=feed)
+        # nearest-to-camera curves (end of the sweep) read thicker: double pass
+        if thick_frac > 0 and f > 1.0 - thick_frac:
+            shifted = [
+                (_clamp(px + thick_gap, x0, x1), _clamp(py + thick_gap * 0.6, y0, y1))
+                for px, py in pts
+            ]
+            out += _poly(shifted, color=color, f=feed)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 31. black hole  (Luminet 1979 isoradials — ported from eventHorizon)
+# ---------------------------------------------------------------------------
+
+
+def black_hole(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 1,
+    inclination: float = -1.0,
+    n_iso: int = 18,
+    r_min: float = 6.0,
+    r_max: float = 30.0,
+    samples: int = 280,
+    ghost_rings: int = 4,
+    under_rings: int = 8,
+    mode: str = "lines",
+    dots: int = 2600,
+    feed: int = 1600,
+) -> List[GCodeCommand]:
+    """Luminet-1979 black hole — isoradial lines and/or flux-weighted dots.
+
+    Ported from the 007-eventHorizon project (Schwarzschild disk imaging) using
+    the Beloborodov light-bending approximation (the original uses exact
+    elliptic integrals). Draws the primary disk image (far side lifts over the
+    shadow), the UNDER-image arcs below the shadow (the disk's other face,
+    compressed toward the photon ring), ghost arcs and the critical shadow.
+    ``mode``: ``lines`` | ``dots`` | ``both`` — dots are Novikov–Thorne
+    flux-weighted with Doppler boosting (the bright approaching side), like the
+    eventHorizon scatter render. Seed picks inclination (75–86°) and spacing.
+    """
+    x0, y0, x1, y1 = bounds
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+
+    inc_deg = inclination if inclination > 0 else rng.uniform(75.0, 86.0)
+    inc = math.radians(inc_deg)
+    sin_i, cos_i = math.sin(inc), math.cos(inc)
+    b_crit = math.sqrt(27.0)
+
+    def bend(r, phi):
+        """Impact parameter + screen direction for disk point (r, phi)."""
+        cos_psi = sin_i * math.cos(phi)
+        cos_a = 1.0 - (1.0 - cos_psi) * (1.0 - 2.0 / r)
+        cos_a = max(-1.0, min(1.0, cos_a))
+        sin_a = math.sqrt(max(0.0, 1.0 - cos_a * cos_a))
+        b = r * sin_a / math.sqrt(max(1e-9, 1.0 - 2.0 / r))
+        gx = math.sin(phi)
+        gy = -math.cos(phi) * cos_i
+        gl = math.hypot(gx, gy) or 1.0
+        return b, gx / gl, gy / gl
+
+    def flux(r):
+        """Page–Thorne intrinsic flux shape (r in M, ISCO=6M)."""
+        if r <= 6.0001 or r <= 3.0:
+            return 0.0
+        sr, s6, s3 = math.sqrt(r), math.sqrt(6.0), math.sqrt(3.0)
+        ln_term = math.log(((sr - s3) * (s6 + s3)) / ((sr + s3) * (s6 - s3)))
+        return max(0.0, (sr - s6 + (s3 / 2.0) * ln_term) / ((r - 3.0) * r**2.5))
+
+    def one_plus_z(r, phi):
+        beta = math.sqrt(1.0 / max(1e-9, 2.0 * (r - 2.0)))
+        return (1.0 + beta * sin_i * math.sin(phi)) / math.sqrt(max(1e-9, 1.0 - 3.0 / r))
+
+    # ── build all raw geometry in M units first (fit once at the end) ──
+    n_rings = max(6, n_iso + rng.randint(-2, 2))
+    rings = [r_min * (r_max / r_min) ** (k / max(1, n_rings - 1)) for k in range(n_rings)]
+
+    curves = []  # (points, band)
+    if mode in ("lines", "both"):
+        for ri, r in enumerate(rings):
+            pts = []
+            for k in range(samples + 1):
+                phi = 2.0 * math.pi * k / samples
+                b, ux, uy = bend(r, phi)
+                pts.append((b * ux, b * uy))
+            curves.append((pts, ri / max(1, n_rings - 1)))
+        # UNDER-image: the disk's far face lensed BELOW the shadow,
+        # compressed toward the photon ring
+        for r in rings[:: max(1, n_rings // max(1, under_rings))]:
+            pts = []
+            for k in range(samples + 1):
+                phi = 2.0 * math.pi * k / samples
+                b, ux, uy = bend(r, phi)
+                b_u = b_crit + (b - b_crit) * 0.28
+                pts.append((b_u * ux, -abs(b_u * uy)))  # always below centre
+            curves.append((pts, 1.0))
+        for gk in range(max(0, ghost_rings)):
+            eps = 0.3 * (gk + 1) / max(1, ghost_rings)
+            pts = []
+            for k in range(samples + 1):
+                phi = 2.0 * math.pi * k / samples
+                psi = math.acos(max(-1.0, min(1.0, sin_i * math.cos(phi))))
+                b2 = b_crit * (1.0 + eps * math.exp(-psi * 2.0))
+                gx = math.sin(phi)
+                gy = math.cos(phi) * cos_i
+                gl = math.hypot(gx, gy) or 1.0
+                pts.append((b2 * gx / gl, b2 * gy / gl))
+            curves.append((pts, 1.0))
+    # shadow always
+    curves.append(
+        (
+            [
+                (
+                    b_crit * math.cos(2 * math.pi * k / samples),
+                    b_crit * math.sin(2 * math.pi * k / samples),
+                )
+                for k in range(samples + 1)
+            ],
+            0.0,
+        )
+    )
+
+    dot_pts = []  # (X, Y, band) in M units
+    if mode in ("dots", "both"):
+        # rejection sampling of the observed brightness r·F(r)/(1+z)^4
+        wmax = 0.0
+        for rr in range(40):
+            r = 6.05 + (r_max - 6.05) * rr / 39.0
+            for pp in range(24):
+                phi = 2.0 * math.pi * pp / 24.0
+                wmax = max(wmax, r * flux(r) / one_plus_z(r, phi) ** 4)
+        wmax = wmax or 1.0
+        placed = 0
+        guard = 0
+        while placed < dots and guard < dots * 60:
+            guard += 1
+            r = 6.05 + (r_max - 6.05) * rng.random()
+            phi = 2.0 * math.pi * rng.random()
+            w = r * flux(r) / one_plus_z(r, phi) ** 4
+            if rng.random() * wmax > w:
+                continue
+            b, ux, uy = bend(r, phi)
+            dot_pts.append((b * ux, b * uy, min(1.0, w / wmax)))
+            placed += 1
+
+    # ── fit everything to bounds ──
+    xs = [pt[0] for c, _ in curves for pt in c] + [d[0] for d in dot_pts]
+    ys = [pt[1] for c, _ in curves for pt in c] + [d[1] for d in dot_pts]
+    sc = 0.94 * min((x1 - x0) / (max(xs) - min(xs)), (y1 - y0) / (max(ys) - min(ys)))
+    mx = (max(xs) + min(xs)) / 2.0
+    my = (max(ys) + min(ys)) / 2.0
+
+    out: List[GCodeCommand] = []
+    for pts, band in curves:
+        spts = [
+            (_clamp(cx + (px - mx) * sc, x0, x1), _clamp(cy + (py - my) * sc, y0, y1))
+            for px, py in pts
+        ]
+        color = min(colors - 1, int(band * colors)) if colors > 1 else None
+        out += _poly(spts, color=color, f=feed)
+    for px, py, wgt in dot_pts:
+        dx_ = _clamp(cx + (px - mx) * sc, x0, x1)
+        dy_ = _clamp(cy + (py - my) * sc, y0, y1)
+        color = min(colors - 1, int((1.0 - wgt) * colors)) if colors > 1 else None
+        out += _dot(dx_, dy_, r=0.35, color=color, f=feed)
     return out

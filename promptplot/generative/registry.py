@@ -45,6 +45,7 @@ GENERATOR_REGISTRY = {
     "iso_city": _g.iso_city,
     "rounded_circuits": _g.rounded_circuits,
     "lissajous_swarm": _g.lissajous_swarm,
+    "black_hole": _g.black_hole,
 }
 
 _SKIP_PARAMS = {"rng", "bounds"}
@@ -61,7 +62,7 @@ def get_generator_schema(name: str) -> Dict[str, Any]:
     sig = inspect.signature(fn)
     params: Dict[str, Any] = {}
     for pname, p in sig.parameters.items():
-        if pname in _SKIP_PARAMS:
+        if pname in _SKIP_PARAMS or pname.startswith("_"):
             continue
         params[pname] = None if p.default is inspect._empty else p.default
     doc = (fn.__doc__ or "").strip().split("\n")[0]

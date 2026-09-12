@@ -76,7 +76,14 @@ def _parse_params(pairs):
     "max_ink",
     default=0,
     type=int,
-    help="Cap pen passes per mm² (paper protection post-process; 0 = off)",
+    help="Cap pen passes per ink cell (paper protection post-process; 0 = off)",
+)
+@click.option(
+    "--max-ink-cell",
+    "max_ink_cell",
+    default=1.2,
+    type=float,
+    help="Ink-cell size in mm for --max-ink (bigger = more aggressive thinning)",
 )
 @click.option("--simulate", is_flag=True, help="Simulated plotter (no hardware)")
 @click.option("--preview", "save_preview", is_flag=True, help="Save a color-coded preview PNG")
@@ -99,6 +106,7 @@ def art(
     anaglyph_offset,
     glitch_bands,
     max_ink,
+    max_ink_cell,
     simulate,
     save_preview,
     save,
@@ -179,7 +187,7 @@ def art(
     if anaglyph:
         from ..generative import SeededRNG, anaglyph_layers
 
-        layer_count = colors if colors > 1 else 2
+        layer_count = colors if colors > 1 else 4
         raw = anaglyph_layers(
             raw,
             SeededRNG(seed_val + 7919),  # derived, still fully seed-reproducible
@@ -191,9 +199,12 @@ def art(
         colors = layer_count
         config.color.enabled = True
         if not names:
-            config.color.palette = ["red", "cyan"][:layer_count] + [
-                f"pen{i}" for i in range(max(0, layer_count - 2))
-            ]
+            base_glitch = ["cyan", "red", "yellow", "black"]
+            config.color.palette = (
+                base_glitch[:layer_count]
+                if layer_count <= 4
+                else base_glitch + [f"pen{i}" for i in range(layer_count - 4)]
+            )
         config.color.pause_for_swap = not simulate
         console.print(
             f"[bold blue]anaglyph[/bold blue]  → {layer_count} layers, offset {anaglyph_offset}mm"
@@ -204,7 +215,7 @@ def art(
         from ..generative import limit_ink_density
 
         before = len(raw)
-        raw = limit_ink_density(raw, max_passes=max_ink)
+        raw = limit_ink_density(raw, max_passes=max_ink, cell=max_ink_cell)
         console.print(
             f"[bold blue]max-ink[/bold blue]   → ≤{max_ink} passes/mm² ({before}→{len(raw)} cmds)"
         )
