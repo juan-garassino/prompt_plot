@@ -3228,7 +3228,7 @@ def black_hole(
 
     # r-grid for dot interpolation shares the exact tables with the rings
     dot_rgrid = (
-        [6.001 * (r_max / 6.001) ** (k / 23.0) for k in range(24)] if mode != "lines" else []
+        [6.001 * (r_max / 6.001) ** (k / 31.0) for k in range(32)] if mode != "lines" else []
     )
     all_r = sorted(set(rings) | set(dot_rgrid))
     t_direct = _luminet_b_table(inc, 0, alphas, all_r)
@@ -3238,31 +3238,41 @@ def black_hole(
         # eventHorizon convention: X = b·cos(alpha - pi/2), Y = b·sin(alpha - pi/2)
         return (b * math.cos(alpha - math.pi / 2), b * math.sin(alpha - math.pi / 2))
 
+    # fill root-finder gaps by circular interpolation over alpha (both tables,
+    # every radius) so curves stay continuous and the dot grain has no wedges
+    for tbl in (t_direct, t_ghost):
+        if not tbl:
+            continue
+        for r in all_r:
+            bs = [tbl.get((alpha, r), float("nan")) for alpha in alphas]
+            nb = len(bs)
+            if sum(1 for b in bs if math.isfinite(b)) < nb * 0.5:
+                continue
+            for k in range(nb):
+                if math.isfinite(bs[k]):
+                    continue
+                lo = k
+                while not math.isfinite(bs[lo % nb]):
+                    lo -= 1
+                hi = k
+                while not math.isfinite(bs[hi % nb]):
+                    hi += 1
+                bs[k] = bs[lo % nb] + (bs[hi % nb] - bs[lo % nb]) * ((k - lo) / (hi - lo))
+                tbl[(alphas[k], r)] = bs[k]
+
     curves = []
     if mode in ("lines", "both"):
         for ri, r in enumerate(rings):
-            for tbl, band in ((t_direct, ri / max(1, n_rings - 1)), (t_ghost, 1.0)):
+            for tbl, band, rot in (
+                (t_direct, ri / max(1, n_rings - 1), 0.0),
+                (t_ghost, 1.0, math.pi),
+            ):
                 if not tbl:
                     continue
                 bs = [tbl.get((alpha, r), float("nan")) for alpha in alphas]
-                nvalid = sum(1 for b in bs if math.isfinite(b))
-                if nvalid < len(bs) * 0.5:
+                if sum(1 for b in bs if math.isfinite(b)) < len(bs) * 0.5:
                     continue
-                # fill root-finder gaps by circular interpolation over alpha
-                nb = len(bs)
-                for k in range(nb):
-                    if math.isfinite(bs[k]):
-                        continue
-                    lo = k
-                    while not math.isfinite(bs[lo % nb]):
-                        lo -= 1
-                    hi = k
-                    while not math.isfinite(bs[hi % nb]):
-                        hi += 1
-                    span = hi - lo
-                    t = (k - lo) / span
-                    bs[k] = bs[lo % nb] + (bs[hi % nb] - bs[lo % nb]) * t
-                pts = [screen(alpha, b) for alpha, b in zip(alphas, bs)]
+                pts = [screen(alpha + rot, b) for alpha, b in zip(alphas, bs) if math.isfinite(b)]
                 curves.append((pts, band))
 
     def flux(r):
@@ -3273,18 +3283,21 @@ def black_hole(
         return max(0.0, (sr - s6 + (s3 / 3.0) * ln_t) / ((r - 3.0) * r**2.5))
 
     def bilinear(tbl, alpha, r):
-        # nearest alpha sample + linear in r over dot_rgrid
-        ai = min(range(len(alphas)), key=lambda k: abs(alphas[k] - alpha))
-        a = alphas[ai]
+        # linear in alpha and r
+        da = 2.0 * math.pi / samples
+        ai = min(int(alpha / da), samples - 1)
+        a0, a1 = alphas[ai], alphas[ai + 1]
+        ta = (alpha - a0) / da
         for k in range(len(dot_rgrid) - 1):
             r0g, r1g = dot_rgrid[k], dot_rgrid[k + 1]
             if r0g <= r <= r1g:
-                b0 = tbl.get((a, r0g), float("nan"))
-                b1 = tbl.get((a, r1g), float("nan"))
-                if math.isfinite(b0) and math.isfinite(b1):
-                    t = (r - r0g) / max(1e-9, r1g - r0g)
-                    return b0 + (b1 - b0) * t
-                return float("nan")
+                vals = [tbl.get((a, rg), float("nan")) for a in (a0, a1) for rg in (r0g, r1g)]
+                if not all(math.isfinite(v) for v in vals):
+                    return float("nan")
+                tr = (r - r0g) / max(1e-9, r1g - r0g)
+                lo = vals[0] + (vals[1] - vals[0]) * tr
+                hi = vals[2] + (vals[3] - vals[2]) * tr
+                return lo + (hi - lo) * ta
         return float("nan")
 
     dot_pts = []
@@ -3317,7 +3330,9 @@ def black_hole(
             w = flux(r) / opz**4
             if rng.random() * wmax > w:
                 continue
-            dot_pts.append((*screen(alpha, b), min(1.0, w / wmax)))
+            dot_pts.append(
+                (*screen(alpha + (math.pi if ghost_pick else 0.0), b), min(1.0, w / wmax))
+            )
             placed += 1
 
     # shadow (photon ring critical curve)
