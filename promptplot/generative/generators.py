@@ -3160,10 +3160,11 @@ def _luminet_b_table(inclination, n, alphas, radii):
             return float("nan")
         return (1.0 / (4.0 * P)) * (-(Q - P + 2.0) + (Q - P + 6.0) * snv * snv)
 
-    half = [a for a in alphas if a <= math.pi + 1e-9]
+    n_half = len(alphas) // 2
     table = {}
     for r in radii:
-        for alpha in half:
+        for ki in range(n_half + 1):
+            alpha = alphas[ki]
             ca = math.cos(alpha)
             gamma = math.acos(ca / math.sqrt(ca * ca + 1.0 / (tan_i * tan_i)))
             # scan for sign change of f(P) = 1 - r * r_inv(P)
@@ -3171,6 +3172,8 @@ def _luminet_b_table(inclination, n, alphas, radii):
             prev_e = None
             root_P = None
             for entry in pre:
+                if entry[0] > r:
+                    break
                 fv = 1.0 - r * r_inv(entry, gamma)
                 if prev_f is not None and math.isfinite(fv) and math.isfinite(prev_f):
                     if (prev_f < 0) != (fv < 0):
@@ -3209,7 +3212,7 @@ def _luminet_b_table(inclination, n, alphas, radii):
             else:
                 b = float("nan")
             table[(alpha, r)] = b
-            table[(2.0 * math.pi - alpha, r)] = b  # mirror symmetry
+            table[(alphas[len(alphas) - 1 - ki], r)] = b  # mirror symmetry
     return table
 
 
@@ -3280,27 +3283,35 @@ def black_hole(
                 bs[k] = bs[lo % nb] + (bs[hi % nb] - bs[lo % nb]) * ((k - lo) / (hi - lo))
                 tbl[(alphas[k], r)] = bs[k]
 
-    curves = []
-    if mode in ("lines", "both"):
-        for ri, r in enumerate(rings):
-            for tbl, band, rot in (
-                (t_direct, ri / max(1, n_rings - 1), 0.0),
-                (t_ghost, 1.0, math.pi),
-            ):
-                if not tbl:
-                    continue
-                bs = [tbl.get((alpha, r), float("nan")) for alpha in alphas]
-                if sum(1 for b in bs if math.isfinite(b)) < len(bs) * 0.5:
-                    continue
-                pts = [screen(alpha + rot, b) for alpha, b in zip(alphas, bs) if math.isfinite(b)]
-                curves.append((pts, band))
-
     def flux(r):
         if r <= 6.0001:
             return 0.0
         sr, s6, s3 = math.sqrt(r), math.sqrt(6.0), math.sqrt(3.0)
         ln_t = math.log(((sr + s3) * (s6 - s3)) / ((sr - s3) * (s6 + s3)))
-        return max(0.0, (sr - s6 + (s3 / 3.0) * ln_t) / ((r - 3.0) * r**2.5))
+        return max(0.0, (sr - s6 + (s3 / 2.0) * ln_t) / ((r - 3.0) * r**2.5))
+
+    def redshift(r, b, alpha):
+        return (1.0 + math.sqrt(1.0 / r**3) * b * sin_i * math.sin(alpha)) / math.sqrt(
+            max(1e-9, 1.0 - 3.0 / r)
+        )
+
+    curves = []  # (pts, per-vertex flux weight list)
+    if mode in ("lines", "both"):
+        for r in rings:
+            fs = flux(r)
+            for tbl, rot in ((t_direct, 0.0), (t_ghost, math.pi)):
+                if not tbl:
+                    continue
+                bs = [tbl.get((alpha, r), float("nan")) for alpha in alphas]
+                if sum(1 for b in bs if math.isfinite(b)) < len(bs) * 0.5:
+                    continue
+                pts, ws = [], []
+                for alpha, b in zip(alphas, bs):
+                    if not math.isfinite(b):
+                        continue
+                    pts.append(screen(alpha + rot, b))
+                    ws.append(fs / redshift(r, b, alpha) ** 4)
+                curves.append((pts, ws))
 
     def bilinear(tbl, alpha, r):
         # linear in alpha and r
@@ -3366,7 +3377,7 @@ def black_hole(
                 )
                 for k in range(samples + 1)
             ],
-            0.0,
+            None,
         )
     )
 
@@ -3376,14 +3387,50 @@ def black_hole(
     mx = (max(xs) + min(xs)) / 2.0
     my = (max(ys) + min(ys)) / 2.0
 
+    # pen per flux bin (log scale, bgmeulem-style): pen 0 = brightest
+    all_w = [w for _, ws in curves if ws for w in ws if w > 0]
+    if all_w and colors > 1:
+        logs = sorted(math.log10(w) for w in all_w)
+        w_lo = logs[int(0.04 * (len(logs) - 1))]
+        w_hi = logs[int(0.995 * (len(logs) - 1))]
+    else:
+        w_lo, w_hi = 0.0, 1.0
+
+    def pen_of(w):
+        if colors <= 1:
+            return None
+        if w is None or w <= 0:
+            return colors - 1
+        t = (math.log10(w) - w_lo) / max(1e-9, w_hi - w_lo)
+        return colors - 1 - min(colors - 1, max(0, int(t * colors)))
+
     out: List[GCodeCommand] = []
-    for pts, band in curves:
+    for pts, ws in curves:
         spts = [
             (_clamp(cx + (px - mx) * sc, x0, x1), _clamp(cy + (py - my) * sc, y0, y1))
             for px, py in pts
         ]
-        color = min(colors - 1, int(band * colors)) if colors > 1 else None
-        out += _poly(spts, color=color, f=feed)
+        if colors <= 1 or not ws:
+            out += _poly(spts, color=(colors - 1 if colors > 1 else None), f=feed)
+            continue
+        pens = [pen_of(w) for w in ws]
+        # absorb runs shorter than 4 vertices to avoid pen thrash
+        i = 0
+        while i < len(pens):
+            j = i
+            while j < len(pens) and pens[j] == pens[i]:
+                j += 1
+            if j - i < 4 and i > 0:
+                for k in range(i, j):
+                    pens[k] = pens[i - 1]
+            i = j
+        i = 0
+        while i < len(spts) - 1:
+            j = i
+            while j < len(pens) and pens[j] == pens[i]:
+                j += 1
+            out += _poly(spts[i : j + 1], color=pens[i], f=feed)
+            i = j
     for px, py, wgt in dot_pts:
         color = min(colors - 1, int((1.0 - wgt) * colors)) if colors > 1 else None
         out += _dot(
