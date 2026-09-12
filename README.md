@@ -107,6 +107,13 @@ promptplot draw "a banner" --paper a3 --orientation landscape --simulate
 promptplot agent                       # interactive REPL: renders, scores, iterates
 promptplot agent -p "render truchet seed 8 with 2 colors and report the grade"
 promptplot agent --provider ollama --model llama3.2   # runs fully local
+promptplot mcp                                        # serve the toolbox over MCP stdio
+```
+
+Claude Desktop / any MCP client:
+
+```json
+{"mcpServers": {"promptplot": {"command": "promptplot", "args": ["mcp"]}}}
 ```
 
 

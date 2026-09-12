@@ -32,6 +32,12 @@ class LLMProvider(ABC):
     @abstractmethod
     async def acomplete(self, prompt: str) -> str: ...
 
+    async def acomplete_tools(self, system, messages, tools):
+        """Native function-calling step; return {"tool","args"} | {"final"} or
+        None when the provider has no native support (caller falls back to the
+        JSON envelope protocol)."""
+        return None
+
     def complete(self, prompt: str) -> str:
         return asyncio.get_event_loop().run_until_complete(self.acomplete(prompt))
 

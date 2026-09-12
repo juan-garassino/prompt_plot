@@ -47,10 +47,11 @@ def run_once(
     model: Optional[str] = None,
     max_turns: int = 12,
     session_id: Optional[str] = None,
+    yes_plot: bool = False,
 ) -> str:
     llm = _make_provider(config, provider, model)
     session = AgentSession(session_id)
-    ctx = ToolContext(config=config, session=session, provider=llm)
+    ctx = ToolContext(config=config, session=session, provider=llm, yes_plot=yes_plot)
     console.print(f"[dim]session {session.id} · provider {llm.provider_name}[/dim]")
     answer = asyncio.run(run_turns(prompt, ctx, llm, max_turns=max_turns, on_event=_on_event))
     console.print(answer)
@@ -63,6 +64,7 @@ def run_repl(
     model: Optional[str] = None,
     max_turns: int = 12,
     session_id: Optional[str] = None,
+    yes_plot: bool = False,
 ) -> None:
     llm = _make_provider(config, provider, model)
     session = AgentSession(session_id)
@@ -70,6 +72,7 @@ def run_repl(
         config=config,
         session=session,
         provider=llm,
+        yes_plot=yes_plot,
         approve=lambda name: console.input(
             f"[bold red]{name} touches hardware — proceed? \\[y/N] [/bold red]"
         )

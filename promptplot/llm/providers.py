@@ -253,6 +253,21 @@ class OpenAIProvider(LLMProvider):
     def provider_name(self) -> str:
         return "openai"
 
+    async def acomplete_tools(self, system, messages, tools):
+        if not OPENAI_AVAILABLE:
+            return None
+        client = _openai.AsyncOpenAI(api_key=self.api_key)
+        return await _openai_native_tools(
+            client,
+            self.model,
+            system,
+            messages,
+            tools,
+            self.temperature,
+            self.max_tokens,
+            self.timeout,
+        )
+
     async def acomplete(self, prompt: str) -> str:
         if not OPENAI_AVAILABLE:
             raise LLMProviderError("pip install openai", self.provider_name)
@@ -363,7 +378,7 @@ class OpenRouterProvider(LLMProvider):
 
     def __init__(
         self,
-        model: str = "nvidia/nemotron-3-super-120b-a12b",
+        model: str = "nvidia/llama-3.1-nemotron-70b-instruct",
         api_key: Optional[str] = None,
         timeout: int = 120,
         temperature: float = 0.1,
@@ -443,27 +458,104 @@ class OpenRouterProvider(LLMProvider):
                         pass
 
 
+async def _openai_native_tools(
+    client, model, system, messages, tools, temperature, max_tokens, timeout
+):
+    """One native function-calling step for OpenAI-compatible chat APIs."""
+    import json as _json
+
+    msgs = [{"role": "system", "content": system}] + [
+        {"role": m["role"], "content": m["content"]} for m in messages
+    ]
+    response = await asyncio.wait_for(
+        client.chat.completions.create(
+            model=model,
+            messages=msgs,
+            tools=tools,
+            tool_choice="auto",
+            temperature=temperature,
+            max_tokens=max_tokens,
+        ),
+        timeout=timeout,
+    )
+    msg = response.choices[0].message
+    if msg.tool_calls:
+        call = msg.tool_calls[0]
+        try:
+            args = _json.loads(call.function.arguments or "{}")
+        except Exception:
+            args = {}
+        return {"tool": call.function.name, "args": args}
+    return {"final": msg.content or ""}
+
+
 class NvidiaProvider(LLMProvider):
     """NVIDIA NIM — OpenAI-compatible API for NVIDIA-hosted models."""
 
     def __init__(
         self,
-        model: str = "nvidia/llama-3.1-nemotron-70b-instruct",
+        model: str = "nvidia/nemotron-3-super-120b-a12b",
         api_key: Optional[str] = None,
         timeout: int = 120,
         temperature: float = 0.1,
         max_tokens: int = 16384,
+        vision_model: Optional[str] = "meta/llama-3.2-11b-vision-instruct",
     ):
         super().__init__(timeout, temperature)
         self.model = model
         self.max_tokens = max_tokens
+        self.vision_model = vision_model
         self.api_key = api_key or os.environ.get("NVIDIA_API_KEY")
         if not self.api_key:
             raise LLMProviderError("Missing NVIDIA_API_KEY", self.provider_name)
 
+    def _client(self):
+        return _openai.AsyncOpenAI(
+            api_key=self.api_key,
+            base_url="https://integrate.api.nvidia.com/v1",
+        )
+
     @property
     def provider_name(self) -> str:
         return "nvidia"
+
+    async def acomplete_tools(self, system, messages, tools):
+        if not OPENAI_AVAILABLE:
+            return None
+        return await _openai_native_tools(
+            self._client(),
+            self.model,
+            system,
+            messages,
+            tools,
+            self.temperature,
+            self.max_tokens,
+            self.timeout,
+        )
+
+    async def acomplete_multimodal(self, prompt, image_paths=None):
+        if not image_paths:
+            return await self.acomplete(prompt)
+        if not OPENAI_AVAILABLE:
+            raise LLMProviderError("pip install openai", self.provider_name)
+        import base64
+
+        content = [{"type": "text", "text": prompt}]
+        for ip in image_paths:
+            b64 = base64.b64encode(Path(ip).read_bytes()).decode()
+            content.append(
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
+            )
+        response = await asyncio.wait_for(
+            self._client().chat.completions.create(
+                model=self.vision_model or self.model,
+                messages=[{"role": "user", "content": content}],
+                temperature=self.temperature,
+                max_tokens=2048,
+            ),
+            timeout=self.timeout,
+        )
+        return response.choices[0].message.content
 
     async def acomplete(self, prompt: str) -> str:
         if not OPENAI_AVAILABLE:

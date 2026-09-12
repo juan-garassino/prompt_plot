@@ -165,3 +165,108 @@ def test_session_persist_and_resume(tmp_path):
     report = s2.close("final words")
     assert report.exists()
     assert "final words" in report.read_text()
+
+
+# -- phase B: vision, native tools, hardware gate ------------------------------
+
+
+class _VisionStub(_StubProvider):
+    def __init__(self, replies, critique="VERDICT: keep"):
+        super().__init__(replies)
+        self.critique = critique
+        self.seen_images = []
+
+    async def acomplete_multimodal(self, prompt, image_paths=None):
+        self.seen_images.extend(map(str, image_paths or []))
+        return self.critique
+
+
+class _NativeStub(_StubProvider):
+    def __init__(self, steps):
+        super().__init__([])
+        self.steps = list(steps)
+
+    async def acomplete_tools(self, system, messages, tools):
+        assert any(t["function"]["name"] == "render_generator" for t in tools)
+        return self.steps.pop(0)
+
+
+def test_critique_render_uses_vision(tmp_path):
+    ctx = _ctx(tmp_path)
+    png = tmp_path / "x.png"
+    png.write_bytes(b"fakepng")
+    ctx.provider = _VisionStub([], critique="VERDICT: tweak\nISSUES: too sparse")
+    result = asyncio.run(dispatch(ctx, "critique_render", {"png_path": str(png)}))
+    assert "tweak" in result["critique"]
+    assert ctx.provider.seen_images == [str(png)]
+
+
+def test_loop_native_fast_path(tmp_path):
+    ctx = _ctx(tmp_path)
+    provider = _NativeStub(
+        [
+            {"tool": "list_generators", "args": {}},
+            {"final": "done natively"},
+        ]
+    )
+    answer = asyncio.run(run_turns("hi", ctx, provider, max_turns=4))
+    assert answer == "done natively"
+
+
+def test_stream_to_plotter_requires_confirm_and_traces_first(tmp_path):
+    ctx = _ctx(tmp_path)
+    render = asyncio.run(
+        dispatch(ctx, "render_generator", {"name": "maze", "seed": 3, "paper": "a6"})
+    )
+    gcode = render["gcode_path"]
+
+    blocked = asyncio.run(dispatch(ctx, "stream_to_plotter", {"gcode_path": gcode}))
+    assert "error" in blocked and "confirmation" in blocked["error"]
+
+    ctx.yes_plot = True
+    result = asyncio.run(dispatch(ctx, "stream_to_plotter", {"gcode_path": gcode}))
+    assert "error" not in result, result
+    assert result["streamed_ok"] > 0
+
+
+def test_save_to_library_gated(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ctx = _ctx(tmp_path)
+    g = tmp_path / "a.gcode"
+    g.write_text("G0 X0 Y0")
+    blocked = asyncio.run(dispatch(ctx, "save_to_library", {"gcode_path": str(g), "name": "a"}))
+    assert "error" in blocked
+    ctx.approve = lambda name: True
+    result = asyncio.run(dispatch(ctx, "save_to_library", {"gcode_path": str(g), "name": "a"}))
+    assert result["saved"].endswith("a.gcode")
+
+
+# -- phase C: MCP surface -------------------------------------------------------
+
+mcp_sdk = pytest.importorskip("mcp", reason="mcp SDK not installed")
+
+
+def test_mcp_server_lists_tools():
+    from promptplot.agent import mcp_server
+
+    tools = asyncio.run(mcp_server.mcp.list_tools())
+    names = {t.name for t in tools}
+    assert {"list_generators", "render_generator", "preview_image", "stream_to_plotter"} <= names
+    stream = next(t for t in tools if t.name == "stream_to_plotter")
+    assert stream.annotations.destructiveHint is True
+    ro = next(t for t in tools if t.name == "score_gcode")
+    assert ro.annotations.readOnlyHint is True
+
+
+def test_mcp_stream_requires_confirm(tmp_path, monkeypatch):
+    from promptplot.agent import mcp_server
+
+    monkeypatch.setattr(mcp_server, "_ctx", _ctx(tmp_path))
+    g = tmp_path / "x.gcode"
+    g.write_text("G0 X0 Y0")
+    result = asyncio.run(mcp_server.stream_to_plotter(str(g), port="simulate"))
+    assert result["error"]["code"] == "not_confirmed"
+    assert "confirm=true" in result["error"]["remediation"]
+
+    result = asyncio.run(mcp_server.stream_to_plotter(str(g), port="simulate", confirm=True))
+    assert "error" not in result

@@ -151,8 +151,20 @@ PromptPlot can be driven three ways, sharing the same postprocess/scoring/plotte
   list/render generators, render DSL blocks, score, validate, import, memory search).
   Sessions persist to `~/.promptplot/agent_sessions/<id>/` (transcript.json + trace.jsonl +
   renders/ + report.md); resume with `--session <id>`. Headless: `promptplot agent -p "..."`.
-  Tools are tiered safe/confirm — hardware tools (Phase B) always trace the frame and require
-  approval. Tests: `tests/test_agent.py` (stub provider, no keys/hardware).
+  Tools are tiered safe/confirm: `critique_render` sends a png to the provider's vision model
+  (`acomplete_multimodal`; NVIDIA default vision model llama-3.2-11b-vision), and the confirm
+  tier (`stream_to_plotter`, `save_to_library`) always traces the pen-up frame first and needs
+  an interactive y/N or `--yes-plot`. OpenAI/NVIDIA use native function calling
+  (`acomplete_tools` on the provider base, `_openai_native_tools` helper); every other provider
+  falls back to the JSON envelope automatically. Tests: `tests/test_agent.py` (stub providers,
+  no keys/hardware). Proven live: the agent on NVIDIA rendered, vision-critiqued its own png,
+  adjusted a param and re-rendered autonomously.
+  MCP surface: `promptplot mcp` serves the same toolbox over stdio (`agent/mcp_server.py`,
+  FastMCP; optional extra `pip install -e ".[agent]"`): 12 tools with ToolAnnotations
+  (readOnlyHint / destructiveHint), error envelope with `remediation`, inline `Image`
+  previews via `preview_image`, `plot://renders` + `plot://render/{file}` resources, and
+  hardware gated behind an explicit `confirm=true` argument — any MCP client can drive
+  the plotter.
 - **Claude Code** — external orchestrator using the public `promptplot.orchestrate` API
   (`plan_regions`, `generate_region`, `validate_chunk`, `score_chunk`, `merge_chunks`,
   `stream_chunk`, `load_and_continue`). The `pp-orchestrate` skill teaches the loop.

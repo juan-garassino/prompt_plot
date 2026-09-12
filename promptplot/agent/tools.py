@@ -129,10 +129,7 @@ def _t_render_draw_program(
 
 
 def _t_score_gcode(ctx: ToolContext, gcode_path: str) -> Dict[str, Any]:
-    text = Path(gcode_path).read_text().splitlines()
-    commands = [GCodeCommand.from_gcode(line) for line in text if line.strip()]
-    commands = [c for c in commands if c is not None]
-    program = GCodeProgram(commands=commands)
+    program = _load_gcode(gcode_path)
     return _summary(score_gcode(program, ctx.config.paper))
 
 
@@ -150,9 +147,8 @@ def _t_validate_gcode(ctx: ToolContext, gcode_path: str) -> Dict[str, Any]:
     from ..engine import PenState
     from ..orchestrate import validate_chunk
 
-    text = Path(gcode_path).read_text().splitlines()
-    commands = [GCodeCommand.from_gcode(line) for line in text if line.strip()]
-    commands = [c for c in commands if c is not None]
+    program = _load_gcode(gcode_path)
+    commands = list(program.commands)
     _fixed, warnings, _pen = validate_chunk(commands, PenState(), ctx.config.paper)
     return {"commands": len(commands), "warnings": warnings[:20], "ok": not warnings}
 
@@ -171,6 +167,67 @@ def _t_import_file(
 
 def _t_list_session_renders(ctx: ToolContext) -> Dict[str, Any]:
     return {"renders": ctx.session.list_renders()}
+
+
+CRITIC_PROMPT = """You are a strict art director for pen-plotter drawings.
+Judge this preview like a curator: composition, page fill (margins must stay
+clear), line rhythm/spacing (no solid pooling that damages paper), and whether
+the piece has one clear visual idea. Reply with:
+VERDICT: keep | tweak | reject
+ISSUES: <up to 3 bullets>
+SUGGESTION: <one concrete parameter-level change>
+{brief}"""
+
+
+async def _t_critique_render(ctx: ToolContext, png_path: str, brief: str = "") -> Dict[str, Any]:
+    if ctx.provider is None:
+        return {"error": "no LLM provider attached to this session"}
+    extra = f"\nClient brief: {brief}" if brief else ""
+    text = await ctx.provider.acomplete_multimodal(
+        CRITIC_PROMPT.format(brief=extra), image_paths=[Path(png_path)]
+    )
+    return {"critique": text}
+
+
+def _load_gcode(path: str) -> GCodeProgram:
+    from ..pipeline import FilePipeline
+
+    return FilePipeline(PromptPlotConfig()).load_gcode_file(path)
+
+
+async def _t_stream_to_plotter(
+    ctx: ToolContext, gcode_path: str, port: str = "simulate"
+) -> Dict[str, Any]:
+    from ..orchestrate import stream_pen_layers, trace_frame
+    from ..plotter import SerialPlotter, SimulatedPlotter
+
+    program = _load_gcode(gcode_path)
+    if port == "simulate":
+        plotter = SimulatedPlotter()
+        await plotter.connect()
+    else:
+        # heartbeat off: single-reader discipline during long streams
+        plotter = SerialPlotter(
+            port=port, baud_rate=ctx.config.serial.baud_rate, enable_heartbeat=False
+        )
+        if not await plotter.connect():
+            return {"error": f"could not connect to {port}"}
+    # mandatory guardrail: pen-up tour of the drawable limits first
+    await trace_frame(plotter, ctx.config.paper, laps=1)
+    ok, err = await stream_pen_layers(program, plotter, ctx.config, verbose=False)
+    if port != "simulate":
+        await plotter.send_command("M5")
+        await plotter.send_command("G0 X0 Y0")
+        await plotter.disconnect()
+    return {"streamed_ok": ok, "errors": err, "port": port}
+
+
+def _t_save_to_library(ctx: ToolContext, gcode_path: str, name: str) -> Dict[str, Any]:
+    lib = Path.home() / ".promptplot" / "library"
+    lib.mkdir(parents=True, exist_ok=True)
+    dest = lib / f"{name}.gcode"
+    dest.write_text(Path(gcode_path).read_text())
+    return {"saved": str(dest)}
 
 
 TOOLBOX: List[Tool] = [
@@ -239,6 +296,27 @@ TOOLBOX: List[Tool] = [
         "List artifacts produced in this session.",
         {},
         _t_list_session_renders,
+    ),
+    Tool(
+        "critique_render",
+        "Look at a rendered png with the vision model and return an art-director critique.",
+        {"png_path": {"type": "string"}, "brief": {"type": "string"}},
+        _t_critique_render,
+    ),
+    Tool(
+        "stream_to_plotter",
+        "Send a .gcode file to the plotter (traces the pen-up frame first; "
+        "port 'simulate' for a dry run). REQUIRES USER CONFIRMATION.",
+        {"gcode_path": {"type": "string"}, "port": {"type": "string"}},
+        _t_stream_to_plotter,
+        tier="confirm",
+    ),
+    Tool(
+        "save_to_library",
+        "Save a .gcode file into the curated library. REQUIRES USER CONFIRMATION.",
+        {"gcode_path": {"type": "string"}, "name": {"type": "string"}},
+        _t_save_to_library,
+        tier="confirm",
     ),
 ]
 

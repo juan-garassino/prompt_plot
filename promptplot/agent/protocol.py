@@ -86,3 +86,18 @@ def messages_to_prompt(system: str, messages: List[Dict[str, str]]) -> str:
         parts.append(f"[{role}]\n{m['content']}\n")
     parts.append("[ASSISTANT]\n")
     return "\n".join(parts)
+
+
+def tools_to_openai(tools: List[Tool]) -> List[Dict[str, Any]]:
+    """Convert the toolbox to OpenAI function-calling specs."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": t.name,
+                "description": t.description,
+                "parameters": {"type": "object", "properties": t.params},
+            },
+        }
+        for t in tools
+    ]

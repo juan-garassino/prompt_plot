@@ -29,12 +29,24 @@ async def run_turns(
     system = protocol.build_system_prompt(TOOLBOX)
     session.add("user", user_msg)
 
+    tool_specs = protocol.tools_to_openai(TOOLBOX)
     parse_retries = 0
     for _turn in range(max_turns):
         window = session.messages[-KEEP_LAST:]
-        prompt = protocol.messages_to_prompt(system, window)
-        reply = await provider.acomplete(prompt)
-        kind, payload, args = protocol.parse_reply(reply)
+        native = None
+        try:
+            native = await provider.acomplete_tools(system, window, tool_specs)
+        except Exception as e:  # native path is best-effort; fall back
+            emit("error", f"native tools failed, falling back: {e}")
+        if native is not None:
+            if "final" in native and "tool" not in native:
+                kind, payload, args = "final", str(native.get("final") or ""), {}
+            else:
+                kind, payload, args = "tool", str(native.get("tool")), native.get("args") or {}
+        else:
+            prompt = protocol.messages_to_prompt(system, window)
+            reply = await provider.acomplete(prompt)
+            kind, payload, args = protocol.parse_reply(reply)
 
         if kind == "error":
             parse_retries += 1
