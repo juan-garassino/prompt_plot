@@ -3165,37 +3165,34 @@ def _jacobi_sn(u, m):
 def _luminet_b_table(inclination, n, alphas, radii):
     """Exact impact parameter b(alpha, r) for image order n (Luminet eq. 13).
 
-    Root-solves the periastron P per (alpha, r) using the same equations as
-    eventHorizon/physics/geodesics.py, with per-P quantities precomputed and
-    the alpha->2pi-alpha mirror symmetry exploited. M = 1.
+    Follows the reference implementation (bgmeulem/luminet): the periastron is
+    bracketed ONCE over [3M, r] — the objective has a single sign change there —
+    and refined by bisection. M = 1. Front-of-disk rays with no periastron fall
+    back to Luminet's weak-field ellipse.
     """
     tan_i = math.tan(inclination) or 1e-9
 
-    # P grid with precomputed elliptic quantities
-    P_hi = max(70.0, 2.2 * max(radii))
-    Ps = [2.02 + (2.995 - 2.02) * k / 27.0 for k in range(28)] + [
-        3.001 + (P_hi - 3.001) * (k / 109.0) ** 1.6 for k in range(110)
-    ]
-    pre = []
-    for P in Ps:
+    def objective(P, r, gamma):
         Q = math.sqrt((P - 2.0) * (P + 6.0))
         k2 = (Q - P + 6.0) / (2.0 * Q)
         num = (Q - P + 2.0) / (Q - P + 6.0)
         zeta_inf = math.asin(math.sqrt(max(0.0, min(1.0, num))))
-        pre.append((P, Q, k2, math.sqrt(P / Q), _ellip_f(zeta_inf, k2), _ellip_k(k2)))
-
-    def r_inv(entry, gamma):
-        P, Q, k2, sq_pq, F_inf, K_k = entry
-        if not (math.isfinite(F_inf) and math.isfinite(K_k)):
+        F_inf = _ellip_f(zeta_inf, k2)
+        if not math.isfinite(F_inf):
             return float("nan")
+        sq_pq = math.sqrt(P / Q)
         if n == 0:
             u = gamma / (2.0 * sq_pq) + F_inf
         else:
+            K_k = _ellip_k(k2)
+            if not math.isfinite(K_k):
+                return float("nan")
             u = (gamma - 2.0 * n * math.pi) / (2.0 * sq_pq) - F_inf + 2.0 * K_k
         snv = _jacobi_sn(u, k2)
         if not math.isfinite(snv):
             return float("nan")
-        return (1.0 / (4.0 * P)) * (-(Q - P + 2.0) + (Q - P + 6.0) * snv * snv)
+        r_inv = (1.0 / (4.0 * P)) * (-(Q - P + 2.0) + (Q - P + 6.0) * snv * snv)
+        return 1.0 - r * r_inv
 
     n_half = len(alphas) // 2
     table = {}
@@ -3204,47 +3201,31 @@ def _luminet_b_table(inclination, n, alphas, radii):
             alpha = alphas[ki]
             ca = math.cos(alpha)
             gamma = math.acos(ca / math.sqrt(ca * ca + 1.0 / (tan_i * tan_i)))
-            # scan for sign change of f(P) = 1 - r * r_inv(P)
-            prev_f = None
-            prev_e = None
+            # single bracket over [3M, r], like the reference implementation
+            loP = 3.001 + n * 1e-5
+            hiP = r * (1.0 - 1e-9)
             root_P = None
-            for entry in pre:
-                if entry[0] > r:
-                    break
-                fv = 1.0 - r * r_inv(entry, gamma)
-                if prev_f is not None and math.isfinite(fv) and math.isfinite(prev_f):
-                    if (prev_f < 0) != (fv < 0):
-                        lo, hi = prev_e, entry
-                        loP, hiP = lo[0], hi[0]
-                        f_lo = prev_f
-                        for _ in range(38):
-                            midP = (loP + hiP) / 2.0
-                            Q = math.sqrt((midP - 2.0) * (midP + 6.0))
-                            k2 = (Q - midP + 6.0) / (2.0 * Q)
-                            num = (Q - midP + 2.0) / (Q - midP + 6.0)
-                            z_inf = math.asin(math.sqrt(max(0.0, min(1.0, num))))
-                            mid = (
-                                midP,
-                                Q,
-                                k2,
-                                math.sqrt(midP / Q),
-                                _ellip_f(z_inf, k2),
-                                _ellip_k(k2),
-                            )
-                            fm = 1.0 - r * r_inv(mid, gamma)
-                            if (f_lo < 0) == (fm < 0):
-                                loP, f_lo = midP, fm
-                            else:
-                                hiP = midP
-                        root_P = (loP + hiP) / 2.0
-                        break
-                prev_f, prev_e = fv, entry
+            if hiP > loP:
+                f_lo = objective(loP, r, gamma)
+                f_hi = objective(hiP, r, gamma)
+                if math.isfinite(f_lo) and math.isfinite(f_hi) and (f_lo < 0) != (f_hi < 0):
+                    for _ in range(48):
+                        midP = 0.5 * (loP + hiP)
+                        f_mid = objective(midP, r, gamma)
+                        if not math.isfinite(f_mid):
+                            break
+                        if (f_lo < 0) == (f_mid < 0):
+                            loP, f_lo = midP, f_mid
+                        else:
+                            hiP = midP
+                    else:
+                        root_P = 0.5 * (loP + hiP)
             if root_P is not None:
                 b = math.sqrt(root_P**3 / (root_P - 2.0))
             elif n == 0 and math.cos(alpha) > 0.0:
                 # near side of the disk: the ray has no periastron (it would
-                # plunge) — Luminet's weak-field ellipse (expr_ellipse); this is
-                # the part of the disk that passes IN FRONT of the shadow
+                # plunge) — Luminet's weak-field ellipse; this is the part of
+                # the disk that passes IN FRONT of the shadow
                 b = r / math.sqrt(1.0 + (tan_i**2) * math.cos(alpha) ** 2)
             else:
                 b = float("nan")
@@ -3265,6 +3246,11 @@ def black_hole(
     ghost: bool = True,
     mode: str = "lines",
     dots: int = 2400,
+    dot_gamma: float = 1.2,
+    dot_size: float = 0.22,
+    dot_cell: float = 0.55,
+    dot_cap: int = 4,
+    isco_line: bool = True,
     feed: int = 1600,
 ) -> List[GCodeCommand]:
     """Luminet-1979 black hole with the EXACT elliptic-integral solver.
@@ -3342,6 +3328,15 @@ def black_hole(
                 bs = [tbl.get((alpha, r), float("nan")) for alpha in alphas]
                 if sum(1 for b in bs if math.isfinite(b)) < len(bs) * 0.5:
                     continue
+                # 3-point circular smoothing kills solver jitter at the wing folds
+                nb = len(bs) - 1  # last point duplicates the first
+                sm = list(bs)
+                for k in range(nb):
+                    b0, b1, b2 = bs[(k - 1) % nb], bs[k], bs[(k + 1) % nb]
+                    if all(math.isfinite(v) for v in (b0, b1, b2)):
+                        sm[k] = 0.25 * b0 + 0.5 * b1 + 0.25 * b2
+                sm[-1] = sm[0]
+                bs = sm
                 pts, ws = [], []
                 for alpha, b in zip(alphas, bs):
                     if not math.isfinite(b):
@@ -3381,9 +3376,12 @@ def black_hole(
                 )
                 wmax = max(wmax, flux(r) / opz**4)
         wmax = wmax or 1.0
+        cell_counts: dict = {}
+        # dot_cell is in paper mm; convert to solver units via the expected fit
+        u_cell = max(1e-6, dot_cell * (2.6 * r_max) / max(1.0, (x1 - x0)))
         placed = 0
         guard = 0
-        while placed < dots and guard < dots * 80:
+        while placed < dots and guard < dots * 160:
             guard += 1
             ghost_pick = ghost and rng.random() < 0.22
             tbl = t_ghost if ghost_pick else t_direct
@@ -3396,12 +3394,26 @@ def black_hole(
                 max(1e-9, 1.0 - 3.0 / r)
             )
             w = flux(r) / opz**4
-            if rng.random() * wmax > w:
+            # dot_gamma=1 is Luminet's photographic plate; <1 lifts dim regions
+            if rng.random() > (max(0.0, w) / wmax) ** dot_gamma:
                 continue
-            dot_pts.append(
-                (*screen(alpha + (math.pi if ghost_pick else 0.0), b), min(1.0, w / wmax))
-            )
+            px, py = screen(alpha + (math.pi if ghost_pick else 0.0), b)
+            key = (int(px / u_cell), int(py / u_cell))
+            if cell_counts.get(key, 0) >= dot_cap:
+                continue
+            cell_counts[key] = cell_counts.get(key, 0) + 1
+            dot_pts.append((px, py, w))
             placed += 1
+
+        if isco_line and t_ghost:
+            # the crisp lensed arc of the disk's inner edge (ghost ISCO image)
+            r_in = dot_rgrid[0]
+            bs = [t_ghost.get((alpha, r_in), float("nan")) for alpha in alphas]
+            if sum(1 for b in bs if math.isfinite(b)) > len(bs) * 0.5:
+                pts = [
+                    screen(alpha + math.pi, b) for alpha, b in zip(alphas, bs) if math.isfinite(b)
+                ]
+                curves.append((pts, None))
 
     # shadow (photon ring critical curve)
     b_crit = math.sqrt(27.0)
@@ -3425,7 +3437,9 @@ def black_hole(
     my = (max(ys) + min(ys)) / 2.0
 
     # pen per flux bin (log scale, bgmeulem-style): pen 0 = brightest
-    all_w = [w for _, ws in curves if ws for w in ws if w > 0]
+    all_w = [w for _, ws in curves if ws for w in ws if w > 0] + [
+        w for _, _, w in dot_pts if w and w > 0
+    ]
     if all_w and colors > 1:
         logs = sorted(math.log10(w) for w in all_w)
         w_lo = logs[int(0.04 * (len(logs) - 1))]
@@ -3471,11 +3485,11 @@ def black_hole(
             out += _poly(spts[i : j + 1], color=pens[i], f=feed)
             i = j
     for px, py, wgt in dot_pts:
-        color = min(colors - 1, int((1.0 - wgt) * colors)) if colors > 1 else None
+        color = pen_of(wgt)
         out += _dot(
             _clamp(cx + (px - mx) * sc, x0, x1),
             _clamp(cy + (py - my) * sc, y0, y1),
-            r=0.35,
+            r=dot_size,
             color=color,
             f=feed,
         )
