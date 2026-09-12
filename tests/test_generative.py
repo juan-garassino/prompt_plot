@@ -59,6 +59,7 @@ def test_all_generators_registered():
         "pe_carpet",
         "attention_arcs",
         "residual_river",
+        "weight_matrix",
     ]:
         assert expected in gens
 
@@ -100,6 +101,7 @@ def test_all_generators_registered():
         "pe_carpet",
         "attention_arcs",
         "residual_river",
+        "weight_matrix",
     ],
 )
 def test_generator_deterministic_and_nonempty(name):
@@ -130,6 +132,7 @@ def test_generator_deterministic_and_nonempty(name):
         "superformula_bloom",
         "attention_arcs",
         "residual_river",
+        "weight_matrix",
     ],
 )
 def test_different_seed_differs(name):
@@ -175,6 +178,7 @@ def test_different_seed_differs(name):
         "pe_carpet",
         "attention_arcs",
         "residual_river",
+        "weight_matrix",
     ],
 )
 def test_generator_within_bounds(name):

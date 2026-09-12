@@ -49,6 +49,7 @@ GENERATOR_REGISTRY = {
     "pe_carpet": _g.pe_carpet,
     "attention_arcs": _g.attention_arcs,
     "residual_river": _g.residual_river,
+    "weight_matrix": _g.weight_matrix,
 }
 
 _SKIP_PARAMS = {"rng", "bounds"}

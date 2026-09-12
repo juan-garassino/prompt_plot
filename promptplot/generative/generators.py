@@ -3246,11 +3246,15 @@ def black_hole(
     ghost: bool = True,
     mode: str = "lines",
     dots: int = 2400,
-    dot_gamma: float = 1.2,
+    dot_gamma: float = 1.6,
     dot_size: float = 0.22,
     dot_cell: float = 0.55,
-    dot_cap: int = 4,
+    dot_cap: int = 6,
     isco_line: bool = True,
+    flow_rings: int = 88,
+    dash_mm: float = 2.4,
+    flow_gamma: float = 1.35,
+    double_thresh: float = 0.74,
     feed: int = 1600,
 ) -> List[GCodeCommand]:
     """Luminet-1979 black hole with the EXACT elliptic-integral solver.
@@ -3268,7 +3272,10 @@ def black_hole(
     inc = math.radians(inc_deg)
     sin_i = math.sin(inc)
 
-    n_rings = max(6, n_iso + rng.randint(-2, 2))
+    if mode == "flow":
+        n_rings = max(24, flow_rings)
+    else:
+        n_rings = max(6, n_iso + rng.randint(-2, 2))
     rings = [r_min * (r_max / r_min) ** (k / max(1, n_rings - 1)) for k in range(n_rings)]
     alphas = [2.0 * math.pi * k / samples for k in range(samples + 1)]
 
@@ -3414,6 +3421,78 @@ def black_hole(
                     screen(alpha + math.pi, b) for alpha, b in zip(alphas, bs) if math.isfinite(b)
                 ]
                 curves.append((pts, None))
+
+    if mode == "flow":
+        # strokes ride the lensed isoradials; dash duty follows observed flux —
+        # the physics-native tonal rendering (no raster intermediate)
+        ring_data = []
+        all_lw = []
+        for r in rings:
+            fs = flux(r)
+            for tbl, rot in ((t_direct, 0.0), (t_ghost, math.pi)):
+                if not tbl:
+                    continue
+                bs = [tbl.get((alpha, r), float("nan")) for alpha in alphas]
+                if sum(1 for b in bs if math.isfinite(b)) < len(bs) * 0.5:
+                    continue
+                pts, ws = [], []
+                for alpha, b in zip(alphas, bs):
+                    if not math.isfinite(b):
+                        continue
+                    pts.append(screen(alpha + rot, b))
+                    w = fs / redshift(r, b, alpha) ** 4
+                    ws.append(w)
+                    if w > 0:
+                        all_lw.append(math.log10(w))
+                ring_data.append((pts, ws))
+        all_lw.sort()
+        lw_lo = all_lw[int(0.05 * (len(all_lw) - 1))]
+        lw_hi = all_lw[int(0.995 * (len(all_lw) - 1))]
+        dash_u = dash_mm * (2.6 * r_max) / max(1.0, (x1 - x0))
+        for pts, ws in ring_data:
+            stroke, stroke_t = [], []
+            acc = 0.0
+            # bright zones get long flowing strokes, dim zones short ticks
+            next_cell = dash_u
+            drawing = False
+
+            def flush():
+                nonlocal stroke, stroke_t
+                if len(stroke) >= 2:
+                    mean_t = sum(stroke_t) / len(stroke_t)
+                    wv = 10.0 ** (lw_lo + mean_t * (lw_hi - lw_lo))
+                    curves.append((list(stroke), [wv] * len(stroke)))
+                    if mean_t > double_thresh:
+                        off = 0.35 * (2.6 * r_max) / max(1.0, (x1 - x0))
+                        curves.append(([(px, py + off) for px, py in stroke], [wv] * len(stroke)))
+                stroke, stroke_t = [], []
+
+            for i in range(len(pts) - 1):
+                (xa, ya), (xb, yb) = pts[i], pts[i + 1]
+                wa = ws[i]
+                t = 0.0
+                if wa > 0:
+                    t = (math.log10(wa) - lw_lo) / max(1e-9, lw_hi - lw_lo)
+                t = max(0.0, min(1.0, t))
+                seg = math.hypot(xb - xa, yb - ya)
+                acc += seg
+                if acc >= next_cell:
+                    acc = 0.0
+                    next_cell = dash_u * (0.4 + 2.2 * t + 0.5 * rng.random())
+                    duty = t**flow_gamma
+                    want = t > 0.04 and rng.random() < duty
+                    if want and not drawing:
+                        drawing = True
+                    elif not want and drawing:
+                        flush()
+                        drawing = False
+                if drawing:
+                    if not stroke:
+                        stroke.append((xa, ya))
+                        stroke_t.append(t)
+                    stroke.append((xb, yb))
+                    stroke_t.append(t)
+            flush()
 
     # shadow (photon ring critical curve)
     b_crit = math.sqrt(27.0)
@@ -3740,4 +3819,203 @@ def residual_river(
             y = top - 6.0 * math.sin(math.pi * t01)
             pts.append((x, _clamp(y, y0, y1)))
         out += _poly(pts, color=(colors - 1 if colors > 1 else None), f=feed)
+    return out
+
+
+# single-stroke vector font (4x6 grid, baseline 0) for pen-drawn legends
+_GLYPHS = {
+    "A": [[(0, 0), (2, 6), (4, 0)], [(1, 2.4), (3, 2.4)]],
+    "B": [
+        [(0, 0), (0, 6), (3, 6), (4, 5), (4, 4), (3, 3), (0, 3)],
+        [(3, 3), (4, 2), (4, 1), (3, 0), (0, 0)],
+    ],
+    "C": [[(4, 1), (3, 0), (1, 0), (0, 1), (0, 5), (1, 6), (3, 6), (4, 5)]],
+    "D": [[(0, 0), (0, 6), (2, 6), (4, 4), (4, 2), (2, 0), (0, 0)]],
+    "E": [[(4, 0), (0, 0), (0, 6), (4, 6)], [(0, 3), (3, 3)]],
+    "F": [[(0, 0), (0, 6), (4, 6)], [(0, 3), (3, 3)]],
+    "G": [[(4, 5), (3, 6), (1, 6), (0, 5), (0, 1), (1, 0), (3, 0), (4, 1), (4, 3), (2, 3)]],
+    "H": [[(0, 0), (0, 6)], [(4, 0), (4, 6)], [(0, 3), (4, 3)]],
+    "I": [[(2, 0), (2, 6)], [(1, 0), (3, 0)], [(1, 6), (3, 6)]],
+    "J": [[(4, 6), (4, 1), (3, 0), (1, 0), (0, 1)]],
+    "K": [[(0, 0), (0, 6)], [(4, 6), (0, 2.5)], [(1.4, 3.4), (4, 0)]],
+    "L": [[(0, 6), (0, 0), (4, 0)]],
+    "M": [[(0, 0), (0, 6), (2, 3), (4, 6), (4, 0)]],
+    "N": [[(0, 0), (0, 6), (4, 0), (4, 6)]],
+    "O": [[(1, 0), (0, 1), (0, 5), (1, 6), (3, 6), (4, 5), (4, 1), (3, 0), (1, 0)]],
+    "P": [[(0, 0), (0, 6), (3, 6), (4, 5), (4, 3.6), (3, 3), (0, 3)]],
+    "Q": [
+        [(1, 0), (0, 1), (0, 5), (1, 6), (3, 6), (4, 5), (4, 1), (3, 0), (1, 0)],
+        [(2.6, 1.4), (4.2, -0.4)],
+    ],
+    "R": [[(0, 0), (0, 6), (3, 6), (4, 5), (4, 3.6), (3, 3), (0, 3)], [(2, 3), (4, 0)]],
+    "S": [[(4, 5), (3, 6), (1, 6), (0, 5), (0, 4), (4, 2), (4, 1), (3, 0), (1, 0), (0, 1)]],
+    "T": [[(2, 0), (2, 6)], [(0, 6), (4, 6)]],
+    "U": [[(0, 6), (0, 1), (1, 0), (3, 0), (4, 1), (4, 6)]],
+    "V": [[(0, 6), (2, 0), (4, 6)]],
+    "W": [[(0, 6), (1, 0), (2, 4), (3, 0), (4, 6)]],
+    "X": [[(0, 0), (4, 6)], [(0, 6), (4, 0)]],
+    "Y": [[(0, 6), (2, 3), (4, 6)], [(2, 3), (2, 0)]],
+    "Z": [[(0, 6), (4, 6), (0, 0), (4, 0)]],
+    "0": [
+        [(1, 0), (0, 1), (0, 5), (1, 6), (3, 6), (4, 5), (4, 1), (3, 0), (1, 0)],
+        [(0.8, 1), (3.2, 5)],
+    ],
+    "1": [[(1, 5), (2, 6), (2, 0)], [(1, 0), (3, 0)]],
+    "2": [[(0, 5), (1, 6), (3, 6), (4, 5), (4, 4), (0, 0), (4, 0)]],
+    "3": [[(0, 6), (4, 6), (2, 3.6), (4, 2), (4, 1), (3, 0), (1, 0), (0, 1)]],
+    "4": [[(3, 0), (3, 6), (0, 2), (4, 2)]],
+    "5": [[(4, 6), (0, 6), (0, 3.4), (3, 3.4), (4, 2.4), (4, 1), (3, 0), (1, 0), (0, 1)]],
+    "6": [[(3, 6), (1, 6), (0, 5), (0, 1), (1, 0), (3, 0), (4, 1), (4, 2.4), (3, 3.4), (0, 3.4)]],
+    "7": [[(0, 6), (4, 6), (1.6, 0)]],
+    "8": [
+        [(1, 3), (0, 4), (0, 5), (1, 6), (3, 6), (4, 5), (4, 4), (3, 3), (1, 3)],
+        [(1, 3), (0, 2), (0, 1), (1, 0), (3, 0), (4, 1), (4, 2), (3, 3)],
+    ],
+    "9": [[(1, 0), (3, 0), (4, 1), (4, 5), (3, 6), (1, 6), (0, 5), (0, 3.6), (1, 2.6), (4, 2.6)]],
+    "-": [[(0.5, 3), (3.5, 3)]],
+    ".": [[(1.7, 0), (2.3, 0), (2.3, 0.5), (1.7, 0.5), (1.7, 0)]],
+    " ": [],
+}
+
+
+def _stroke_text(text, x, y, height, color=None, f=2400):
+    """Pen-drawn single-stroke text; (x, y) = left baseline. Returns commands."""
+    sc = height / 6.0
+    adv = 5.6 * sc
+    out = []
+    cx = x
+    for ch in text.upper():
+        for stroke in _GLYPHS.get(ch, []):
+            pts = [(cx + gx * sc, y + gy * sc) for gx, gy in stroke]
+            out += _poly(pts, color=color, f=f)
+        cx += adv
+    return out
+
+
+def _text_width(text, height):
+    return len(text) * 5.6 * (height / 6.0)
+
+
+def weight_matrix(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 1,
+    weights: str = "",
+    tensor: str = "block",
+    block: int = 0,
+    tick_frac: float = 0.92,
+    min_tick: float = 0.12,
+    feed: int = 2400,
+) -> List[GCodeCommand]:
+    """Trained weight matrices as tick-field panels (a plotter Hinton diagram).
+
+    Every weight is a diagonal tick: length ∝ |w| (99th-percentile normalized),
+    direction / for positive and \\ for negative — sign stays readable with a
+    single pen; with 2+ pens the signs get their own colors. ``tensor``:
+    ``block`` = the whole encoder block on one page (query | key | value on the
+    top row, ffn1 | ffn2 below); ``qkv`` = just the attention panels;
+    ``ffn1``/``ffn2`` = one MLP matrix. Panels stretch to fill the drawable
+    area (non-square cells). Fallback without a checkpoint: seeded gaussians.
+    """
+    import numpy as np
+
+    x0, y0, x1, y1 = bounds
+
+    def load():
+        try:
+            import zipfile, io, h5py
+
+            buf = io.BytesIO(zipfile.ZipFile(weights).read("model.weights.h5"))
+            f5 = h5py.File(buf, "r")
+            base = "layers/transformer_encoder_block" + ("" if block == 0 else f"_{block}")
+
+            def att(nm):
+                W = np.array(f5[f"{base}/att/{nm}/vars/0"])
+                return W.reshape(W.shape[0], -1)
+
+            return {
+                "q": att("query_dense"),
+                "k": att("key_dense"),
+                "v": att("value_dense"),
+                "ffn1": np.array(f5[f"{base}/ffn1/vars/0"]),
+                "ffn2": np.array(f5[f"{base}/ffn2/vars/0"]),
+            }
+        except Exception:
+            return None
+
+    mats = load() if weights else None
+    if mats is None:
+
+        def fake(r_, c_):
+            m = np.zeros((r_, c_))
+            for i in range(r_):
+                for j in range(c_):
+                    m[i, j] = rng.random() * 2 - 1
+            return m
+
+        mats = {
+            "q": fake(72, 48),
+            "k": fake(72, 48),
+            "v": fake(72, 48),
+            "ffn1": fake(72, 96),
+            "ffn2": fake(96, 48),
+        }
+
+    gap = 6.0
+    label_h = 6.0
+    W_all, H_all = x1 - x0, y1 - y0
+    panels = []  # (matrix, rect, is_qkv, label)
+    if tensor == "block":
+        h_top = (H_all - gap) * 0.42 - label_h
+        h_bot = (H_all - gap) * 0.58 - label_h
+        pw = (W_all - 2 * gap) / 3.0
+        y_top = y0 + h_bot + label_h + gap
+        for i, (key, lab) in enumerate((("q", "QUERY"), ("k", "KEY"), ("v", "VALUE"))):
+            panels.append((mats[key], (x0 + i * (pw + gap), y_top, pw, h_top), True, lab))
+        c1, c2 = mats["ffn1"].shape[1], mats["ffn2"].shape[1]
+        w1 = (W_all - gap) * c1 / (c1 + c2)
+        panels.append((mats["ffn1"], (x0, y0, w1, h_bot), False, "FFN 1"))
+        panels.append((mats["ffn2"], (x0 + w1 + gap, y0, W_all - gap - w1, h_bot), False, "FFN 2"))
+    elif tensor == "qkv":
+        pw = (W_all - 2 * gap) / 3.0
+        for i, (key, lab) in enumerate((("q", "QUERY"), ("k", "KEY"), ("v", "VALUE"))):
+            panels.append((mats[key], (x0 + i * (pw + gap), y0, pw, H_all - label_h), True, lab))
+    else:
+        panels.append(
+            (
+                mats.get(tensor, mats["ffn1"]),
+                (x0, y0, W_all, H_all - label_h),
+                False,
+                tensor.upper(),
+            )
+        )
+
+    out: List[GCodeCommand] = []
+    label_pen = (colors - 1) if colors > 1 else None
+    for Wm, (rx, ry, rw, rh), is_qkv, lab in panels:
+        tw = _text_width(lab, 3.6)
+        out += _stroke_text(lab, rx + (rw - tw) / 2.0, ry + rh + 1.2, 3.6, color=label_pen, f=feed)
+        rows, cols = Wm.shape
+        cw, ch = rw / cols, rh / rows
+        half = min(cw, ch) * tick_frac / 2.0
+        norm = float(np.percentile(np.abs(Wm), 99)) or 1.0
+        for i in range(rows):
+            cy_ = ry + ch * (rows - 1 - i + 0.5)
+            for j in range(cols):
+                w = float(Wm[i, j])
+                ln = half * min(1.0, abs(w) / norm)
+                if ln < min_tick:
+                    continue
+                cx_ = rx + cw * (j + 0.5)
+                sgn = 1.0 if w >= 0 else -1.0
+                color = (0 if w >= 0 else 1) % colors if colors > 1 else None
+                out += _poly(
+                    [(cx_ - ln, cy_ - ln * sgn), (cx_ + ln, cy_ + ln * sgn)], color=color, f=feed
+                )
+        if is_qkv and cols % 6 == 0:
+            for hsep in range(1, 6):
+                xh = rx + cw * (cols // 6) * hsep
+                out += _poly(
+                    [(xh, ry), (xh, ry + rh)], color=(colors - 1 if colors > 1 else None), f=feed
+                )
     return out
