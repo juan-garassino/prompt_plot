@@ -484,3 +484,226 @@ def bauhaus_weights(
     out += plus_mark(x1 - 9.0, y0 + 20.0, pen=black, f=feed)
     out += scale_footer(bounds, pen=black, f=feed)
     return out
+
+
+# ---------------------------------------------------------------------------
+# piece 05 — FORWARD PASS (perceptron)
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_perceptron(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    layers: Sequence[int] = (6, 8, 8, 3),
+    weights: str = "",
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """An MLP as constructivist art: neurons are solid discs, connections carry
+    1-3 parallel passes by |w|, the winning forward path runs bold pink."""
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    out: List[GCodeCommand] = []
+    blue, pink, black = _pen(BLUE, colors), _pen(PINK, colors), _pen(BLACK, colors)
+
+    # weight matrices: slices of the real checkpoint when given, else seeded
+    mats = []
+    try:
+        if weights:
+            qkv = _load_qkv(weights, 0)
+            src = qkv[0]
+            for a, b in zip(layers, layers[1:]):
+                mats.append(
+                    [
+                        [float(src[i % src.shape[0]][j % src.shape[1]]) for j in range(b)]
+                        for i in range(a)
+                    ]
+                )
+    except Exception:
+        mats = []
+    if not mats:
+        for a, b in zip(layers, layers[1:]):
+            mats.append([[rng.random() * 2 - 1 for _ in range(b)] for _ in range(a)])
+
+    n_l = len(layers)
+    lx = [x0 + W * (0.14 + 0.72 * i / (n_l - 1)) for i in range(n_l)]
+
+    def ys(n):
+        span = H * 0.62
+        return [y0 + H * 0.52 - span / 2 + span * (j + 0.5) / n for j in range(n)]
+
+    pos = [[(lx[i], y) for y in ys(n)] for i, n in enumerate(layers)]
+
+    # bar behind the second hidden layer
+    bx = lx[min(2, n_l - 1)]
+    out += fill_rect(bx - 5.0, y0 + 0.5, bx + 5.0, y1 - 0.5, spacing=0.6, pen=black, f=feed)
+
+    # winning path: greedy argmax |w| from a seeded input neuron
+    path = [rng.randint(0, layers[0] - 1)]
+    for li, M in enumerate(mats):
+        row = M[path[-1]]
+        path.append(max(range(len(row)), key=lambda j: abs(row[j])))
+
+    for li, M in enumerate(mats):
+        norm = max(abs(v) for row in M for v in row) or 1.0
+        for i, row in enumerate(M):
+            for j, w in enumerate(row):
+                t = abs(w) / norm
+                if t < 0.45:
+                    continue
+                (xa, ya), (xb, yb) = pos[li][i], pos[li + 1][j]
+                on_path = path[li] == i and path[li + 1] == j
+                pen = pink if on_path else black
+                passes = 3 if on_path else (2 if t > 0.75 else 1)
+                dx, dy = xb - xa, yb - ya
+                n = math.hypot(dx, dy) or 1.0
+                oxp, oyp = -dy / n * 0.3, dx / n * 0.3
+                for pp in range(passes):
+                    o = pp - (passes - 1) / 2
+                    out += _poly(
+                        [(xa + oxp * o, ya + oyp * o), (xb + oxp * o, yb + oyp * o)],
+                        color=pen,
+                        f=feed,
+                    )
+
+    for li, col in enumerate(pos):
+        for j, (px, py) in enumerate(col):
+            r = 2.0 + 1.6 * rng.random()
+            if li == 0:
+                out += fill_disc(px, py, r, spacing=0.5, pen=blue, f=feed)
+            elif li == n_l - 1:
+                out += fill_disc(px, py, r, spacing=0.5, pen=pink, f=feed)
+            elif path[li] == j:
+                out += fill_disc(px, py, r * 0.9, spacing=0.5, pen=black, f=feed)
+            else:
+                out += circle(px, py, r * 0.9, pen=black, f=feed)
+
+    out += type_block(["FORWARD", "PASS"], x0 + 5.0, y1 - 6.0, pen=black, f=feed)
+    out += swatch_bar(x0 + 5.0, y1 - 22.0, [black, blue, pink], f=feed)
+    out += plus_mark(x1 - 9.0, y1 - 9.0, pen=black, f=feed)
+    out += scale_footer(bounds, pen=black, f=feed)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# piece 06 — GRADIENT DESCENT
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_gradient(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    levels: int = 14,
+    steps: int = 70,
+    lr: float = 0.22,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """A two-bowl loss landscape as thin contour ellipses; the descent path is a
+    bold pink polyline with solid step dots, the minimum a solid blue disc."""
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    out: List[GCodeCommand] = []
+    blue, pink, black = _pen(BLUE, colors), _pen(PINK, colors), _pen(BLACK, colors)
+    cx_, cy_ = x0 + 0.54 * W, y0 + 0.5 * H
+
+    m1 = (cx_ - 0.16 * W, cy_ - 0.07 * H)  # global minimum
+    m2 = (cx_ + 0.22 * W, cy_ + 0.13 * H)  # shallow second bowl
+
+    def loss(px, py):
+        d1 = ((px - m1[0]) / (0.30 * W)) ** 2 + ((py - m1[1]) / (0.26 * H)) ** 2
+        d2 = ((px - m2[0]) / (0.20 * W)) ** 2 + ((py - m2[1]) / (0.18 * H)) ** 2
+        return min(d1, 0.35 + 0.8 * d2)
+
+    # marching-squares-lite: sample a grid, draw iso segments per cell
+    nxg, nyg = 90, 62
+    gx = [x0 + 4 + (W - 8) * i / (nxg - 1) for i in range(nxg)]
+    gy = [y0 + 8 + (H - 16) * j / (nyg - 1) for j in range(nyg)]
+    field = [[loss(px, py) for py in gy] for px in gx]
+    vmax = 1.15
+    for lv in range(1, levels + 1):
+        iso = vmax * (lv / levels) ** 1.4
+        for i in range(nxg - 1):
+            for j in range(nyg - 1):
+                quad = (field[i][j], field[i + 1][j], field[i + 1][j + 1], field[i][j + 1])
+                pts_c = []
+                corners = [
+                    (gx[i], gy[j]),
+                    (gx[i + 1], gy[j]),
+                    (gx[i + 1], gy[j + 1]),
+                    (gx[i], gy[j + 1]),
+                ]
+                for k in range(4):
+                    a_, b_ = quad[k], quad[(k + 1) % 4]
+                    if (a_ < iso) != (b_ < iso):
+                        t = (iso - a_) / (b_ - a_)
+                        pa, pb = corners[k], corners[(k + 1) % 4]
+                        pts_c.append((pa[0] + (pb[0] - pa[0]) * t, pa[1] + (pb[1] - pa[1]) * t))
+                if len(pts_c) >= 2:
+                    out += _poly(pts_c[:2], color=black, f=feed)
+
+    # descent path from a seeded start, bold pink with step dots
+    px, py = x0 + W * rng.uniform(0.20, 0.30), y0 + H * rng.uniform(0.78, 0.88)
+    path = [(px, py)]
+    for _ in range(steps):
+        e = 1.5
+        gx_ = (loss(px + e, py) - loss(px - e, py)) / (2 * e)
+        gy_ = (loss(px, py + e) - loss(px, py - e)) / (2 * e)
+        px -= lr * W * gx_
+        py -= lr * H * gy_
+        path.append((px, py))
+    for o in (-0.35, 0.0, 0.35):
+        out += _poly([(p_[0], p_[1] + o) for p_ in path], color=pink, f=feed)
+    for k, (sx, sy) in enumerate(path[:: max(1, steps // 14)]):
+        out += fill_disc(sx, sy, 1.0, spacing=0.45, pen=pink, f=feed)
+    out += fill_disc(m1[0], m1[1], 3.2, spacing=0.5, pen=blue, f=feed)
+    out += dotted_circle(m2[0], m2[1], 6.0, pen=black, bounds=bounds, f=feed)
+
+    out += type_block(["GRADIENT", "DESCENT"], x0 + 5.0, y1 - 6.0, pen=black, f=feed)
+    out += swatch_bar(x0 + 5.0, y1 - 22.0, [black, blue, pink], f=feed)
+    out += plus_mark(x1 - 9.0, y1 - 9.0, pen=black, f=feed)
+    out += scale_footer(bounds, pen=black, f=feed)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# piece 07 — RESONANCE (harmonograph)
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_resonance(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """One harmonograph curve in black over a solid pink disc, blue quarter
+    stack, orbit circle — the damped pendulum as poster geometry."""
+    from .generators import harmonograph
+
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    out: List[GCodeCommand] = []
+    blue, pink, black = _pen(BLUE, colors), _pen(PINK, colors), _pen(BLACK, colors)
+
+    sub = (x0 + 0.20 * W, y0 + 0.10 * H, x1 - 0.06 * W, y1 - 0.10 * H)
+    curve = harmonograph(rng, sub, colors=1)
+    pts = [(c.x, c.y) for c in curve if c.command == "G1" and c.x is not None]
+    ccx = sum(p_[0] for p_ in pts) / len(pts)
+    ccy = sum(p_[1] for p_ in pts) / len(pts)
+
+    out += fill_disc(ccx, ccy, 0.16 * H, spacing=0.55, pen=pink, f=feed)
+    out += dotted_circle(ccx, ccy, 0.40 * H, pen=black, bounds=bounds, f=feed)
+    for c in curve:
+        if c.command in ("M3", "G1", "G0"):
+            c.color = black
+    out += curve
+
+    qx, qy = x0 + 0.09 * W, y0 + 0.24 * H
+    out += fill_quarter(qx, qy, 5.0, math.pi / 2, pen=blue, f=feed)
+    out += fill_quarter(qx, qy, 5.0, 3 * math.pi / 2, pen=black, f=feed)
+    out += type_block(["RESONANCE"], x0 + 5.0, y1 - 6.0, pen=black, f=feed)
+    out += swatch_bar(x0 + 5.0, y1 - 16.0, [black, blue, pink], f=feed)
+    out += plus_mark(x1 - 9.0, y0 + 12.0, pen=black, f=feed)
+    out += scale_footer(bounds, pen=black, f=feed)
+    return out

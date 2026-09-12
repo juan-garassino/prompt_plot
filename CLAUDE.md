@@ -189,6 +189,17 @@ new primitive means writing an `expand_*` function and registering it; the promp
 `orchestrate.compose_and_stream(blocks, plotter, config)` — expand → merge → postprocess → stream,
 with no intermediate `.gcode` file. See `scripts/cc_draw_*.py` for working examples.
 
+## BAUHAUS UNIVERSUM (collection)
+`generative/bauhaus.py` — a design-language kit (serpentine/spiral/quarter fills, dotted
+orbits, plus marks, swatch bars, crosshair rules, spaced-caps `type_block`/`scale_footer`,
+`BAUHAUS_PALETTE` blue|pink|black) plus poster pieces built on it: `bauhaus_attractor`
+(SENSITIVE DEPENDENCE — one Lorenz line, solid discs in the lobe eyes), `bauhaus_attention`
+(GPT-2 sink chords in bold pink), `bauhaus_weights` (PARAMETER FIELD — Q|K|V Hinton discs
+from the trained checkpoint), `bauhaus_perceptron` (FORWARD PASS), `bauhaus_gradient`
+(GRADIENT DESCENT — contour bowls + descent path), `bauhaus_resonance` (harmonograph).
+Related one-off: `black_hole_bauhaus`. Renders go to ~/Downloads for voting; winners move
+to `leo/bauhaus/`.
+
 ## Multi-color pen layers
 Every drawing source (LLM, manual scripts, generative, imported files) can tag commands with a
 `color` index. When `config.color.enabled`, `postprocess.reorder_by_color` groups strokes by pen and

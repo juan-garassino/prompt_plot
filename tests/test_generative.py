@@ -65,6 +65,9 @@ def test_all_generators_registered():
         "bauhaus_attractor",
         "bauhaus_attention",
         "bauhaus_weights",
+        "bauhaus_perceptron",
+        "bauhaus_gradient",
+        "bauhaus_resonance",
     ]:
         assert expected in gens
 
@@ -112,6 +115,9 @@ def test_all_generators_registered():
         "bauhaus_attractor",
         "bauhaus_attention",
         "bauhaus_weights",
+        "bauhaus_perceptron",
+        "bauhaus_gradient",
+        "bauhaus_resonance",
     ],
 )
 def test_generator_deterministic_and_nonempty(name):
@@ -195,6 +201,9 @@ def test_different_seed_differs(name):
         "bauhaus_attractor",
         "bauhaus_attention",
         "bauhaus_weights",
+        "bauhaus_perceptron",
+        "bauhaus_gradient",
+        "bauhaus_resonance",
     ],
 )
 def test_generator_within_bounds(name):

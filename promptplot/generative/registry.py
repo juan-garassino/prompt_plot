@@ -56,6 +56,9 @@ GENERATOR_REGISTRY = {
     "bauhaus_attractor": _b.bauhaus_attractor,
     "bauhaus_attention": _b.bauhaus_attention,
     "bauhaus_weights": _b.bauhaus_weights,
+    "bauhaus_perceptron": _b.bauhaus_perceptron,
+    "bauhaus_gradient": _b.bauhaus_gradient,
+    "bauhaus_resonance": _b.bauhaus_resonance,
 }
 
 _SKIP_PARAMS = {"rng", "bounds"}
