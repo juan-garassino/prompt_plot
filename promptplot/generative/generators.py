@@ -3083,19 +3083,29 @@ def _carlson_rf(x, y, z):
 
 
 def _ellip_f(phi, m):
-    """Incomplete elliptic integral of the first kind F(phi | m)."""
+    """Incomplete elliptic integral F(phi | m); m > 1 via reciprocal modulus."""
+    if m > 1.0:
+        t = math.sqrt(m) * math.sin(phi)
+        if abs(t) > 1.0:
+            return float("nan")
+        return _ellip_f(math.asin(t), 1.0 / m) / math.sqrt(m)
     sph = math.sin(phi)
     return sph * _carlson_rf(math.cos(phi) ** 2, 1.0 - m * sph * sph, 1.0)
 
 
 def _ellip_k(m):
+    if m > 1.0:
+        return _ellip_k(1.0 / m) / math.sqrt(m)
     return _ellip_f(math.pi / 2, m)
 
 
 def _jacobi_sn(u, m):
-    """Jacobi sn(u | m) via the AGM / descending Landen transformation."""
+    """Jacobi sn(u | m) via the AGM; m > 1 via reciprocal modulus."""
     if m < 1e-12:
         return math.sin(u)
+    if m > 1.0 + 1e-9:
+        sm = math.sqrt(m)
+        return _jacobi_sn(sm * u, 1.0 / m) / sm
     if m > 1.0 - 1e-12:
         return math.tanh(u)
     a = [1.0]
@@ -3125,24 +3135,29 @@ def _luminet_b_table(inclination, n, alphas, radii):
     tan_i = math.tan(inclination) or 1e-9
 
     # P grid with precomputed elliptic quantities
-    P_N = 110
     P_hi = max(70.0, 2.2 * max(radii))
-    Ps = [3.001 + (P_hi - 3.001) * (k / (P_N - 1)) ** 1.6 for k in range(P_N)]
+    Ps = [2.02 + (2.995 - 2.02) * k / 27.0 for k in range(28)] + [
+        3.001 + (P_hi - 3.001) * (k / 109.0) ** 1.6 for k in range(110)
+    ]
     pre = []
     for P in Ps:
         Q = math.sqrt((P - 2.0) * (P + 6.0))
-        k2 = max(0.0, min(0.999999, (Q - P + 6.0) / (2.0 * Q)))
+        k2 = (Q - P + 6.0) / (2.0 * Q)
         num = (Q - P + 2.0) / (Q - P + 6.0)
         zeta_inf = math.asin(math.sqrt(max(0.0, min(1.0, num))))
         pre.append((P, Q, k2, math.sqrt(P / Q), _ellip_f(zeta_inf, k2), _ellip_k(k2)))
 
     def r_inv(entry, gamma):
         P, Q, k2, sq_pq, F_inf, K_k = entry
+        if not (math.isfinite(F_inf) and math.isfinite(K_k)):
+            return float("nan")
         if n == 0:
             u = gamma / (2.0 * sq_pq) + F_inf
         else:
             u = (gamma - 2.0 * n * math.pi) / (2.0 * sq_pq) - F_inf + 2.0 * K_k
         snv = _jacobi_sn(u, k2)
+        if not math.isfinite(snv):
+            return float("nan")
         return (1.0 / (4.0 * P)) * (-(Q - P + 2.0) + (Q - P + 6.0) * snv * snv)
 
     half = [a for a in alphas if a <= math.pi + 1e-9]
@@ -3165,7 +3180,7 @@ def _luminet_b_table(inclination, n, alphas, radii):
                         for _ in range(38):
                             midP = (loP + hiP) / 2.0
                             Q = math.sqrt((midP - 2.0) * (midP + 6.0))
-                            k2 = max(0.0, min(0.999999, (Q - midP + 6.0) / (2.0 * Q)))
+                            k2 = (Q - midP + 6.0) / (2.0 * Q)
                             num = (Q - midP + 2.0) / (Q - midP + 6.0)
                             z_inf = math.asin(math.sqrt(max(0.0, min(1.0, num))))
                             mid = (
@@ -3186,6 +3201,11 @@ def _luminet_b_table(inclination, n, alphas, radii):
                 prev_f, prev_e = fv, entry
             if root_P is not None:
                 b = math.sqrt(root_P**3 / (root_P - 2.0))
+            elif n == 0 and math.cos(alpha) > 0.0:
+                # near side of the disk: the ray has no periastron (it would
+                # plunge) — Luminet's weak-field ellipse (expr_ellipse); this is
+                # the part of the disk that passes IN FRONT of the shadow
+                b = r / math.sqrt(1.0 + (tan_i**2) * math.cos(alpha) ** 2)
             else:
                 b = float("nan")
             table[(alpha, r)] = b
