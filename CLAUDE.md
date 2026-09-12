@@ -119,7 +119,8 @@ maze, truchet, wave_bands, stipple, waves_with_circles, crosshatch_weave, turnin
 interference_field, frequency_lens, hitomezashi, harmonograph, vortex_field, moire_layers,
 strange_attractor (11 systems), domain_warp, contour_field, superformula_bloom, lissajous_carpet,
 scribble_halftone (shape-aware), comic_panels, line_halftone, scribble_portrait, sparkle_grid,
-iso_city, rounded_circuits, lissajous_swarm, black_hole — 34 total;
+iso_city, rounded_circuits, lissajous_swarm, black_hole,
+pe_carpet, attention_arcs, residual_river — 37 total;
 plus effects applicable to any generator: `--anaglyph`/`--glitch` red-cyan offset, and `--max-ink N` ink-density cap — no spot gets more than N pen passes),
 **SVG + DXF import** (split by stroke color / DXF layer → color layers),
 selectable paper size (A3/A4/A5/A6 via `--paper`),
@@ -209,7 +210,10 @@ Image fit rule: pictures **cover-fit** the drawable area — auto-rotated 90° t
 `iso_city` (voxel city, unit-gridded faces, hidden lines removed via front-to-back occupancy-mask claiming; `projection=2pt|1pt|iso` — real vanishing-point perspective by default, `persp` controls strength),
 `rounded_circuits` (guillotine regions filled with serpentine conveyor-belt bands — parallel lines snaking through rounded U-turns, pink/blue interlock),
 `lissajous_swarm` (phase-swept Lissajous family — sheared 3D tube/butterfly moiré; near-camera curves double-pass for depth thickness),
-`black_hole` (Luminet 1979 — isoradial lines with under-image arcs + Novikov–Thorne flux-weighted dot mode, ported from `007-eventHorizon`; Beloborodov bending).
+`black_hole` (Luminet 1979 — EXACT elliptic-integral solver verified against bgmeulem/luminet at machine precision: direct + n=1 ghost images, near-side ellipse fallback, flux-binned pens in lines mode, photographic-plate `mode=dots` with hot/inferno pen palettes),
+`pe_carpet` (sinusoidal positional-encoding matrix as a waveform carpet),
+`attention_arcs` (attention as a score of arcs: pen per head, ink passes ∝ weight; `weights=ckpt.keras` uses trained Q/K via h5py, `attn_npz=...` uses real GPT-2 attention — extract with `scripts/extract_gpt2_attention.py`),
+`residual_river` (transformer residual stream: channel lines weave at attention stations, band expands through FFN lenses, skip arcs per block).
 Picture generators accept ANY photo: `--param channels=cmyk` splits a color image into cyan/magenta/yellow/black pen passes (Golden-Gate-style multicolor portraits).
 `rounded_circuits` is ONE closed self-crossing belt with concentric constant-offset lines and big round turns. `iso_city` defaults to terraced plateau masses (fill/void space) with window details, cover-fit immersion (`zoom`, `height`, `lod`).
 The `--anaglyph` glitch defaults to 4 pens (cyan/red/yellow/black); `--max-ink N --max-ink-cell MM` caps pen passes per spot on any generator.

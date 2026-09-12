@@ -3494,3 +3494,250 @@ def black_hole(
             f=feed,
         )
     return out
+
+
+# ---------------------------------------------------------------------------
+# 35. transformer suite: pe_carpet / attention_arcs / residual_river
+# ---------------------------------------------------------------------------
+
+
+def pe_carpet(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 1,
+    rows: int = 44,
+    d_model: int = 64,
+    pos_span: float = 80.0,
+    amp_frac: float = 0.65,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """The transformer's sinusoidal positional encoding as a waveform carpet.
+
+    Row i draws sin(pos / 10000^(2k/d_model)) (cos on odd channels) across the
+    page — slow frequencies at the bottom, fast at the top: the exact matrix
+    from "Attention Is All You Need" as a joy-division carpet. Pure formula;
+    the seed only jitters nothing. Pens: sin rows / cos rows alternate.
+    """
+    x0, y0, x1, y1 = bounds
+    w, h = x1 - x0, y1 - y0
+    gap = h / (rows + 1)
+    amp = gap * amp_frac
+    nx = max(120, int(w / 0.8))
+    out: List[GCodeCommand] = []
+    for i in range(rows):
+        k = (i // 2) * 2
+        freq = 1.0 / (10000.0 ** (k / max(1, d_model)))
+        phase = 0.0 if i % 2 == 0 else math.pi / 2.0
+        yb = y0 + gap * (i + 1)
+        pts = []
+        for j in range(nx + 1):
+            pos = pos_span * j / nx
+            x = x0 + w * j / nx
+            pts.append((x, _clamp(yb + amp * math.sin(pos * freq + phase), y0, y1)))
+        color = (i % 2) % colors if colors > 1 else None
+        out += _poly(pts, color=color, f=feed)
+    return out
+
+
+def _attention_matrix(
+    rng: SeededRNG, tokens: int, head: int, temp: float, causal: bool, weights: str, block: int
+):
+    """Per-head attention pattern: real trained Q/K when a .keras path is
+    given (pure numpy, no TF), else a seeded synthetic head (diagonal band +
+    anchor columns). Rows softmax to 1 at temperature ``temp``."""
+    import numpy as np
+
+    X = np.zeros((tokens, 96))
+    for pos in range(tokens):
+        for d in range(96):
+            f = 1.0 / (10000.0 ** ((d // 2 * 2) / 96.0))
+            X[pos, d] = math.sin(pos * f) if d % 2 == 0 else math.cos(pos * f)
+    scores = None
+    if weights:
+        try:
+            import zipfile, io, h5py
+
+            buf = io.BytesIO(zipfile.ZipFile(weights).read("model.weights.h5"))
+            f5 = h5py.File(buf, "r")
+            base = "layers/transformer_encoder_block" + ("" if block == 0 else f"_{block}")
+            wq = np.array(f5[f"{base}/att/query_dense/vars/0"])[:, head, :]
+            bq = np.array(f5[f"{base}/att/query_dense/vars/1"])[head]
+            wk = np.array(f5[f"{base}/att/key_dense/vars/0"])[:, head, :]
+            bk = np.array(f5[f"{base}/att/key_dense/vars/1"])[head]
+            Q = X @ wq + bq
+            K = X @ wk + bk
+            scores = (Q @ K.T) / math.sqrt(Q.shape[1])
+        except Exception:
+            scores = None
+    if scores is None:
+        off = rng.randint(1, 4) * rng.choice([-1, 1])
+        anchors = [rng.randint(0, tokens - 1) for _ in range(rng.randint(1, 3))]
+        scores = np.zeros((tokens, tokens))
+        for q in range(tokens):
+            for kk in range(tokens):
+                scores[q, kk] = 1.6 * math.exp(-((kk - q - off) ** 2) / 6.0)
+                if kk in anchors:
+                    scores[q, kk] += 1.1
+                scores[q, kk] += 0.35 * rng.random()
+    if causal:
+        for q in range(tokens):
+            scores[q, q + 1 :] = -1e9
+    A = np.exp((scores - scores.max(axis=1, keepdims=True)) / max(1e-3, temp))
+    return A / A.sum(axis=1, keepdims=True)
+
+
+def attention_arcs(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 1,
+    tokens: int = 44,
+    heads: int = 4,
+    temp: float = 1.0,
+    topk: int = 3,
+    causal: bool = True,
+    weights: str = "",
+    attn_npz: str = "",
+    block: int = 0,
+    min_w: float = 0.04,
+    feed: int = 2000,
+) -> List[GCodeCommand]:
+    """Attention as a musical score: tokens on a baseline, each arc bows from
+    query to key with ink passes scaling with the attention weight; one pen
+    per head. ``weights`` = a .keras checkpoint path uses the REAL trained
+    Q/K (numpy-only); ``attn_npz`` = a saved (layers, heads, T, T) attention
+    stack (see scripts/extract_gpt2_attention.py) — real GPT-2 attention;
+    otherwise seeded synthetic heads. ``temp`` is the softmax temperature —
+    low collapses onto few thick arcs, high diffuses.
+    """
+    x0, y0, x1, y1 = bounds
+    w = x1 - x0
+    y_base = y0 + 0.14 * (y1 - y0)
+    max_h = (y1 - y0) * 0.78
+    stack = None
+    if attn_npz:
+        try:
+            import numpy as np
+
+            stack = np.load(attn_npz)["attn"][block]  # (heads, T, T)
+            tokens = stack.shape[-1]
+            if temp != 1.0:
+                logw = np.log(np.clip(stack, 1e-12, None)) / max(1e-3, temp)
+                stack = np.exp(logw - logw.max(axis=-1, keepdims=True))
+                stack = stack / stack.sum(axis=-1, keepdims=True)
+        except Exception:
+            stack = None
+    xs = [x0 + w * (t + 0.5) / tokens for t in range(tokens)]
+    out: List[GCodeCommand] = []
+    for t in range(tokens):
+        out += _poly([(xs[t], y_base - 2.2), (xs[t], y_base)], color=None, f=feed)
+    for head in range(heads):
+        if stack is not None:
+            A = stack[head % stack.shape[0]]
+        else:
+            A = _attention_matrix(rng, tokens, head % 6, temp, causal, weights, block)
+        color = head % colors if colors > 1 else None
+        for q in range(tokens):
+            row = sorted(range(tokens), key=lambda kk: -A[q][kk])[:topk]
+            for kk in row:
+                wgt = float(A[q][kk])
+                if kk == q or wgt < min_w:
+                    continue
+                xa, xb = xs[kk], xs[q]
+                span = abs(xb - xa)
+                hh = min(max_h, 0.62 * span + 2.0)
+                passes = 1 + (1 if wgt > 0.25 else 0) + (1 if wgt > 0.5 else 0)
+                for pp in range(passes):
+                    pts = []
+                    for j in range(25):
+                        t01 = j / 24.0
+                        x = xa + (xb - xa) * t01
+                        y = y_base + (hh + 0.35 * pp) * math.sin(math.pi * t01)
+                        pts.append((x, _clamp(y, y0, y1)))
+                    out += _poly(pts, color=color, f=feed)
+    return out
+
+
+def residual_river(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 1,
+    channels: int = 22,
+    blocks: int = 4,
+    expand: float = 2.4,
+    weave_swaps: int = 7,
+    band_frac: float = 0.17,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """The transformer residual stream as a river: parallel channel lines flow
+    across the page; each block is an attention station (channels weave and
+    swap) followed by an FFN lens (the band expands ~4x and contracts, phase-
+    continuous). Skip-connection arcs bridge every station. Pens follow the
+    original channel index, so the weaving mixes the colors downstream.
+    """
+    x0, y0, x1, y1 = bounds
+    w, h = x1 - x0, y1 - y0
+    cy = (y0 + y1) / 2.0
+    h0 = h * band_frac
+    # block windows: [station][lens] per block, margins between
+    seg = w / blocks
+    stations = []
+    for b in range(blocks):
+        bx = x0 + b * seg
+        stations.append((bx + 0.18 * seg, bx + 0.46 * seg, bx + 0.56 * seg, bx + 0.88 * seg))
+
+    # cumulative permutations per block (seeded neighbour transpositions)
+    perms = []
+    cur = list(range(channels))
+    for _ in range(blocks):
+        nxt = list(cur)
+        for _ in range(weave_swaps):
+            i = rng.randint(0, channels - 2)
+            j = min(channels - 1, i + rng.randint(1, 3))
+            nxt[i], nxt[j] = nxt[j], nxt[i]
+        perms.append((list(cur), list(nxt)))
+        cur = nxt
+
+    def offset_of(idx):
+        return -1.0 + 2.0 * idx / max(1, channels - 1)
+
+    def smooth(t):
+        return t * t * (3.0 - 2.0 * t)
+
+    nx = max(240, int(w / 0.7))
+    out: List[GCodeCommand] = []
+    for ch in range(channels):
+        pts = []
+        for j in range(nx + 1):
+            x = x0 + w * j / nx
+            b = min(blocks - 1, int((x - x0) / seg))
+            s0, s1, l0, l1 = stations[b]
+            before, after = perms[b]
+            # position slot: interpolate through this block's weave
+            u0 = offset_of(before.index(ch))
+            u1 = offset_of(after.index(ch))
+            if x < s0:
+                u = u0
+            elif x <= s1:
+                u = u0 + (u1 - u0) * smooth((x - s0) / max(1e-9, s1 - s0))
+            else:
+                u = u1
+            env = 1.0
+            if l0 <= x <= l1:
+                env = 1.0 + (expand - 1.0) * math.sin(math.pi * (x - l0) / (l1 - l0)) ** 2
+            pts.append((x, _clamp(cy + u * h0 * env, y0, y1)))
+        color = ch % colors if colors > 1 else None
+        out += _poly(pts, color=color, f=feed)
+
+    # skip-connection arcs over each block
+    top = cy - h0 * expand - 3.0
+    for b in range(blocks):
+        s0, _, _, l1 = stations[b]
+        xa, xb = s0 - 0.06 * seg, l1 + 0.04 * seg
+        pts = []
+        for j in range(33):
+            t01 = j / 32.0
+            x = xa + (xb - xa) * t01
+            y = top - 6.0 * math.sin(math.pi * t01)
+            pts.append((x, _clamp(y, y0, y1)))
+        out += _poly(pts, color=(colors - 1 if colors > 1 else None), f=feed)
+    return out

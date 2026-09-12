@@ -56,6 +56,9 @@ def test_all_generators_registered():
         "rounded_circuits",
         "lissajous_swarm",
         "black_hole",
+        "pe_carpet",
+        "attention_arcs",
+        "residual_river",
     ]:
         assert expected in gens
 
@@ -94,6 +97,9 @@ def test_all_generators_registered():
         "rounded_circuits",
         "lissajous_swarm",
         "black_hole",
+        "pe_carpet",
+        "attention_arcs",
+        "residual_river",
     ],
 )
 def test_generator_deterministic_and_nonempty(name):
@@ -104,7 +110,27 @@ def test_generator_deterministic_and_nonempty(name):
 
 
 @pytest.mark.parametrize(
-    "name", ["tiled_field", "ripple_field", "flow_field", "waves_with_circles", "crosshatch_weave", "turning_weave", "wave_gradient", "interference_field", "frequency_lens", "hitomezashi", "harmonograph", "vortex_field", "strange_attractor", "domain_warp", "contour_field", "superformula_bloom"]
+    "name",
+    [
+        "tiled_field",
+        "ripple_field",
+        "flow_field",
+        "waves_with_circles",
+        "crosshatch_weave",
+        "turning_weave",
+        "wave_gradient",
+        "interference_field",
+        "frequency_lens",
+        "hitomezashi",
+        "harmonograph",
+        "vortex_field",
+        "strange_attractor",
+        "domain_warp",
+        "contour_field",
+        "superformula_bloom",
+        "attention_arcs",
+        "residual_river",
+    ],
 )
 def test_different_seed_differs(name):
     a = run_generator(name, BOUNDS, seed=1)
@@ -146,6 +172,9 @@ def test_different_seed_differs(name):
         "rounded_circuits",
         "lissajous_swarm",
         "black_hole",
+        "pe_carpet",
+        "attention_arcs",
+        "residual_river",
     ],
 )
 def test_generator_within_bounds(name):
@@ -186,6 +215,7 @@ def test_params_are_applied():
 
 def test_anaglyph_layers_duplicates_with_pen_tags():
     from promptplot.generative import SeededRNG, anaglyph_layers, run_generator
+
     cmds = run_generator("vortex_field", BOUNDS, seed=5, params={"line_count": 10})
     n = len(cmds)
     out = anaglyph_layers(cmds, SeededRNG(99), layers=2, glitch_bands=2, bounds=BOUNDS)
@@ -217,6 +247,7 @@ def test_line_halftone_stays_inside_image_band(tmp_path):
     img = _mk_gradient_png(tmp_path)
     from promptplot.generative.generators import _image_tone_grid
     from promptplot.generative import SeededRNG
+
     rng = SeededRNG(3)
     gw, gh, off_x, off_y, _ = _image_tone_grid(SeededRNG(3), BOUNDS, img, 1.6, False)
     top = off_y + gh * 1.6
@@ -261,16 +292,33 @@ def test_sparkle_grid_spurs_never_overlap():
                 assert a2 >= b1 - 0.01, f"overlapping spurs on line {key}: {(a1,b1)} vs {(a2,b2)}"
 
 
-@pytest.mark.parametrize("system", [
-    "lorenz", "rossler", "halvorsen", "aizawa", "rabinovich_fabrikant",
-    "chen", "newton_leipnik", "burke_shaw", "finance", "three_scroll", "qi",
-])
+@pytest.mark.parametrize(
+    "system",
+    [
+        "lorenz",
+        "rossler",
+        "halvorsen",
+        "aizawa",
+        "rabinovich_fabrikant",
+        "chen",
+        "newton_leipnik",
+        "burke_shaw",
+        "finance",
+        "three_scroll",
+        "qi",
+    ],
+)
 def test_every_attractor_system_healthy(system):
-    cmds = run_generator("strange_attractor", BOUNDS, seed=5,
-                         params={"system": system, "steps": 6000})
+    cmds = run_generator(
+        "strange_attractor", BOUNDS, seed=5, params={"system": system, "steps": 6000}
+    )
     a = [c.to_gcode() for c in cmds]
-    b = [c.to_gcode() for c in run_generator("strange_attractor", BOUNDS, seed=5,
-                                             params={"system": system, "steps": 6000})]
+    b = [
+        c.to_gcode()
+        for c in run_generator(
+            "strange_attractor", BOUNDS, seed=5, params={"system": system, "steps": 6000}
+        )
+    ]
     assert len(cmds) > 50, f"{system} produced too little"
     assert a == b, f"{system} not deterministic"
     for c in cmds:

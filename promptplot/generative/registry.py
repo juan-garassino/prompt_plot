@@ -46,6 +46,9 @@ GENERATOR_REGISTRY = {
     "rounded_circuits": _g.rounded_circuits,
     "lissajous_swarm": _g.lissajous_swarm,
     "black_hole": _g.black_hole,
+    "pe_carpet": _g.pe_carpet,
+    "attention_arcs": _g.attention_arcs,
+    "residual_river": _g.residual_river,
 }
 
 _SKIP_PARAMS = {"rng", "bounds"}
