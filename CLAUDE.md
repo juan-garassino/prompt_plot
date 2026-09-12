@@ -210,7 +210,7 @@ Image fit rule: pictures **cover-fit** the drawable area — auto-rotated 90° t
 `iso_city` (voxel city, unit-gridded faces, hidden lines removed via front-to-back occupancy-mask claiming; `projection=2pt|1pt|iso` — real vanishing-point perspective by default, `persp` controls strength),
 `rounded_circuits` (guillotine regions filled with serpentine conveyor-belt bands — parallel lines snaking through rounded U-turns, pink/blue interlock),
 `lissajous_swarm` (phase-swept Lissajous family — sheared 3D tube/butterfly moiré; near-camera curves double-pass for depth thickness),
-`black_hole` (Luminet 1979 — EXACT elliptic-integral solver verified against bgmeulem/luminet at machine precision: direct + n=1 ghost images, near-side ellipse fallback, flux-binned pens in lines mode, photographic-plate `mode=dots` with hot/inferno pen palettes),
+`black_hole` (Luminet 1979 — EXACT elliptic-integral solver verified against bgmeulem/luminet at machine precision: direct + n=1 ghost images, near-side ellipse fallback, flux-binned pens in lines mode, photographic-plate `mode=dots` with hot/inferno pen palettes, `mode=flow` — flux-duty dashes riding the lensed isoradials with screen-space stroke spacing (`flow_spacing` mm) and variable dash lengths, photon ring double-passed in every mode),
 `pe_carpet` (sinusoidal positional-encoding matrix as a waveform carpet),
 `attention_arcs` (attention as a score of arcs: pen per head, ink passes ∝ weight; `weights=ckpt.keras` uses trained Q/K via h5py, `attn_npz=...` uses real GPT-2 attention — extract with `scripts/extract_gpt2_attention.py`),
 `residual_river` (transformer residual stream: channel lines weave at attention stations, band expands through FFN lenses, skip arcs per block).

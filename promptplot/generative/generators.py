@@ -3254,6 +3254,7 @@ def black_hole(
     flow_rings: int = 88,
     dash_mm: float = 2.4,
     flow_gamma: float = 1.35,
+    flow_spacing: float = 1.35,
     double_thresh: float = 0.74,
     feed: int = 1600,
 ) -> List[GCodeCommand]:
@@ -3449,23 +3450,30 @@ def black_hole(
         lw_lo = all_lw[int(0.05 * (len(all_lw) - 1))]
         lw_hi = all_lw[int(0.995 * (len(all_lw) - 1))]
         dash_u = dash_mm * (2.6 * r_max) / max(1.0, (x1 - x0))
+        # screen-space spacing: one pass per flow_spacing-mm cell, so converging
+        # rings thin out instead of pooling into solid black
+        u_sp = max(1e-6, flow_spacing * (2.6 * r_max) / max(1.0, (x1 - x0)))
+        occ = set()
         for pts, ws in ring_data:
             stroke, stroke_t = [], []
+            my_cells: set = set()
             acc = 0.0
             # bright zones get long flowing strokes, dim zones short ticks
             next_cell = dash_u
             drawing = False
 
             def flush():
-                nonlocal stroke, stroke_t
+                nonlocal stroke, stroke_t, my_cells
                 if len(stroke) >= 2:
                     mean_t = sum(stroke_t) / len(stroke_t)
                     wv = 10.0 ** (lw_lo + mean_t * (lw_hi - lw_lo))
                     curves.append((list(stroke), [wv] * len(stroke)))
+                    occ.update(my_cells)
                     if mean_t > double_thresh:
                         off = 0.35 * (2.6 * r_max) / max(1.0, (x1 - x0))
                         curves.append(([(px, py + off) for px, py in stroke], [wv] * len(stroke)))
                 stroke, stroke_t = [], []
+                my_cells = set()
 
             for i in range(len(pts) - 1):
                 (xa, ya), (xb, yb) = pts[i], pts[i + 1]
@@ -3487,6 +3495,12 @@ def black_hole(
                         flush()
                         drawing = False
                 if drawing:
+                    cell = (int(xb / u_sp), int(yb / u_sp))
+                    if cell in occ and cell not in my_cells:
+                        flush()
+                        drawing = False
+                        continue
+                    my_cells.add(cell)
                     if not stroke:
                         stroke.append((xa, ya))
                         stroke_t.append(t)
