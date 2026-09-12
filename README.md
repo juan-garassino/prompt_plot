@@ -25,6 +25,26 @@ uv pip install -e ".[vision]"
 uv pip install -e ".[openai]"
 uv pip install -e ".[azure]"
 uv pip install -e ".[gemini]"
+
+# With SVG/DXF import (full curve/entity fidelity; stdlib fallback parsers ship built-in)
+uv pip install -e ".[io]"
+```
+
+## Three ways to drive PromptPlot
+
+Same postprocess + plotter, three controllers:
+
+```bash
+# 1. File — replay a curated .gcode from ~/.promptplot/library/
+promptplot library list
+promptplot library play sunset --simulate
+
+# 2. LLM — supervisor-worker fan-out (dense drawings, 10k+ commands)
+promptplot draw "a dense ocean of waves" --orchestrate --regions 8 --simulate
+
+# 3. Claude Code — drives the loop externally via the pp-orchestrate skill,
+#    calling promptplot.orchestrate: plan_regions, generate_region,
+#    validate_chunk, score_chunk, stream_chunk, merge_chunks.
 ```
 
 ## Quick start
@@ -63,6 +83,36 @@ promptplot draw "a flower" --port /dev/cu.usbserial-1420 --min-grade B
 
 ```bash
 promptplot draw "a spiral galaxy" --port /dev/cu.usbserial-1420 --resume
+```
+
+**Multi-color pen (draw a color, pause to swap pens, continue):**
+
+```bash
+# LLM assigns colors; the plotter parks and waits for a keypress between colors
+promptplot draw "a red house with green grass and blue sky" --colors 3 --simulate --preview
+```
+
+**Choose the paper size:**
+
+```bash
+promptplot draw "a spiral" --paper a4 --simulate           # a3 | a4 | a5 | a6
+promptplot draw "a banner" --paper a3 --orientation landscape --simulate
+```
+
+**Seeded generative art (deterministic, no LLM):**
+
+```bash
+promptplot art --list                                       # list generators + params
+promptplot art tiled_field --seed 12345 --colors 3 --simulate --preview
+promptplot art ripple_field --seed now --paper a4 --preview # timestamp seed, printed for repro
+# same seed + params → byte-identical GCode every time
+```
+
+**Import an SVG or DXF and draw it split by color/layer:**
+
+```bash
+promptplot import logo.svg --simulate --preview             # splits by SVG stroke color
+promptplot import part.dxf --group-by layer --paper a3 --preview
 ```
 
 **Generate GCode without plotting:**
