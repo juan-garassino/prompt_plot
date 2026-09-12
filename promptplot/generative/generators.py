@@ -3257,6 +3257,17 @@ def black_hole(
     flow_gamma: float = 1.35,
     flow_spacing: float = 1.35,
     bg_lines: int = 0,
+    backdrop: str = "field",
+    sun_slits: bool = False,
+    stars: int = 0,
+    dust: int = 0,
+    orbits: int = 0,
+    planets: int = 0,
+    frame: bool = False,
+    poster: bool = False,
+    disk_pens: str = "flux",
+    glitch_strip: bool = False,
+    legend: bool = False,
     ghost_every: int = 1,
     double_thresh: float = 0.74,
     feed: int = 1600,
@@ -3449,6 +3460,7 @@ def black_hole(
             for tbl, rot in ((t_direct, 0.0), (t_ghost, math.pi)):
                 if not tbl:
                     continue
+                is_ghost = tbl is t_ghost
                 bs = [tbl.get((alpha, r), float("nan")) for alpha in alphas]
                 if sum(1 for b in bs if math.isfinite(b)) < len(bs) * 0.5:
                     continue
@@ -3461,7 +3473,7 @@ def black_hole(
                     ws.append(w)
                     if w > 0:
                         all_lw.append(math.log10(w))
-                ring_data.append((pts, ws))
+                ring_data.append((pts, ws, is_ghost))
         all_lw.sort()
         lw_lo = all_lw[int(0.05 * (len(all_lw) - 1))]
         lw_hi = all_lw[int(0.995 * (len(all_lw) - 1))]
@@ -3470,7 +3482,9 @@ def black_hole(
         # rings thin out instead of pooling into solid black
         u_sp = max(1e-6, flow_spacing * (2.6 * r_max) / max(1.0, (x1 - x0)))
         occ = set()
-        for pts, ws in ring_data:
+        for pts, ws, is_ghost in ring_data:
+            if sun_slits and is_ghost:
+                continue
             stroke, stroke_t = [], []
             my_cells: set = set()
             acc = 0.0
@@ -3483,11 +3497,20 @@ def black_hole(
                 if len(stroke) >= 2:
                     mean_t = sum(stroke_t) / len(stroke_t)
                     wv = 10.0 ** (lw_lo + mean_t * (lw_hi - lw_lo))
-                    curves.append((list(stroke), [wv] * len(stroke)))
+                    pen = None
+                    if disk_pens == "side" and colors > 1:
+                        # blue->pink gradient across the disk (reference style)
+                        mean_x = sum(px for px, _ in stroke) / len(stroke)
+                        t_side = max(0.0, min(1.0, (mean_x / (1.6 * r_max) + 1.0) / 2.0))
+                        pen = min(colors - 2, int(t_side * (colors - 1)))
+                    tail = (pen,) if pen is not None else ()
+                    curves.append((list(stroke), [wv] * len(stroke)) + tail)
                     occ.update(my_cells)
                     if mean_t > double_thresh:
                         off = 0.35 * (2.6 * r_max) / max(1.0, (x1 - x0))
-                        curves.append(([(px, py + off) for px, py in stroke], [wv] * len(stroke)))
+                        curves.append(
+                            ([(px, py + off) for px, py in stroke], [wv] * len(stroke)) + tail
+                        )
                 stroke, stroke_t = [], []
                 my_cells = set()
 
@@ -3524,49 +3547,344 @@ def black_hole(
                     stroke_t.append(t)
             flush()
 
-        if bg_lines:
-            # spacetime backdrop: continuous light-bending arcs clipped against
-            # a smooth silhouette of the disk (per-angle max radius + padding),
-            # so each line flows unbroken and a clean halo hugs the drawing
-            ex = 1.30 * max(abs(pt[0]) for pts, _ in ring_data for pt in pts)
-            ey = ex * (y1 - y0) / max(1.0, (x1 - x0))
-            NB = 72
-            sil = [0.0] * NB
-            for pts, _ in ring_data:
-                for px_, py_ in pts:
-                    bi = int(((math.atan2(py_, px_) + math.pi) / (2 * math.pi)) * NB) % NB
-                    r_ = math.hypot(px_, py_)
-                    if r_ > sil[bi]:
-                        sil[bi] = r_
-            pad = 2.6
-            base = math.sqrt(27.0) + pad
-
-            def blocked(px_, py_):
-                bi = int(((math.atan2(py_, px_) + math.pi) / (2 * math.pi)) * NB) % NB
-                lim = max(base, sil[bi] + pad, sil[(bi - 1) % NB] + pad, sil[(bi + 1) % NB] + pad)
-                return math.hypot(px_, py_) < lim
-
-            w_dim = 10.0**lw_lo
-            for li in range(bg_lines):
-                u = -1.0 + 2.0 * (li + 0.5) / bg_lines
-                yl = ey * math.copysign(1.0 - math.cos(abs(u) * math.pi / 2), u)
-                if abs(yl) < 1.0:
+        # ---- unified page field: ambient potential flow past the shadow +
+        # frame-drag swirl, blended into the lensed-ring tangents near the disk
+        gs = 0.9
+        tang = {}
+        tflux = {}
+        for pts, ws, _isg in ring_data:
+            for i in range(len(pts) - 1):
+                (xa, ya), (xb, yb) = pts[i], pts[i + 1]
+                dxs, dys = xb - xa, yb - ya
+                n = math.hypot(dxs, dys)
+                if n < 1e-9:
                     continue
-                bend2 = 170.0 / (0.35 + abs(yl) / 5.0)
-                seg_pts = []
-                for k in range(281):
-                    x = -ex + 2.0 * ex * k / 280.0
-                    y = math.copysign(math.sqrt(yl * yl + bend2 / (1.0 + (x / 14.0) ** 2)), yl)
-                    if blocked(x, y):
-                        if len(seg_pts) >= 2:
-                            curves.append((seg_pts, [w_dim] * len(seg_pts)))
-                        seg_pts = []
-                        continue
-                    seg_pts.append((x, y))
-                if len(seg_pts) >= 2:
-                    curves.append((seg_pts, [w_dim] * len(seg_pts)))
+                cellg = (int((xa + xb) / 2 / gs), int((ya + yb) / 2 / gs))
+                tang[cellg] = (dxs / n, dys / n)
+                wv = ws[i]
+                tv = 0.0
+                if wv > 0:
+                    tv = (math.log10(wv) - lw_lo) / max(1e-9, lw_hi - lw_lo)
+                tflux[cellg] = max(tflux.get(cellg, 0.0), max(0.0, min(1.0, tv)))
 
-    # shadow (photon ring critical curve) — double-passed so the ring reads
+        a2 = 6.4 * 6.4
+        swirl = 24.0
+
+        def ambient(px_, py_):
+            r2 = px_ * px_ + py_ * py_
+            if r2 < 1.0:
+                return 1.0, 0.0
+            vx = 1.0 - a2 * (px_ * px_ - py_ * py_) / (r2 * r2)
+            vy = -2.0 * a2 * px_ * py_ / (r2 * r2)
+            rr = math.sqrt(r2)
+            vx += -swirl * py_ / (r2 * rr + 60.0)
+            vy += swirl * px_ / (r2 * rr + 60.0)
+            n = math.hypot(vx, vy) or 1.0
+            return vx / n, vy / n
+
+        def field(px_, py_, hx, hy):
+            ax, ay = ambient(px_, py_)
+            ci, cj = int(px_ / gs), int(py_ / gs)
+            best, bd = None, 9.9
+            for di in range(-3, 4):
+                for dj in range(-3, 4):
+                    cc = (ci + di, cj + dj)
+                    if cc in tang:
+                        d = math.hypot(di, dj)
+                        if d < bd:
+                            bd, best = d, cc
+            if best is None:
+                return ax, ay, 0.0, 0.0
+            tx, ty = tang[best]
+            if tx * hx + ty * hy < 0:
+                tx, ty = -tx, -ty
+            k = max(0.0, 1.0 - bd / 3.4) ** 0.8
+            vx = (1.0 - k) * ax + k * tx
+            vy = (1.0 - k) * ay + k * ty
+            n = math.hypot(vx, vy) or 1.0
+            return vx / n, vy / n, k, tflux[best]
+
+        ex = 1.32 * max(abs(pt[0]) for pts, _, _ in ring_data for pt in pts)
+        ey = ex * (y1 - y0) / max(1.0, (x1 - x0))
+
+        def trace_stream(px_, py_, hdg, max_steps=900):
+            """Integrate one streamline through the blended field with dash duty."""
+            stroke = []
+            s_cells: set = set()
+            k_acc, k_n = 0.0, 1
+            acc = 0.0
+            nxt = dash_u
+            drawing = True
+
+            def emit():
+                nonlocal stroke, s_cells, k_acc, k_n
+                if len(stroke) >= 2:
+                    mean = min(1.0, k_acc / max(1, k_n))
+                    wv = 10.0 ** (lw_lo + mean * (lw_hi - lw_lo) * 0.85)
+                    curves.append((stroke, [wv] * len(stroke)))
+                    occ.update(s_cells)
+                stroke, s_cells = [], set()
+                k_acc, k_n = 0.0, 1
+
+            max_turn = 0.22
+            for _ in range(max_steps):
+                vx, vy, k, tv = field(px_, py_, math.cos(hdg), math.sin(hdg))
+                des = math.atan2(vy, vx)
+                dlt = (des - hdg + math.pi) % (2 * math.pi) - math.pi
+                hdg += max(-max_turn, min(max_turn, dlt))
+                px_ += 0.8 * math.cos(hdg)
+                py_ += 0.8 * math.sin(hdg)
+                if abs(px_) > ex or abs(py_) > ey or math.hypot(px_, py_) < 5.5:
+                    break
+                acc += 0.8
+                if acc >= nxt:
+                    acc = 0.0
+                    duty = (1.0 - k) + k * (0.12 + 0.88 * tv**1.3)
+                    nxt = dash_u * (0.5 + 1.8 * duty)
+                    want = rng.random() < duty
+                    if not want and drawing:
+                        emit()
+                        drawing = False
+                    elif want:
+                        drawing = True
+                if drawing:
+                    cell = (int(px_ / u_sp), int(py_ / u_sp))
+                    if cell in occ and cell not in s_cells:
+                        emit()
+                        drawing = False
+                        continue
+                    s_cells.add(cell)
+                    stroke.append((px_, py_))
+                    k_acc += k * tv
+                    k_n += 1
+            emit()
+
+        if bg_lines and backdrop == "mixed":
+            # poster composition: scanline field sky + perspective floor fan
+            y_hm = -0.30 * ey
+            row_gap = (ey - y_hm) / max(1, int(bg_lines * 0.7))
+            for li in range(int(bg_lines * 0.7)):
+                yl = y_hm + row_gap * (li + 0.5) + rng.uniform(-0.3, 0.3) * row_gap
+                trace_stream(-ex, yl, 0.0)
+            n_vert = 26
+            for vi in range(n_vert + 1):
+                xb_ = -ex + 2.0 * ex * vi / n_vert
+                pts_v = []
+                for si in range(61):
+                    t01 = 0.985 * si / 60.0
+                    px_ = xb_ + (0.0 - xb_) * t01
+                    py_ = -ey + (y_hm - (-ey)) * t01
+                    vx, vy, k, _tv = field(px_, py_, 0.0, 1.0)
+                    px_ += k * 2.4 * vx
+                    py_ += k * 2.4 * vy
+                    if math.hypot(px_, py_) < 6.0:
+                        if len(pts_v) >= 2:
+                            curves.append((pts_v, [10.0**lw_lo] * len(pts_v)))
+                        pts_v = []
+                        continue
+                    pts_v.append((px_, py_))
+                if len(pts_v) >= 2:
+                    curves.append((pts_v, [10.0**lw_lo] * len(pts_v)))
+
+        if orbits:
+            # dotted orbital ellipses around the hole (blueprint furniture)
+            for oi in range(orbits):
+                ra = rng.uniform(12.0, 0.92 * ex)
+                rb = ra * rng.uniform(0.5, 0.95)
+                tilt = rng.uniform(-0.5, 0.5)
+                ct, st = math.cos(tilt), math.sin(tilt)
+                seg = []
+                for si in range(241):
+                    a_ = 2 * math.pi * si / 240.0
+                    px_ = ra * math.cos(a_) * ct - rb * math.sin(a_) * st
+                    py_ = ra * math.cos(a_) * st + rb * math.sin(a_) * ct
+                    on = (si % 6) < 2  # dotted
+                    cell = (int(px_ / u_sp), int(py_ / u_sp))
+                    ok = on and abs(px_) < ex and abs(py_) < ey
+                    ok = ok and math.hypot(px_, py_) > 7.0 and cell not in occ
+                    if ok:
+                        seg.append((px_, py_))
+                    else:
+                        if len(seg) >= 2:
+                            curves.append((seg, [10.0**lw_lo] * len(seg)))
+                        seg = []
+                if len(seg) >= 2:
+                    curves.append((seg, [10.0**lw_lo] * len(seg)))
+
+        if planets:
+            for _pi in range(planets):
+                for _try in range(40):
+                    px_ = rng.uniform(-0.9 * ex, 0.9 * ex)
+                    py_ = rng.uniform(-0.9 * ey, 0.9 * ey)
+                    if math.hypot(px_, py_) < 20.0:
+                        continue
+                    cell = (int(px_ / u_sp), int(py_ / u_sp))
+                    if cell in occ:
+                        continue
+                    pr = rng.uniform(1.2, 2.4)
+                    ring = [
+                        (
+                            px_ + pr * math.cos(2 * math.pi * k_ / 36),
+                            py_ + pr * math.sin(2 * math.pi * k_ / 36),
+                        )
+                        for k_ in range(37)
+                    ]
+                    curves.append((ring, [10.0**lw_lo] * len(ring)))
+                    hy = -pr + 0.35
+                    while hy < pr - 0.2:
+                        hw = math.sqrt(max(0.0, pr * pr - hy * hy)) * 0.92
+                        curves.append(
+                            (
+                                [(px_ - hw, py_ + hy), (px_ + hw, py_ + hy)],
+                                [10.0**lw_lo, 10.0**lw_lo],
+                            )
+                        )
+                        hy += 0.5
+                    for di in range(-2, 3):
+                        for dj in range(-2, 3):
+                            occ.add((int(px_ / u_sp) + di, int(py_ / u_sp) + dj))
+                    break
+
+        if bg_lines and backdrop == "field":
+            row_gap = 2.0 * ey / bg_lines
+            for li in range(bg_lines):
+                yl = -ey + row_gap * (li + 0.5) + rng.uniform(-0.3, 0.3) * row_gap
+                trace_stream(-ex, yl, 0.0)
+
+        if bg_lines and backdrop == "grid":
+            # Tron floor: 1-pt perspective grid, vanishing point hidden behind
+            # the hole; every line rides the same blended field via short
+            # streamline integration of its sample direction
+            y_h = -0.24 * ey  # horizon
+            n_vert = max(10, bg_lines // 2)
+            for vi in range(n_vert + 1):
+                xb_ = -ex + 2.0 * ex * vi / n_vert
+                pts_v = []
+                for si in range(61):
+                    t01 = 0.985 * si / 60.0
+                    px_ = xb_ + (0.0 - xb_) * t01
+                    py_ = -ey + (y_h - (-ey)) * t01
+                    vx, vy, k, _tv = field(px_, py_, 0.0, 1.0)
+                    px_ += k * 2.2 * vx
+                    py_ += k * 2.2 * vy
+                    if math.hypot(px_, py_) < 6.0:
+                        if len(pts_v) >= 2:
+                            curves.append((pts_v, [10.0**lw_lo] * len(pts_v)))
+                        pts_v = []
+                        continue
+                    pts_v.append((px_, py_))
+                if len(pts_v) >= 2:
+                    curves.append((pts_v, [10.0**lw_lo] * len(pts_v)))
+            rho, yj = 0.80, -ey
+            for hj in range(14):
+                pts_h = []
+                for si in range(141):
+                    px_ = -ex + 2.0 * ex * si / 140.0
+                    py_ = yj
+                    vx, vy, k, _tv = field(px_, py_, 1.0, 0.0)
+                    qx = px_ + k * 2.2 * vx
+                    qy = py_ + k * 2.2 * vy
+                    if math.hypot(qx, qy) < 6.0:
+                        if len(pts_h) >= 2:
+                            curves.append((pts_h, [10.0**lw_lo] * len(pts_h)))
+                        pts_h = []
+                        continue
+                    pts_h.append((qx, qy))
+                if len(pts_h) >= 2:
+                    curves.append((pts_h, [10.0**lw_lo] * len(pts_h)))
+                yj = y_h - (y_h - yj) * rho
+            # sparse calm scanlines in the sky above the horizon
+            sky_rows = max(6, bg_lines // 5)
+            for li in range(sky_rows):
+                yl = y_h + (ey - y_h) * (li + 0.7) / (sky_rows + 0.7)
+                trace_stream(-ex, yl, 0.0)
+
+        if sun_slits and t_ghost:
+            # retro-sun collar: horizontal slit bands clipped to the ghost bulb
+            NBg = 72
+            silg = [0.0] * NBg
+            for pts, _ws, isg in ring_data:
+                if not isg:
+                    continue
+                for px_, py_ in pts:
+                    bi = int(((math.atan2(py_, px_) + math.pi) / (2 * math.pi)) * NBg) % NBg
+                    r_ = math.hypot(px_, py_)
+                    if r_ > silg[bi]:
+                        silg[bi] = r_
+            max_g = max(silg) if silg else 0.0
+            yb_ = -6.2
+            gap = 0.9
+            while yb_ > -max_g - 1.0 and max_g > 0:
+                seg = []
+                for si in range(121):
+                    px_ = -max_g + 2.0 * max_g * si / 120.0
+                    r_ = math.hypot(px_, yb_)
+                    bi = int(((math.atan2(yb_, px_) + math.pi) / (2 * math.pi)) * NBg) % NBg
+                    if 5.7 < r_ < silg[bi]:
+                        seg.append((px_, yb_))
+                    else:
+                        if len(seg) >= 2:
+                            curves.append((seg, [10.0**lw_hi * 0.5] * len(seg)))
+                        seg = []
+                if len(seg) >= 2:
+                    curves.append((seg, [10.0**lw_hi * 0.5] * len(seg)))
+                yb_ -= gap
+                gap *= 1.30
+
+        if stars:
+            # 4-point diffraction sparkles in empty sky cells
+            w_mid = 10.0 ** ((lw_lo + lw_hi) / 2.0)
+            placed_s = 0
+            tries = 0
+            while placed_s < stars and tries < stars * 60:
+                tries += 1
+                sx_ = rng.uniform(-ex * 0.97, ex * 0.97)
+                sy_ = rng.uniform(-ey * 0.97, ey * 0.97)
+                if math.hypot(sx_, sy_) < 16.0:
+                    continue
+                ci, cj = int(sx_ / u_sp), int(sy_ / u_sp)
+                if any((ci + di, cj + dj) in occ for di in range(-2, 3) for dj in range(-2, 3)):
+                    continue
+                arm = rng.uniform(0.8, 2.2)
+                star_pen = rng.randint(0, max(0, colors - 2)) if colors > 1 else None
+                for ang, ln in (
+                    (0.0, arm),
+                    (math.pi / 2, arm),
+                    (math.pi / 4, arm * 0.4),
+                    (-math.pi / 4, arm * 0.4),
+                ):
+                    dx_, dy_ = math.cos(ang) * ln, math.sin(ang) * ln
+                    entry = (
+                        [(sx_ - dx_, sy_ - dy_), (sx_ + dx_, sy_ + dy_)],
+                        [w_mid, w_mid],
+                    )
+                    curves.append(entry + ((star_pen,) if star_pen is not None else ()))
+                for di in range(-2, 3):
+                    for dj in range(-2, 3):
+                        occ.add((ci + di, cj + dj))
+                placed_s += 1
+
+        if dust:
+            w_mid = 10.0 ** ((lw_lo + lw_hi) / 2.0)
+            placed_d = 0
+            tries_d = 0
+            while placed_d < dust and tries_d < dust * 40:
+                tries_d += 1
+                sx_ = rng.uniform(-ex * 0.97, ex * 0.97)
+                sy_ = rng.uniform(-ey * 0.97, ey * 0.97)
+                if math.hypot(sx_, sy_) < 14.0:
+                    continue
+                cell = (int(sx_ / u_sp), int(sy_ / u_sp))
+                if cell in occ:
+                    continue
+                d_ = 0.14
+                dp = rng.randint(0, max(0, colors - 2)) if colors > 1 else None
+                entry = ([(sx_ - d_, sy_), (sx_ + d_, sy_)], [w_mid, w_mid])
+                curves.append(entry + ((dp,) if dp is not None else ()))
+                occ.add(cell)
+                placed_d += 1
+
+    # shadow (photon ring critical curve)    # shadow (photon ring critical curve) — double-passed so the ring reads
     b_crit = math.sqrt(27.0)
     for bc in (b_crit, b_crit + 0.09):
         curves.append(
@@ -3582,14 +3900,14 @@ def black_hole(
             )
         )
 
-    xs = [pt[0] for c, _ in curves for pt in c] + [d[0] for d in dot_pts]
-    ys = [pt[1] for c, _ in curves for pt in c] + [d[1] for d in dot_pts]
+    xs = [pt[0] for entry in curves for pt in entry[0]] + [d[0] for d in dot_pts]
+    ys = [pt[1] for entry in curves for pt in entry[0]] + [d[1] for d in dot_pts]
     sc = 0.94 * min((x1 - x0) / (max(xs) - min(xs)), (y1 - y0) / (max(ys) - min(ys)))
     mx = (max(xs) + min(xs)) / 2.0
     my = (max(ys) + min(ys)) / 2.0
 
     # pen per flux bin (log scale, bgmeulem-style): pen 0 = brightest
-    all_w = [w for _, ws in curves if ws for w in ws if w > 0] + [
+    all_w = [w for entry in curves if entry[1] for w in entry[1] if w > 0] + [
         w for _, _, w in dot_pts if w and w > 0
     ]
     if all_w and colors > 1:
@@ -3608,7 +3926,9 @@ def black_hole(
         return colors - 1 - min(colors - 1, max(0, int(t * colors)))
 
     out: List[GCodeCommand] = []
-    for pts, ws in curves:
+    for entry in curves:
+        pts, ws = entry[0], entry[1]
+        pen_over = entry[2] if len(entry) > 2 else None
         spts = [
             (_clamp(cx + (px - mx) * sc, x0, x1), _clamp(cy + (py - my) * sc, y0, y1))
             for px, py in pts
@@ -3616,6 +3936,10 @@ def black_hole(
         if colors <= 1 or not ws:
             spts, _ = _catmull_subdivide(spts)
             out += _poly(spts, color=(colors - 1 if colors > 1 else None), f=feed)
+            continue
+        if pen_over is not None:
+            spts, _ = _catmull_subdivide(spts)
+            out += _poly(spts, color=pen_over, f=feed)
             continue
         pens = [pen_of(w) for w in ws]
         spts, pens = _catmull_subdivide(spts, pens)
@@ -3643,6 +3967,70 @@ def black_hole(
             _clamp(cy + (py - my) * sc, y0, y1),
             r=dot_size,
             color=color,
+            f=feed,
+        )
+
+    if glitch_strip:
+        # VHS tear: one seeded band upper-right, sub-bands shear sideways
+        gy0 = y0 + 0.70 * (y1 - y0)
+        gy1 = y0 + 0.82 * (y1 - y0)
+        gx0 = x0 + 0.52 * (x1 - x0)
+        sub = 3.0
+        shifts = {}
+        for c in out:
+            if c.y is not None and gy0 <= c.y <= gy1 and c.x is not None and c.x >= gx0:
+                band = int((c.y - gy0) / sub)
+                if band not in shifts:
+                    shifts[band] = rng.uniform(1.2, 2.6) * rng.choice([-1.0, 1.0])
+                c.x = _clamp(c.x + shifts[band], x0, x1)
+
+    if frame or poster:
+        fc = colors - 1 if colors > 1 else None
+        out += _poly([(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)], color=fc, f=feed)
+
+    if poster:
+        fc = colors - 1 if colors > 1 else None
+        cx_m, cy_m = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+        # registration crosshairs at frame edge midpoints
+        for rx_, ry_ in ((cx_m, y1 - 3.0), (cx_m, y0 + 3.0), (x0 + 3.0, cy_m), (x1 - 3.0, cy_m)):
+            ring = [
+                (
+                    rx_ + 1.6 * math.cos(2 * math.pi * k_ / 24),
+                    ry_ + 1.6 * math.sin(2 * math.pi * k_ / 24),
+                )
+                for k_ in range(25)
+            ]
+            out += _poly(ring, color=fc, f=feed)
+            out += _poly([(rx_ - 2.4, ry_), (rx_ + 2.4, ry_)], color=fc, f=feed)
+            out += _poly([(rx_, ry_ - 2.4), (rx_, ry_ + 2.4)], color=fc, f=feed)
+
+        def spaced(txt):
+            return " ".join(txt)
+
+        th = 2.6
+        lh = th * 2.0
+        blocks = [
+            (["GRAVITY", "BENDS", "LIGHT"], x0 + 6.0, y1 - 10.0),
+            (["M 1:80", "G 6.674E-11", "C 299 792 458"], x0 + 6.0, y0 + 6.0 + 2 * lh),
+            (["EVENT HORIZON", "ACCRETION DISK", "SPACETIME"], x1 - 62.0, y0 + 6.0 + 2 * lh),
+        ]
+        for lines_, bx, by in blocks:
+            yy = by
+            for ln_ in lines_:
+                out += _stroke_text(spaced(ln_), bx, yy, th, color=fc, f=feed)
+                yy -= lh
+            out += _poly([(bx, yy + lh - 2.2), (bx + 6.0, yy + lh - 2.2)], color=fc, f=feed)
+
+    if legend:
+        text = f"SCHWARZSCHILD  M=1  I={int(round(inc_deg))}"
+        th = 3.0
+        tw = _text_width(text, th)
+        out += _stroke_text(
+            text,
+            x1 - tw - 1.5,
+            y0 + 1.0,
+            th,
+            color=(colors - 1 if colors > 1 else None),
             f=feed,
         )
     return out
@@ -4216,4 +4604,204 @@ def attention_matrix(
                     cx_ = rx + cw * (kk + 0.5)
                     color = (0 if w > 0.4 else 1) % colors if colors > 1 else None
                     out += _poly([(cx_ - ln, cy_ - ln), (cx_ + ln, cy_ + ln)], color=color, f=feed)
+    return out
+
+
+def black_hole_bauhaus(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    inclination: float = 72.0,
+    n_iso: int = 26,
+    r_max: float = 28.0,
+    samples: int = 160,
+    bar_w: float = 9.0,
+    fill_mm: float = 0.55,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """Bauhaus black hole: the exact Luminet isoradials as a clean nested ring
+    family (blue left | pink right), a solid-filled shadow disc, a full-height
+    black bar the rings vanish behind, quarter-disc stack, orbit circles,
+    crosshair rules, swatch bar and spaced-caps type. Pens: 0=blue, 1=pink,
+    2=black (fills, furniture, type). Flat, geometric, reduced.
+    """
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    ex = 34.0
+    ey = ex * H / W
+    sc = W / (2.0 * ex)
+    inc = math.radians(inclination)
+
+    def mm(px, py):
+        return (x0 + (px + ex) * sc, y0 + (py + ey) * sc)
+
+    out: List[GCodeCommand] = []
+    BLUE, PINK, BLACK = 0 % colors, 1 % colors, (colors - 1)
+
+    def poly_u(pts, pen):
+        out.extend(_poly([mm(px, py) for px, py in pts], color=pen, f=feed))
+
+    # ---- furniture behind everything: rules + orbits
+    poly_u([(-ex + 0.5, 0.0), (ex - 0.5, 0.0)], BLACK)
+    for vx_ in (-17.0, 13.0):
+        poly_u([(vx_, -ey + 0.5), (vx_, ey - 0.5)], BLACK)
+    ring = [
+        (
+            2.0 + 19.0 * math.cos(2 * math.pi * k / 160),
+            -2.0 + 19.0 * math.sin(2 * math.pi * k / 160),
+        )
+        for k in range(161)
+    ]
+    ring = [(px, py) for px, py in ring if abs(px) < ex - 0.5 and abs(py) < ey - 0.5]
+    poly_u(ring, BLACK)
+    seg = []
+    for k in range(241):
+        a_ = 2 * math.pi * k / 240
+        px, py = -1.0 + 23.0 * math.cos(a_), 2.0 + 23.0 * math.sin(a_)
+        if (k % 6) < 2 and abs(px) < ex - 0.5 and abs(py) < ey - 0.5:
+            seg.append((px, py))
+        else:
+            if len(seg) >= 2:
+                poly_u(seg, BLACK)
+            seg = []
+    if len(seg) >= 2:
+        poly_u(seg, BLACK)
+
+    # ---- solid vertical bar (serpentine fill), gap at the shadow
+    fill_u = fill_mm / sc
+    bx = 0.0
+    xw = bar_w / 2.0
+    xf = bx - xw
+    while xf <= bx + xw:
+        seg = []
+        yv = -ey + 0.4
+        while yv <= ey - 0.4:
+            if math.hypot(xf, yv) > 6.1:
+                seg.append((xf, yv))
+            else:
+                if len(seg) >= 2:
+                    poly_u(seg, BLACK)
+                seg = []
+            yv += 0.8
+        if len(seg) >= 2:
+            poly_u(seg, BLACK)
+        xf += fill_u
+
+    # ---- Luminet ring family, side-split pens, clipped behind the bar
+    alphas = [2.0 * math.pi * k / samples for k in range(samples + 1)]
+    rings_r = [6.0 * (r_max / 6.0) ** (k / max(1, n_iso - 1)) for k in range(n_iso)]
+    tbl = _luminet_b_table(inc, 0, alphas, rings_r)
+    for r in rings_r:
+        bs = [tbl.get((a, r), float("nan")) for a in alphas]
+        if sum(1 for b in bs if math.isfinite(b)) < len(bs) * 0.5:
+            continue
+        run = []
+        run_pen = None
+        for a, b in zip(alphas, bs):
+            if not math.isfinite(b):
+                continue
+            px = b * math.cos(a - math.pi / 2)
+            py = b * math.sin(a - math.pi / 2)
+            pen = BLUE if px < 0 else PINK
+            hidden = abs(px - bx) < xw + 0.6 or abs(px) > ex - 0.5 or abs(py) > ey - 0.5
+            if hidden or (run_pen is not None and pen != run_pen):
+                if len(run) >= 2:
+                    sm, _ = _catmull_subdivide(run)
+                    poly_u(sm, run_pen)
+                run = [] if hidden else run[-1:]
+                run_pen = pen
+            if not hidden:
+                if run_pen is None:
+                    run_pen = pen
+                run.append((px, py))
+        if len(run) >= 2:
+            sm, _ = _catmull_subdivide(run)
+            poly_u(sm, run_pen)
+
+    # ---- solid shadow disc (spiral fill) + broken photon-ring arcs
+    turns = int(5.0 / fill_u)
+    spiral = []
+    for k in range(turns * 40 + 1):
+        t = k / (turns * 40.0)
+        rr = 5.0 * t
+        a_ = 2 * math.pi * turns * t
+        spiral.append((rr * math.cos(a_), rr * math.sin(a_)))
+    poly_u(spiral, BLACK)
+    for a0_, a1_ in (
+        (math.radians(100), math.radians(320)),
+        (math.radians(345), math.radians(430)),
+    ):
+        arc = []
+        k = a0_
+        while k <= a1_:
+            arc.append((6.1 * math.cos(k), 6.1 * math.sin(k)))
+            k += 0.05
+        poly_u(arc, BLACK)
+
+    # ---- quarter-disc stack (lower left) + dots + plus marks + swatches
+    qc = (-17.0, -12.0)
+
+    def quarter_fill(cx_, cy_, rr, a_start):
+        r_ = rr
+        while r_ > 0.3:
+            arc = []
+            k = a_start
+            while k <= a_start + math.pi / 2 + 1e-6:
+                arc.append((cx_ + r_ * math.cos(k), cy_ + r_ * math.sin(k)))
+                k += 0.08
+            poly_u(arc, BLACK)
+            r_ -= fill_u
+
+    quarter_fill(qc[0], qc[1], 4.5, math.pi)  # SW solid
+    quarter_fill(qc[0], qc[1], 4.5, 0.0)  # NE solid
+    arc = [
+        (
+            qc[0] + 7.0 * math.cos(k / 40 * (math.pi / 2) + math.pi),
+            qc[1] + 7.0 * math.sin(k / 40 * (math.pi / 2) + math.pi),
+        )
+        for k in range(41)
+    ]
+    poly_u(arc, BLACK)
+    # planet on the dotted orbit + small dot
+    for dx_, dy_, rr in ((13.0, 14.0, 1.9), (-17.0, -15.5, 0.7)):
+        rr_ = rr
+        while rr_ > 0.15:
+            ring = [
+                (
+                    dx_ + rr_ * math.cos(2 * math.pi * k / 36),
+                    dy_ + rr_ * math.sin(2 * math.pi * k / 36),
+                )
+                for k in range(37)
+            ]
+            poly_u(ring, BLACK)
+            rr_ -= fill_u
+    for mx_, my_ in ((-30.0, 9.0), (30.0, -12.0)):
+        poly_u([(mx_ - 0.9, my_), (mx_ + 0.9, my_)], BLACK)
+        poly_u([(mx_, my_ - 0.9), (mx_, my_ + 0.9)], BLACK)
+    # swatch bar top-left: black / blue / pink filled squares
+    sy = ey - 3.0
+    for pen in (BLACK, BLUE, PINK):
+        yy = sy
+        while yy > sy - 2.2:
+            poly_u([(-31.5, yy), (-29.7, yy)], pen)
+            yy -= fill_u
+        sy -= 2.9
+
+    # ---- type (post-scale, mm)
+    def spaced(t):
+        return " ".join(t)
+
+    th = 2.6
+    lh = th * 2.0
+    fx = x0 + (ex - 13.0) * sc  # top right block x
+    yy = y1 - 6.0
+    for ln in ("GRAVITY", "IN", "BALANCE"):
+        out.extend(_stroke_text(spaced(ln), fx, yy, th, color=BLACK, f=feed))
+        yy -= lh
+    out.extend(_poly([(fx, yy + lh - 2.0), (fx + 5.0, yy + lh - 2.0)], color=BLACK, f=feed))
+    yy = y0 + 6.0 + 3 * lh
+    for ln in ("MASS", "CURVES", "SPACE", "TIME"):
+        out.extend(_stroke_text(spaced(ln), x0 + 5.0, yy, th, color=BLACK, f=feed))
+        yy -= lh
+    out.extend(_stroke_text(spaced("M 1:80"), x1 - 32.0, y0 + 5.0, th, color=BLACK, f=feed))
     return out

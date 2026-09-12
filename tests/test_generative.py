@@ -61,6 +61,7 @@ def test_all_generators_registered():
         "residual_river",
         "weight_matrix",
         "attention_matrix",
+        "black_hole_bauhaus",
     ]:
         assert expected in gens
 
@@ -104,6 +105,7 @@ def test_all_generators_registered():
         "residual_river",
         "weight_matrix",
         "attention_matrix",
+        "black_hole_bauhaus",
     ],
 )
 def test_generator_deterministic_and_nonempty(name):
@@ -183,6 +185,7 @@ def test_different_seed_differs(name):
         "residual_river",
         "weight_matrix",
         "attention_matrix",
+        "black_hole_bauhaus",
     ],
 )
 def test_generator_within_bounds(name):
@@ -330,6 +333,49 @@ def test_every_attractor_system_healthy(system):
     assert len(cmds) > 50, f"{system} produced too little"
     assert a == b, f"{system} not deterministic"
     for c in cmds:
+        if c.x is not None:
+            assert BOUNDS[0] - 0.5 <= c.x <= BOUNDS[2] + 0.5
+        if c.y is not None:
+            assert BOUNDS[1] - 0.5 <= c.y <= BOUNDS[3] + 0.5
+
+
+def test_black_hole_retro80_smoke():
+    a = run_generator(
+        "black_hole",
+        BOUNDS,
+        seed=5,
+        params=dict(
+            mode="flow",
+            bg_lines=8,
+            backdrop="grid",
+            stars=6,
+            sun_slits=True,
+            legend=True,
+            glitch_strip=True,
+            samples=40,
+            n_iso=8,
+            flow_rings=24,
+        ),
+    )
+    b = run_generator(
+        "black_hole",
+        BOUNDS,
+        seed=5,
+        params=dict(
+            mode="flow",
+            bg_lines=8,
+            backdrop="grid",
+            stars=6,
+            sun_slits=True,
+            legend=True,
+            glitch_strip=True,
+            samples=40,
+            n_iso=8,
+            flow_rings=24,
+        ),
+    )
+    assert a and [c.to_gcode() for c in a] == [c.to_gcode() for c in b]
+    for c in a:
         if c.x is not None:
             assert BOUNDS[0] - 0.5 <= c.x <= BOUNDS[2] + 0.5
         if c.y is not None:
