@@ -120,6 +120,96 @@ def fill_ring(
 
 
 # ---------------------------------------------------------------------------
+# geometry: runs, clipping (crop-at-frame + knockouts), cover-fit
+# ---------------------------------------------------------------------------
+
+
+def _runs_from_cmds(cmds: Sequence[GCodeCommand]) -> List[List[Tuple[float, float]]]:
+    """Extract pen-down polylines from a command list."""
+    runs: List[List[Tuple[float, float]]] = []
+    cur: List[Tuple[float, float]] = []
+    for c in cmds:
+        if c.command == "G0":
+            if len(cur) >= 2:
+                runs.append(cur)
+            cur = [(c.x, c.y)] if c.x is not None else []
+        elif c.command == "G1" and c.x is not None:
+            cur.append((c.x, c.y))
+    if len(cur) >= 2:
+        runs.append(cur)
+    return runs
+
+
+def _cut(inside, outside, keep, iters=14):
+    """Bisect the crossing point between an inside and an outside point."""
+    a, b = inside, outside
+    for _ in range(iters):
+        m = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+        if keep(m):
+            a = m
+        else:
+            b = m
+    return a
+
+
+def _clip_runs(runs, keep) -> List[List[Tuple[float, float]]]:
+    """Clip polylines to a boolean keep-region, cutting segments at the edge."""
+    out: List[List[Tuple[float, float]]] = []
+    for pts in runs:
+        cur: List[Tuple[float, float]] = []
+        for i, p in enumerate(pts):
+            if i == 0:
+                if keep(p):
+                    cur.append(p)
+                continue
+            a = pts[i - 1]
+            ka, kb = keep(a), keep(p)
+            if ka and kb:
+                if not cur:
+                    cur = [a]
+                cur.append(p)
+            elif ka and not kb:
+                if not cur:
+                    cur = [a]
+                cur.append(_cut(a, p, keep))
+                if len(cur) >= 2:
+                    out.append(cur)
+                cur = []
+            elif kb and not ka:
+                cur = [_cut(p, a, keep), p]
+        if len(cur) >= 2:
+            out.append(cur)
+    return out
+
+
+def _rect_keep(region: Bounds, inset: float = 0.0):
+    rx0, ry0, rx1, ry1 = region
+    return lambda p: rx0 + inset <= p[0] <= rx1 - inset and ry0 + inset <= p[1] <= ry1 - inset
+
+
+def _fit_runs_cover(runs, target: Bounds) -> List[List[Tuple[float, float]]]:
+    """Uniform-scale + recenter runs so their bbox COVERS the target rect
+    (overshoots on one axis — made for cropping at the frame)."""
+    xs = [p[0] for r in runs for p in r]
+    ys = [p[1] for r in runs for p in r]
+    if not xs:
+        return runs
+    bx0, bx1, by0, by1 = min(xs), max(xs), min(ys), max(ys)
+    tx0, ty0, tx1, ty1 = target
+    s = max((tx1 - tx0) / max(1e-9, bx1 - bx0), (ty1 - ty0) / max(1e-9, by1 - by0))
+    bcx, bcy = (bx0 + bx1) / 2, (by0 + by1) / 2
+    tcx, tcy = (tx0 + tx1) / 2, (ty0 + ty1) / 2
+    return [[(tcx + (px - bcx) * s, tcy + (py - bcy) * s) for px, py in r] for r in runs]
+
+
+def _emit_runs(runs, pen: Optional[int], f: int = 2200) -> List[GCodeCommand]:
+    out: List[GCodeCommand] = []
+    for r in runs:
+        out += _poly(r, color=pen, f=f)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # furniture
 # ---------------------------------------------------------------------------
 
@@ -256,34 +346,28 @@ def bauhaus_attractor(
     steps: int = 16000,
     feed: int = 2200,
 ) -> List[GCodeCommand]:
-    """One continuous chaotic trajectory in black; solid blue/pink discs sit in
-    the empty eyes of the two lobes; a solid bar holds the left edge."""
+    """A full-bleed black column at the quarter line; one huge chaotic
+    trajectory bursts out of it, cropped at the frame on three sides; solid
+    blue/pink discs plug the true empty eyes of the two lobes."""
     x0, y0, x1, y1 = bounds
     W, H = x1 - x0, y1 - y0
     out: List[GCodeCommand] = []
     blue, pink, black = _pen(BLUE, colors), _pen(PINK, colors), _pen(BLACK, colors)
 
-    bar_x0 = x0 + 0.03 * W
-    bar_x1 = bar_x0 + 0.085 * W
-    out += fill_rect(bar_x0, y0 + 0.5, bar_x1, y1 - 0.5, spacing=0.6, pen=black, f=feed)
+    # the column: full-bleed top and bottom, right edge on the 0.30 line
+    xA = x0 + 0.30 * W
+    out += fill_rect(xA - 0.09 * W, y0, xA, y1, spacing=0.6, pen=black, f=feed)
 
-    sub = (x0 + 0.24 * W, y0 + 0.12 * H, x1 - 0.02 * W, y1 - 0.12 * H)
-    traj = strange_attractor(rng, sub, colors=1, system=system, steps=steps)
-    for c in traj:
-        if c.command in ("M3", "G1", "G0"):
-            c.color = black
-    scx, scy = (sub[0] + sub[2]) / 2, (sub[1] + sub[3]) / 2
-    out += dotted_circle(scx, scy, 0.46 * H, pen=black, bounds=bounds, f=feed)
+    # chaos field: everything right of the column, cropped at the frame
+    field = (xA, y0, x1, y1)
+    keep = _rect_keep(field)
+    target = (xA - 0.04 * W, y0 - 0.09 * H, x1 + 0.08 * W, y1 + 0.09 * H)
 
-    pts = [(c.x, c.y) for c in traj if c.command == "G1" and c.x is not None]
-    if pts:
-        # 2-means on the trajectory: centers land in the two lobe eyes
-        xs_ = sorted(px for px, _ in pts)
-        c_a = pts[len(pts) // 4]
-        c_b = pts[3 * len(pts) // 4]
+    def kmeans2(samp, seed_pts):
+        c_a, c_b = seed_pts
         for _ in range(12):
             ga, gb = [], []
-            for px, py in pts[:: max(1, len(pts) // 3000)]:
+            for px, py in samp:
                 da = (px - c_a[0]) ** 2 + (py - c_a[1]) ** 2
                 db = (px - c_b[0]) ** 2 + (py - c_b[1]) ** 2
                 (ga if da < db else gb).append((px, py))
@@ -291,16 +375,85 @@ def bauhaus_attractor(
                 c_a = (sum(p_[0] for p_ in ga) / len(ga), sum(p_[1] for p_ in ga) / len(ga))
             if gb:
                 c_b = (sum(p_[0] for p_ in gb) / len(gb), sum(p_[1] for p_ in gb) / len(gb))
-        left, right = sorted((c_a, c_b), key=lambda c_: c_[0])
-        out += fill_disc(left[0], left[1], 5.5, spacing=0.5, pen=blue, f=feed)
-        out += fill_disc(right[0], right[1], 5.5, spacing=0.5, pen=pink, f=feed)
-    out += traj
+        return c_a, c_b
 
-    out += type_block(["SENSITIVE", "DEPENDENCE"], bar_x1 + 6.0, y1 - 6.0, pen=black, f=feed)
-    out += swatch_bar(bar_x1 + 6.0, y1 - 22.0, [black, blue, pink], f=feed)
-    out += plus_mark(x1 - 10.0, y1 - 10.0, pen=black, f=feed)
-    out += plus_mark(bar_x1 + 8.0, y0 + 12.0, pen=black, f=feed)
-    out += scale_footer(bounds, pen=black, f=feed)
+    def eye(c, samp):
+        # largest empty circle near c: the disc must sit IN the lobe eye
+        best, bestd = c, 0.0
+        step = 0.017 * min(W, H)
+        for gi in range(-5, 6):
+            for gj in range(-5, 6):
+                q = (c[0] + gi * step, c[1] + gj * step)
+                if not keep(q):
+                    continue
+                d = min(math.hypot(q[0] - p[0], q[1] - p[1]) for p in samp)
+                if d > bestd:
+                    bestd, best = d, q
+        return best, bestd
+
+    # try 3 seeded projections of the same chaos; PCA-align the lobe axis to a
+    # slight diagonal, then keep the projection with the deepest eyes + best
+    # coverage of the field
+    best_pick = None
+    tilt = math.radians(9.0)
+    for _cand in range(3):
+        traj = strange_attractor(rng, bounds, colors=1, system=system, steps=steps)
+        runs0 = _runs_from_cmds(traj)
+        raw = [p for r in runs0 for p in r]
+        if not raw:
+            continue
+        rs = raw[:: max(1, len(raw) // 1500)]
+        mx = sum(p[0] for p in rs) / len(rs)
+        my = sum(p[1] for p in rs) / len(rs)
+        sxx = sum((p[0] - mx) ** 2 for p in rs)
+        syy = sum((p[1] - my) ** 2 for p in rs)
+        sxy = sum((p[0] - mx) * (p[1] - my) for p in rs)
+        ang = 0.5 * math.atan2(2 * sxy, sxx - syy)
+        ca_, sa_ = math.cos(tilt - ang), math.sin(tilt - ang)
+        rot = [
+            [
+                (mx + (px - mx) * ca_ - (py - my) * sa_, my + (px - mx) * sa_ + (py - my) * ca_)
+                for px, py in r
+            ]
+            for r in runs0
+        ]
+        runs = _clip_runs(_fit_runs_cover(rot, target), keep)
+        pts = [p for r in runs for p in r]
+        if not pts:
+            continue
+        samp = pts[:: max(1, len(pts) // 1000)]
+        c_a, c_b = kmeans2(samp, (pts[len(pts) // 4], pts[3 * len(pts) // 4]))
+        (ea, da_), (eb, db_) = eye(c_a, samp), eye(c_b, samp)
+        sep = math.hypot(ea[0] - eb[0], ea[1] - eb[1])
+        gx, gy = 10, 7
+        cells = set()
+        for px, py in samp:
+            cells.add(
+                (
+                    min(gx - 1, int((px - xA) / max(1e-9, x1 - xA) * gx)),
+                    min(gy - 1, int((py - y0) / max(1e-9, y1 - y0) * gy)),
+                )
+            )
+        coverage = len(cells) / float(gx * gy)
+        score = min(da_, db_) + 0.10 * sep + 30.0 * coverage
+        if best_pick is None or score > best_pick[0]:
+            best_pick = (score, runs, (ea, da_), (eb, db_))
+
+    if best_pick is not None:
+        _, runs, eye_a, eye_b = best_pick
+        left, right = sorted((eye_a, eye_b), key=lambda t: t[0][0])
+        for (ec, ed), pen, shrink in ((left, blue, 1.0), (right, pink, 0.72)):
+            r = max(3.5, min(ed + 1.5, 15.0)) * shrink
+            r = min(r, ec[0] - xA - 0.6, x1 - ec[0] - 0.6, ec[1] - y0 - 0.6, y1 - ec[1] - 0.6)
+            if r > 2.0:
+                out += fill_disc(ec[0], ec[1], r, spacing=0.5, pen=pen, f=feed)
+        out += _emit_runs(runs, black, f=feed)
+
+    # left margin column: one axis for type, swatches, footer
+    xT = x0 + 0.015 * W
+    out += type_block(["SENSITIVE", "DEPENDENCE"], xT, y1 - 7.0, height=3.0, pen=black, f=feed)
+    out += swatch_bar(xT, y1 - 23.0, [black, blue, pink], size=3.2, f=feed)
+    out += _stroke_text(_spaced("M 1:80"), xT, y0 + 2.0, 2.2, color=black, f=feed)
     return out
 
 
@@ -320,12 +473,14 @@ def bauhaus_attention(
     block: int = 5,
     feed: int = 2200,
 ) -> List[GCodeCommand]:
-    """Token circle with straight attention chords; every chord into the sink
-    token is bold pink; the sink itself is a solid blue disc."""
+    """A huge token ring cropped at three frame edges; the ring is rotated so
+    the sink token lands on the left axis as one big solid blue disc, and the
+    strongest chords into it run pink — a directional wedge of attention."""
     x0, y0, x1, y1 = bounds
     W, H = x1 - x0, y1 - y0
     out: List[GCodeCommand] = []
     blue, pink, black = _pen(BLUE, colors), _pen(PINK, colors), _pen(BLACK, colors)
+    frame_keep = _rect_keep(bounds)
 
     A = None
     if attn_npz:
@@ -339,50 +494,77 @@ def bauhaus_attention(
     if A is None:
         A = _attention_matrix(rng, tokens, 0, temp, True, "", 0)
 
-    ccx, ccy = x0 + 0.56 * W, y0 + 0.52 * H
-    R = min(0.40 * H, 0.34 * W, x1 - ccx - 6.0, ccx - x0 - 6.0)
-    pos = [
-        (
-            ccx + R * math.cos(2 * math.pi * t / tokens - math.pi / 2),
-            ccy + R * math.sin(2 * math.pi * t / tokens - math.pi / 2),
-        )
-        for t in range(tokens)
-    ]
     col_mass = [sum(float(A[q][k]) for q in range(tokens)) for k in range(tokens)]
     sink = max(range(tokens), key=lambda k: col_mass[k])
 
-    out += dotted_circle(ccx, ccy, R + 7.0, pen=black, bounds=bounds, f=feed)
+    # ring center right of middle; radius huge so the ring crops at the frame;
+    # phase rotated so the sink token sits on the left axis at mid-height
+    ccx, ccy = x0 + 0.62 * W, y0 + 0.46 * H
+    R = min(0.66 * H, 0.60 * W)
+    phase = math.pi - 2 * math.pi * sink / tokens
+    pos = [
+        (
+            ccx + R * math.cos(2 * math.pi * t / tokens + phase),
+            ccy + R * math.sin(2 * math.pi * t / tokens + phase),
+        )
+        for t in range(tokens)
+    ]
+    sk = pos[sink]
+    r_sink = min(10.0, sk[0] - x0 - 0.8, x1 - sk[0] - 0.8, sk[1] - y0 - 0.8, y1 - sk[1] - 0.8)
+    r_sink = max(1.5, r_sink)
+
+    out += dotted_circle(ccx, ccy, R, pen=black, bounds=bounds, f=feed)
+
+    # chords into the sink, ranked: top 12 pink (top 3 of those triple-pass),
+    # the next 12 thin black, the rest dropped — no fan flood
+    into_sink = []
+    plain = []
     for q in range(tokens):
         row = sorted(range(tokens), key=lambda k: -float(A[q][k]))[:topk]
         for k in row:
             if k == q or float(A[q][k]) < 0.03:
                 continue
-            (xa, ya), (xb, yb) = pos[k], pos[q]
             if k == sink:
-                dx, dy = xb - xa, yb - ya
-                n = math.hypot(dx, dy) or 1.0
-                oxp, oyp = -dy / n * 0.28, dx / n * 0.28
-                for pp in (-1, 0, 1):
-                    out += _poly(
-                        [(xa + oxp * pp, ya + oyp * pp), (xb + oxp * pp, yb + oyp * pp)],
-                        color=pink,
-                        f=feed,
-                    )
+                into_sink.append((float(A[q][k]), q))
             else:
-                out += _poly([(xa, ya), (xb, yb)], color=black, f=feed)
+                plain.append((k, q))
+    into_sink.sort(reverse=True)
+
+    for k, q in plain:
+        if q == sink:
+            continue
+        for seg in _clip_runs([[pos[k], pos[q]]], frame_keep):
+            out += _poly(seg, color=black, f=feed)
+
+    for rank, (_w, q) in enumerate(into_sink[:24]):
+        xb, yb = pos[q]
+        dx, dy = xb - sk[0], yb - sk[1]
+        n = math.hypot(dx, dy) or 1.0
+        ax_, ay_ = sk[0] + dx / n * (r_sink + 1.0), sk[1] + dy / n * (r_sink + 1.0)
+        if rank < 12:
+            passes = 3 if rank < 3 else 1
+            for pp in range(passes):
+                o = (pp - (passes - 1) / 2) * 0.32
+                oxp, oyp = -dy / n * o, dx / n * o
+                for seg in _clip_runs([[(ax_ + oxp, ay_ + oyp), (xb + oxp, yb + oyp)]], frame_keep):
+                    out += _poly(seg, color=pink, f=feed)
+        else:
+            for seg in _clip_runs([[(ax_, ay_), (xb, yb)]], frame_keep):
+                out += _poly(seg, color=black, f=feed)
+
     for t in range(tokens):
         if t == sink:
-            out += fill_disc(pos[t][0], pos[t][1], 4.0, spacing=0.5, pen=blue, f=feed)
-        else:
-            out += fill_disc(pos[t][0], pos[t][1], 1.1, spacing=0.45, pen=black, f=feed)
+            continue
+        px, py = pos[t]
+        if x0 + 2.2 < px < x1 - 2.2 and y0 + 2.2 < py < y1 - 2.2:
+            out += fill_disc(px, py, 1.4, spacing=0.45, pen=black, f=feed)
+    out += fill_disc(sk[0], sk[1], r_sink, spacing=0.5, pen=blue, f=feed)
 
-    qx, qy = x0 + 0.10 * W, y0 + 0.22 * H
-    out += fill_quarter(qx, qy, 5.0, math.pi, pen=black, f=feed)
-    out += fill_quarter(qx, qy, 5.0, 0.0, pen=pink, f=feed)
-    out += type_block(["ATTENTION"], x0 + 5.0, y1 - 6.0, pen=black, f=feed)
-    out += swatch_bar(x0 + 5.0, y1 - 16.0, [black, blue, pink], f=feed)
-    out += plus_mark(x1 - 9.0, y0 + 12.0, pen=black, f=feed)
-    out += scale_footer(bounds, pen=black, f=feed)
+    # left axis: type over the sink, swatches, footer
+    xT = x0 + 0.015 * W
+    out += type_block(["ATTENTION"], xT, y1 - 7.0, height=2.8, pen=black, f=feed)
+    out += swatch_bar(xT, y1 - 17.0, [black, blue, pink], size=3.2, f=feed)
+    out += _stroke_text(_spaced("M 1:80"), xT, y0 + 2.0, 2.2, color=black, f=feed)
     return out
 
 

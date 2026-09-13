@@ -53,6 +53,7 @@ GENERATOR_REGISTRY = {
     "weight_matrix": _g.weight_matrix,
     "attention_matrix": _g.attention_matrix,
     "black_hole_bauhaus": _g.black_hole_bauhaus,
+    "big_bang": _g.big_bang,
     "bauhaus_attractor": _b.bauhaus_attractor,
     "bauhaus_attention": _b.bauhaus_attention,
     "bauhaus_weights": _b.bauhaus_weights,
@@ -63,9 +64,31 @@ GENERATOR_REGISTRY = {
 
 _SKIP_PARAMS = {"rng", "bounds"}
 
+# Two kinds of art (see ARCHITECTURE.md): GENERATORS are parametric families
+# where the seed is a creative axis; COMPOSITIONS are designed singletons where
+# the seed only fine-tunes detail. Everything not listed here is a generator.
+COMPOSITIONS = {
+    "black_hole_bauhaus",
+    "big_bang",
+    "bauhaus_attractor",
+    "bauhaus_attention",
+    "bauhaus_weights",
+    "bauhaus_perceptron",
+    "bauhaus_gradient",
+    "bauhaus_resonance",
+}
 
-def list_generators() -> List[str]:
-    return sorted(GENERATOR_REGISTRY)
+
+def generator_kind(name: str) -> str:
+    """ "generator" (parametric family) | "composition" (designed singleton)."""
+    return "composition" if name in COMPOSITIONS else "generator"
+
+
+def list_generators(kind: Optional[str] = None) -> List[str]:
+    names = sorted(GENERATOR_REGISTRY)
+    if kind is not None:
+        names = [n for n in names if generator_kind(n) == kind]
+    return names
 
 
 def get_generator_schema(name: str) -> Dict[str, Any]:

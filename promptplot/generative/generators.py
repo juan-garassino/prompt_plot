@@ -4805,3 +4805,326 @@ def black_hole_bauhaus(
         yy -= lh
     out.extend(_stroke_text(spaced("M 1:80"), x1 - 32.0, y0 + 5.0, th, color=BLACK, f=feed))
     return out
+
+
+# ---------------------------------------------------------------------------
+# 43. big_bang — source/sink dipole cosmology (astro series 01)
+# ---------------------------------------------------------------------------
+
+
+def big_bang(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 4,
+    n_lines: int = 24,
+    sink_lines: int = 16,
+    tilt_deg: float = 24.0,
+    burst: int = 220,
+    braid: int = 7,
+    labels: bool = True,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """BIG BANG → GREAT ATTRACTOR: an unequal 2D dipole on a giant dotted
+    celestial sphere that crops at the left and top frame edges. A dominant
+    green eruption (spiral core, ray burst, broken shock arcs, Hubble-scaled
+    particle dashes) throws field lines that mostly ESCAPE the sphere with
+    arrowheads — a minority bundle falls down the diagonal into a small red
+    spoked attractor hub. A gold dashed braid rides the connecting field line,
+    dashes lengthening as they accelerate into the sink. The hub is locked by
+    a hairline leader to the left edge of the right-aligned caption; all type
+    sits on one baseline grid above a full-width rule. The sphere's limb is
+    tangent to an empty right column of paper. Pens: 0=source (green),
+    1=sink (red), 2=braid (gold), 3=sphere/type (gray).
+    """
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    GREEN = 0 % colors if colors > 1 else None
+    RED = 1 % colors if colors > 1 else None
+    GOLD = 2 % colors if colors > 1 else None
+    GRAY = (colors - 1) if colors > 1 else None
+    out: List[GCodeCommand] = []
+
+    # ---- layout: sphere cropped top-left, tangent to a quiet right column
+    band_top = (y0 + 26.0) if labels else y0
+    cx = x0 + 0.22 * W
+    cy = y0 + 0.64 * H
+    R = 0.68 * W
+    ins = 1.5
+    lo_y = max(y0 + ins, band_top + 2.0)
+
+    def in_frame(px, py):
+        return x0 + ins <= px <= x1 - ins and lo_y <= py <= y1 - ins
+
+    # source A: dominant mass upper-left. sink B: small hub lower-right whose
+    # x is the left edge of the "GREAT ATTRACTOR" caption (shared grid line).
+    A = (cx + 0.06 * R, cy + 0.50 * R)
+    lh2 = min(3.4, 0.026 * W)
+    tw2 = _text_width("GREAT ATTRACTOR", lh2)
+    B = (min(x1 - tw2, cx + 0.78 * R), cy - 0.48 * R)
+
+    # ---- unequal dipole: source outshines sink, so most lines escape
+    SA, SB = 1.0, 0.32
+
+    def field(px, py):
+        dax, day = px - A[0], py - A[1]
+        dbx, dby = px - B[0], py - B[1]
+        ra2 = dax * dax + day * day + 3.0
+        rb2 = dbx * dbx + dby * dby + 3.0
+        vx = SA * dax / ra2 - SB * dbx / rb2
+        vy = SA * day / ra2 - SB * dby / rb2
+        n = math.hypot(vx, vy) or 1.0
+        return vx / n, vy / n
+
+    def trace(start, direction, max_steps=900, src_stop=6.8, snk_stop=7.0, max_range=None):
+        px, py = start
+        pts = [(px, py)]
+        end = "steps"
+        vx, vy = 0.0, 1.0
+        for _ in range(max_steps):
+            vx, vy = field(px, py)
+            px += 1.1 * vx * direction
+            py += 1.1 * vy * direction
+            if max_range is not None and math.hypot(px - start[0], py - start[1]) > max_range:
+                end = "range"
+                break
+            if math.hypot(px - B[0], py - B[1]) < snk_stop:
+                pts.append((px, py))
+                end = "sink"
+                break
+            if math.hypot(px - A[0], py - A[1]) < src_stop:
+                end = "source"
+                break
+            hit_sphere = math.hypot(px - cx, py - cy) > 0.985 * R
+            hit_frame = not in_frame(px, py)
+            if hit_sphere or hit_frame:
+                px = min(max(px, x0 + ins), x1 - ins)
+                py = min(max(py, lo_y), y1 - ins)
+                pts.append((px, py))
+                end = "sphere" if hit_sphere and not hit_frame else "frame"
+                break
+            pts.append((px, py))
+        return pts, end, (vx * direction, vy * direction)
+
+    def arrow(px, py, dx, dy, pen, wing=2.6):
+        a = math.atan2(dy, dx)
+        for da in (math.radians(152), math.radians(-152)):
+            ex = min(max(px + wing * math.cos(a + da), x0 + ins), x1 - ins)
+            ey = min(max(py + wing * math.sin(a + da), lo_y), y1 - ins)
+            out.extend(_poly([(px, py), (ex, ey)], color=pen, f=feed))
+
+    # ---- gold braid base path: launched 16 deg off-axis so it arcs into B
+    a0 = math.atan2(B[1] - A[1], B[0] - A[0]) + math.radians(16)
+    bpts, _bend, _ = trace((A[0] + 0.05 * R * math.cos(a0), A[1] + 0.05 * R * math.sin(a0)), +1.0)
+    bsample = bpts[::6]
+
+    def near_braid(px, py):
+        for qx, qy in bsample:
+            if (px - qx) ** 2 + (py - qy) ** 2 < 42.25:
+                return True
+        return False
+
+    # ---- dotted celestial sphere: tilted latitude rings + explicit limb
+    tilt = math.radians(tilt_deg)
+    ct, st = math.cos(tilt), math.sin(tilt)
+    dots = []
+    lat = -84.0
+    while lat <= 84.0:
+        la = math.radians(lat)
+        n_dots = max(10, int(2 * math.pi * R * math.cos(la) / 5.2))
+        for k in range(n_dots):
+            th = 2 * math.pi * k / n_dots
+            dots.append(
+                (
+                    cx + R * math.cos(th) * math.cos(la),
+                    cy + R * (math.sin(la) * ct + math.sin(th) * math.cos(la) * st),
+                )
+            )
+        lat += 8.0
+
+    def keep_dot(px, py):
+        if not in_frame(px, py):
+            return False
+        if (px - A[0]) ** 2 + (py - A[1]) ** 2 < (0.26 * R) ** 2:
+            return False  # quiet halo around the eruption
+        if (px - B[0]) ** 2 + (py - B[1]) ** 2 < 169.0:
+            return False  # quiet halo around the hub
+        if labels and abs(px - B[0]) < 1.5 and py < B[1]:
+            return False  # leader corridor
+        return not near_braid(px, py)
+
+    for px, py in dots:
+        if keep_dot(px, py):
+            out += _poly([(px - 0.21, py), (px + 0.21, py)], color=GRAY, f=feed)
+    # the limb: an assertive dashed circle of tangent-oriented ticks
+    n_limb = max(24, int(2 * math.pi * R / 3.8))
+    for k in range(n_limb):
+        th = 2 * math.pi * k / n_limb
+        px, py = cx + R * math.cos(th), cy + R * math.sin(th)
+        if keep_dot(px, py):
+            tx, ty = -math.sin(th), math.cos(th)
+            out += _poly(
+                [(px - 0.5 * tx, py - 0.5 * ty), (px + 0.5 * tx, py + 0.5 * ty)], color=GRAY, f=feed
+            )
+
+    # ---- DOMINANT MASS: the eruption
+    # spiral core
+    rc = 0.045 * R
+    turns = max(2, int(rc / 1.05))
+    sp = []
+    for k in range(120):
+        t = k / 119.0
+        sp.append(
+            (
+                A[0] + rc * t * math.cos(2 * math.pi * turns * t),
+                A[1] + rc * t * math.sin(2 * math.pi * turns * t),
+            )
+        )
+    out += _poly(sp, color=GREEN, f=feed)
+    # ray burst (every 6th ray is a long spike)
+    for k in range(42):
+        a = 2 * math.pi * (k + 0.5) / 42 + rng.uniform(-0.02, 0.02)
+        r1 = (0.125 + 0.045 * rng.random()) * R
+        if k % 6 == 0:
+            r1 = 0.20 * R
+        p0 = (A[0] + 0.06 * R * math.cos(a), A[1] + 0.06 * R * math.sin(a))
+        p1 = (A[0] + r1 * math.cos(a), A[1] + r1 * math.sin(a))
+        if in_frame(*p0) and in_frame(*p1):
+            out += _poly([p0, p1], color=GREEN, f=feed)
+    # broken shock arcs
+    for rr in (0.16 * R, 0.222 * R):
+        ang = rng.uniform(0, 2 * math.pi)
+        for _ in range(7):
+            span = rng.uniform(0.3, 0.6)
+            steps = max(3, int(span / 0.05))
+            seg = []
+            for t in range(steps + 1):
+                aa = ang + span * t / steps
+                px, py = A[0] + rr * math.cos(aa), A[1] + rr * math.sin(aa)
+                if in_frame(px, py) and math.hypot(px - cx, py - cy) < 0.98 * R:
+                    seg.append((px, py))
+                elif len(seg) >= 2:
+                    out += _poly(seg, color=GREEN, f=feed)
+                    seg = []
+                else:
+                    seg = []
+            if len(seg) >= 2:
+                out += _poly(seg, color=GREEN, f=feed)
+            ang += span + rng.uniform(0.35, 0.8)
+    # Hubble-flow particle dashes: farther out = faster = longer
+    for _ in range(burst):
+        r_ = abs(rng.gauss(0.0, 0.13 * R))
+        a = 2 * math.pi * rng.random()
+        px, py = A[0] + r_ * math.cos(a), A[1] + r_ * math.sin(a)
+        if r_ < 0.05 * R:
+            continue
+        if math.hypot(px - cx, py - cy) < 0.98 * R and in_frame(px, py):
+            hl = 0.35 + 0.75 * min(1.0, r_ / (0.5 * R))
+            out += _poly(
+                [
+                    (px - hl * math.cos(a), py - hl * math.sin(a)),
+                    (px + hl * math.cos(a), py + hl * math.sin(a)),
+                ],
+                color=GREEN,
+                f=feed,
+            )
+
+    # ---- green field lines: most escape (arrowheads), a bundle falls in
+    for k in range(n_lines):
+        a = 2 * math.pi * (k + 0.5) / n_lines
+        pts, end, d = trace(
+            (A[0] + 0.12 * R * math.cos(a), A[1] + 0.12 * R * math.sin(a)), +1.0, snk_stop=9.0
+        )
+        if len(pts) >= 3:
+            sm, _ = _catmull_subdivide(pts)
+            out.extend(_poly(sm, color=GREEN, f=feed))
+            if end in ("sphere", "frame"):
+                arrow(pts[-1][0], pts[-1][1], d[0], d[1], GREEN, wing=3.0)
+
+    # ---- red: a compact vortex of infalling streaks, chevrons pointing in
+    ux, uy = A[0] - B[0], A[1] - B[1]
+    un = math.hypot(ux, uy) or 1.0
+    ux, uy = ux / un, uy / un
+    for k in range(sink_lines):
+        a = 2 * math.pi * (k + 0.5) / sink_lines
+        dxs, dys = math.cos(a), math.sin(a)
+        if dxs * ux + dys * uy > 0.82:
+            continue  # leave the braid corridor gold-only
+        pts, end, d = trace(
+            (B[0] + 6.0 * dxs, B[1] + 6.0 * dys),
+            -1.0,
+            max_steps=700,
+            src_stop=0.20 * R,
+            snk_stop=4.0,
+            max_range=0.24 * R,
+        )
+        if len(pts) >= 3:
+            sm, _ = _catmull_subdivide(pts)
+            out.extend(_poly(sm, color=RED, f=feed))
+            for i in range(1, len(pts) - 1):
+                if math.hypot(pts[i][0] - B[0], pts[i][1] - B[1]) > 10.5:
+                    fx = pts[i - 1][0] - pts[i + 1][0]
+                    fy = pts[i - 1][1] - pts[i + 1][1]
+                    arrow(pts[i][0], pts[i][1], fx, fy, RED, wing=2.0)
+                    break
+
+    # ---- gold braid: dashes ride the base path, lengthening toward the sink
+    L = len(bpts)
+    if L > 8:
+        for bi in range(braid):
+            off0 = (bi - (braid - 1) / 2) * 1.15
+            phase = rng.uniform(0, math.pi)
+            for i in range(1, L - 1, 2):
+                (xa, ya), (xb, yb) = bpts[i - 1], bpts[i + 1]
+                dxx, dyy = xb - xa, yb - ya
+                n = math.hypot(dxx, dyy) or 1.0
+                o = off0 + 0.55 * math.sin(i / L * 3.0 * math.pi + phase)
+                mx_, my_ = bpts[i][0] - dyy / n * o, bpts[i][1] + dxx / n * o
+                hl = 0.30 + 0.32 * (i / L)
+                if in_frame(mx_, my_):
+                    out += _poly(
+                        [
+                            (mx_ - hl * dxx / n, my_ - hl * dyy / n),
+                            (mx_ + hl * dxx / n, my_ + hl * dyy / n),
+                        ],
+                        color=GOLD,
+                        f=feed,
+                    )
+        # three gold flow chevrons riding the centerline
+        for t in (0.35, 0.6, 0.85):
+            i = max(1, min(L - 2, int(L * t)))
+            fx = bpts[i + 1][0] - bpts[i - 1][0]
+            fy = bpts[i + 1][1] - bpts[i - 1][1]
+            arrow(bpts[i][0], bpts[i][1], fx, fy, GOLD, wing=2.6)
+
+    # ---- sink hub: double ring + spoked star
+    for rr in (2.6, 3.8):
+        ring = [
+            (B[0] + rr * math.cos(2 * math.pi * k / 40), B[1] + rr * math.sin(2 * math.pi * k / 40))
+            for k in range(41)
+        ]
+        out += _poly(ring, color=RED, f=feed)
+    for k in range(16):
+        a = 2 * math.pi * k / 16
+        out += _poly(
+            [
+                (B[0] + 4.6 * math.cos(a), B[1] + 4.6 * math.sin(a)),
+                (B[0] + 7.6 * math.cos(a), B[1] + 7.6 * math.sin(a)),
+            ],
+            color=RED,
+            f=feed,
+        )
+
+    # ---- typographic band: one baseline, full-width rule, hairline leader
+    if labels:
+        rule_y = y0 + 10.0
+        base1 = rule_y + 3.5
+        th_ = min(11.0, 0.062 * W)
+        out += _poly([(x0, rule_y), (x1, rule_y)], color=GRAY, f=feed)
+        out += _stroke_text("BIG BANG", x0, base1, th_, color=GREEN, f=feed)
+        out += _stroke_text("GREAT ATTRACTOR", x1 - tw2, base1, lh2, color=RED, f=feed)
+        mh = 2.1
+        out += _stroke_text("01 EXPANSION FIELD", x0, y0 + 3.2, mh, color=GRAY, f=feed)
+        s2 = "02 LANIAKEA FLOW - 520 MLY"
+        out += _stroke_text(s2, x1 - _text_width(s2, mh), y0 + 3.2, mh, color=GRAY, f=feed)
+        out += _poly([(B[0], B[1] - 10.5), (B[0], base1 + lh2 + 2.0)], color=GRAY, f=feed)
+    return out
