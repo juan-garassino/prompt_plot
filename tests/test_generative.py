@@ -69,6 +69,7 @@ def test_all_generators_registered():
         "bauhaus_weights",
         "bauhaus_gradient",
         "bauhaus_resonance",
+        "bauhaus_loom",
         "gw150914",
     ]:
         assert expected in gens

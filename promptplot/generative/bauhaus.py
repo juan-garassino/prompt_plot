@@ -892,3 +892,131 @@ def bauhaus_resonance(
     out += plus_mark(x1 - 9.0, y0 + 12.0, pen=black, f=feed)
     out += scale_footer(bounds, pen=black, f=feed)
     return out
+
+
+# ---------------------------------------------------------------------------
+# FORWARD PASS, rethought — the weight matrix as an Anni-Albers weave draft.
+# A network layer IS a grid of connections = a loom. Warp (blue) = inputs,
+# weft (pink) = outputs; at each crossing the thread on TOP is set by the real
+# weight's SIGN, its FLOAT length by magnitude. Not a wiring diagram — a textile
+# that happens to be the exact matrix.
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_loom(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    weights: str = "",
+    block: int = 0,
+    n_warp: int = 52,
+    n_weft: int = 34,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """FORWARD PASS as weaving: a real weight matrix woven as warp/weft threads,
+    over/under by sign, float by magnitude. Bauhaus by lineage (the weaving
+    workshop), true by construction (it is the matrix), lines by nature."""
+    import numpy as np
+
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    blue, pink, black = _pen(BLUE, colors), _pen(PINK, colors), _pen(BLACK, colors)
+    out: List[GCodeCommand] = []
+
+    Wm = None
+    if weights:
+        try:
+            Wm = _load_qkv(weights, block)[0]  # query matrix
+        except Exception:
+            Wm = None
+    if Wm is None:
+        Wm = np.array([[rng.random() * 2 - 1 for _ in range(96)] for _ in range(96)])
+
+    # block-mean downsample to n_warp x n_weft, keep sign + magnitude
+    R0, C0 = Wm.shape
+    br, bc = max(1, R0 // n_warp), max(1, C0 // n_weft)
+    M = np.zeros((n_warp, n_weft))
+    for i in range(n_warp):
+        for j in range(n_weft):
+            blk = Wm[i * br : (i + 1) * br, j * bc : (j + 1) * bc]
+            if blk.size:
+                M[i, j] = math.copysign(float(np.abs(blk).mean()), float(blk.mean()))
+    # sort warp rows + weft cols by mean weight so same-sign regions CLUSTER —
+    # a legitimate neuron reorder (permutation-invariant), revealing the block/
+    # diagonal structure a trained matrix hides in arbitrary index order.
+    ri = sorted(range(n_warp), key=lambda i: float(M[i].mean()))
+    ci = sorted(range(n_weft), key=lambda j: float(M[:, j].mean()))
+    M = M[np.ix_(ri, ci)]
+    norm = float(np.percentile(np.abs(M), 92)) or 1.0
+
+    # the tapestry fills the page (dominant mass); title band above, footer below
+    mx0, mx1 = x0 + 6, x1 - 6
+    my0, my1 = y0 + 16, y1 - 20
+    dx = (mx1 - mx0) / (n_warp - 1)
+    dy = (my1 - my0) / (n_weft - 1)
+    gap = min(dx, dy) * 0.34  # the interlace gap: the under-thread ducks here
+
+    def strong(w):
+        return abs(w) / norm > 0.85  # heaviest floats get a second pass (sheen)
+
+    # WARP threads (vertical, blue) — broken where the warp dips UNDER (w < 0)
+    for i in range(n_warp):
+        xi = mx0 + i * dx
+        cuts = []
+        for j in range(n_weft):
+            if M[i, j] < 0:  # weft on top here -> warp ducks under
+                yj = my0 + j * dy
+                cuts.append((yj - gap, yj + gap))
+        yptr = my0
+        segs = []
+        for a, b in cuts:
+            if a > yptr:
+                segs.append((yptr, a))
+            yptr = max(yptr, b)
+        if yptr < my1:
+            segs.append((yptr, my1))
+        for a, b in segs:
+            out += _poly([(xi, a), (xi, b)], color=blue, f=feed)
+
+    # WEFT threads (horizontal, pink) — broken where the weft dips UNDER (w >= 0)
+    for j in range(n_weft):
+        yj = my0 + j * dy
+        cuts = []
+        for i in range(n_warp):
+            if M[i, j] >= 0:  # warp on top -> weft ducks under
+                xi = mx0 + i * dx
+                cuts.append((xi - gap, xi + gap))
+        xptr = mx0
+        segs = []
+        for a, b in cuts:
+            if a > xptr:
+                segs.append((xptr, a))
+            xptr = max(xptr, b)
+        if xptr < mx1:
+            segs.append((xptr, mx1))
+        for a, b in segs:
+            out += _poly([(a, yj), (b, yj)], color=pink, f=feed)
+            if b - a > dx * 2.4:  # a long float catches the light -> doubled
+                out += _poly([(a, yj + 0.25), (b, yj + 0.25)], color=pink, f=feed)
+
+    # black selvage: the woven edge, framing the cloth (the only closed rects)
+    out += _poly(
+        [
+            (mx0 - 2, my0 - 2),
+            (mx1 + 2, my0 - 2),
+            (mx1 + 2, my1 + 2),
+            (mx0 - 2, my1 + 2),
+            (mx0 - 2, my0 - 2),
+        ],
+        color=black,
+        f=feed,
+    )
+
+    # type: title top-left over the cloth's head, spec footer
+    out += type_block(["FORWARD PASS"], x0 + 4, y1 - 4, height=3.0, pen=black, f=feed)
+    out += _stroke_text(_spaced("THE WEIGHTS, WOVEN"), x0 + 4, y1 - 11, 2.2, color=black, f=feed)
+    out += swatch_bar(x1 - 8, y1 - 4, [black, blue, pink], size=1.8, f=feed)
+    out += scale_footer(
+        bounds, text="LAYER Q  52x34  WARP=IN WEFT=OUT", pen=black, height=2.2, f=feed
+    )
+    return out
