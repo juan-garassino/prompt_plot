@@ -1931,148 +1931,209 @@ def bauhaus_relevance(
     rng: SeededRNG,
     bounds: Bounds,
     colors: int = 3,
-    weights: str = "",
-    block: int = 0,
-    head: int = 0,
-    tokens: int = 40,
-    temp: float = 1.0,
-    levels: int = 16,
-    level_floor: float = 0.45,
-    grid: int = 110,
-    shear_deg: float = 33.0,
-    causal: bool = True,
-    min_chain: int = 8,
+    nu: int = 48,
+    nv: int = 48,
     feed: int = 2200,
 ) -> List[GCodeCommand]:
-    """RELEVANCE TERRAIN — a transformer's attention drawn as the LANDSCAPE of
-    who-is-relevant-to-whom. The raw pre-softmax compatibility field S=Q·Kᵀ/√d is
-    a relief; its marching-squares isolines (black), sheared so no framing axis
-    survives, are the terrain. A blue ridgeline of summit discs marks each query's
-    argmax key (the softmax verdict); the single global-max relevance is the one
-    scarce pink peak. Real trained Q/K when a checkpoint is given."""
+    """ATTENTION AS TOPOGRAPHY — a transformer's attention as a vertical stack of
+    5 terrain stages, rendered by the from-scratch 3D pen-plotter engine:
+    (1) the CANVAS GRID where Q and K meet, (2) QKᵀ raw similarity PEAKS (dot
+    products create terrain), (3) SOFTMAX as smooth probability CONTOURS,
+    (4) V the underlying semantic terrain, (5) OUTPUT — V pulled upward by the
+    gravity of context. Each surface is hidden-line removed (z-buffer); droplines
+    tie the same query·key locations through every stage. Black + red, lines only."""
     import numpy as np
 
     x0, y0, x1, y1 = bounds
     W, H = x1 - x0, y1 - y0
-    blue, pink, black = _pen(BLUE, colors), _pen(PINK, colors), _pen(BLACK, colors)
+    accent, black = _pen(PINK, colors), _pen(BLACK, colors)  # PINK slot → crimson
     out: List[GCodeCommand] = []
 
-    fx0, fy0, fx1, fy1 = x0 + 0.20 * W, y0 + 8, x1 - 6, y1 - 8
-    fw, fh = fx1 - fx0, fy1 - fy0
-    frame_keep = _rect_keep((fx0, fy0, fx1, fy1))
+    cx = x0 + 0.52 * W
+    SXX, SXZ = 0.30 * W, 0.16 * W
+    SYX, SYZ, SYY = 0.055 * H, -0.065 * H, 0.085 * H
 
-    S = _attention_matrix(rng, tokens, head, temp, causal, weights, block, return_scores=True)
-    A = _attention_matrix(rng, tokens, head, temp, causal, weights, block)  # softmax, for disc size
-    S = np.asarray(S, dtype=float)
+    def proj(wx, wy, wz, cyL):
+        return (cx + wx * SXX + wz * SXZ, cyL + wx * SYX + wz * SYZ - wy * SYY)
 
-    # causal floor: the un-attendable upper triangle is a flat low plain, NOT a
-    # −1e9 cliff (which would spawn a spurious inked boundary).
-    if causal:
-        low = float(S[np.tril_indices(tokens)].min())
-        for q in range(tokens):
-            for k in range(q + 1, tokens):
-                S[q, k] = low - 0.05
+    def dep(wx, wy, wz):
+        return -wz + 0.05 * wy
 
-    # bilinear upsample S(q,k) → F[j][i] over index coords (i≡key, j≡query)
-    xs = [i * (tokens - 1) / grid for i in range(grid + 1)]
-    ys = [j * (tokens - 1) / grid for j in range(grid + 1)]
+    # shared query·key match peaks (X = query pos, Y = key pos) — the 3 anchors
+    peaks = [(-0.52, 0.14, 1.0), (0.03, -0.22, 0.80), (0.52, 0.30, 0.92)]
 
-    def bil(qf, kf):
-        q0, k0 = int(qf), int(kf)
-        q1, k1 = min(tokens - 1, q0 + 1), min(tokens - 1, k0 + 1)
-        tq, tk = qf - q0, kf - k0
-        return (
-            S[q0, k0] * (1 - tq) * (1 - tk)
-            + S[q0, k1] * (1 - tq) * tk
-            + S[q1, k0] * tq * (1 - tk)
-            + S[q1, k1] * tq * tk
-        )
+    def f_qkt(wx, wz):
+        z = 0.06 * (rng.fbm(wx * 7.0 + 3.1, wz * 7.0 + 6.7) - 0.5) * 2  # fine jagged floor
+        for px, py, a in peaks:
+            z += 1.5 * a * math.exp(-((wx - px) ** 2 + (wz - py) ** 2) / (2 * 0.028))  # sharp cones
+        return z
 
-    F = [[bil(ys[j], xs[i]) for i in range(grid + 1)] for j in range(grid + 1)]
+    def f_smooth(wx, wz):
+        z = 0.0
+        for px, py, a in peaks:
+            z += a * math.exp(-((wx - px) ** 2 + (wz - py) ** 2) / (2 * 0.16))
+        return z
 
-    # shear+rotate map from (k,q) index space to a normalized frame so the causal
-    # diagonal becomes a mountain SPINE and no horizontal/vertical axis survives.
-    sh = math.tan(math.radians(shear_deg))
-    rot = math.radians(20.0)
-    cs, sn = math.cos(rot), math.sin(rot)
+    def f_v(wx, wz):
+        return 0.42 * (math.sin(2.2 * wx + 0.4) * math.cos(1.9 * wz) + 0.5 * math.sin(3.0 * wz + 1.1))
 
-    def raw(ki, qi):
-        a, c = ki / (tokens - 1) - 0.5, qi / (tokens - 1) - 0.5
-        a = a + sh * c
-        return a * cs - c * sn, a * sn + c * cs
+    def f_out(wx, wz):
+        z = f_v(wx, wz)
+        for px, py, a in peaks:
+            z += 1.3 * a * math.exp(-((wx - px) ** 2 + (wz - py) ** 2) / (2 * 0.028))
+        return z
 
-    corners = [raw(0, 0), raw(tokens - 1, 0), raw(0, tokens - 1), raw(tokens - 1, tokens - 1)]
-    rxs = [p[0] for p in corners]
-    rys = [p[1] for p in corners]
-    bcx, bcy = (min(rxs) + max(rxs)) / 2, (min(rys) + max(rys)) / 2
-    scale = 1.04 * max(fw / (max(rxs) - min(rxs)), fh / (max(rys) - min(rys)))
-    fcx, fcy = (fx0 + fx1) / 2, (fy0 + fy1) / 2
+    cy_top, cy_bot = y1 - 0.16 * H, y0 + 0.17 * H
+    step = (cy_top - cy_bot) / 4.0
+    cyL = [cy_top - k * step for k in range(5)]
 
-    def to_paper(ki, qi):
-        rx, ry = raw(ki, qi)
-        return (fcx + (rx - bcx) * scale, fcy + (ry - bcy) * scale)
+    # ---- generic z-buffered terrain (self hidden-line removal) -----------
+    def render_terrain(cyc, hfun, hscale):
+        SX = np.zeros((nu + 1, nv + 1))
+        SY = np.zeros((nu + 1, nv + 1))
+        DE = np.zeros((nu + 1, nv + 1))
+        for i in range(nu + 1):
+            wx = -1 + 2 * i / nu
+            for j in range(nv + 1):
+                wz = -1 + 2 * j / nv
+                wy = hfun(wx, wz) * hscale
+                p = proj(wx, wy, wz, cyc)
+                SX[i, j], SY[i, j], DE[i, j] = p[0], p[1], dep(wx, wy, wz)
+        PXW, PXH = 210, 150
+        sxmin, sxmax = float(SX.min()) - 3, float(SX.max()) + 3
+        symin, symax = float(SY.min()) - 3, float(SY.max()) + 3
+        zb = np.full((PXH, PXW), -1e18)
+        PX = (SX - sxmin) / (sxmax - sxmin) * (PXW - 1)
+        PY = (SY - symin) / (symax - symin) * (PXH - 1)
+        dspan = float(DE.max() - DE.min()) or 1.0
+        bias = 0.02 * dspan
 
-    # isolevels in percentile space of the VALID (lower-tri) scores; drop the
-    # bottom ~level_floor so the low plain stays bare paper.
-    valid = np.array([S[q, k] for q in range(tokens) for k in range(q + 1)])
-    lo, hi = np.percentile(valid, 100 * level_floor), np.percentile(valid, 99)
-    isos = [lo + (hi - lo) * (t + 0.5) / levels for t in range(levels)]
+        def tri(p0, p1, p2, d0, d1, d2):
+            minx = int(max(0, math.floor(min(p0[0], p1[0], p2[0]))))
+            maxx = int(min(PXW - 1, math.ceil(max(p0[0], p1[0], p2[0]))))
+            miny = int(max(0, math.floor(min(p0[1], p1[1], p2[1]))))
+            maxy = int(min(PXH - 1, math.ceil(max(p0[1], p1[1], p2[1]))))
+            if maxx < minx or maxy < miny:
+                return
+            den = (p1[1] - p2[1]) * (p0[0] - p2[0]) + (p2[0] - p1[0]) * (p0[1] - p2[1])
+            if abs(den) < 1e-9:
+                return
+            X, Y = np.meshgrid(np.arange(minx, maxx + 1), np.arange(miny, maxy + 1))
+            aa = ((p1[1] - p2[1]) * (X - p2[0]) + (p2[0] - p1[0]) * (Y - p2[1])) / den
+            bb = ((p2[1] - p0[1]) * (X - p2[0]) + (p0[0] - p2[0]) * (Y - p2[1])) / den
+            cc = 1 - aa - bb
+            ins = (aa >= -1e-4) & (bb >= -1e-4) & (cc >= -1e-4)
+            d = aa * d0 + bb * d1 + cc * d2
+            sub = zb[miny : maxy + 1, minx : maxx + 1]
+            m = ins & (d > sub)
+            sub[m] = d[m]
 
-    for iso in isos:
-        segs = _marching_squares(F, xs, ys, iso)
-        for ch in _chain_segments(segs):
-            if len(ch) < min_chain:
-                continue
-            # causal clip in index space, then shear to paper
+        for i in range(nu):
+            for j in range(nv):
+                tri((PX[i, j], PY[i, j]), (PX[i + 1, j], PY[i + 1, j]), (PX[i + 1, j + 1], PY[i + 1, j + 1]), DE[i, j], DE[i + 1, j], DE[i + 1, j + 1])
+                tri((PX[i, j], PY[i, j]), (PX[i + 1, j + 1], PY[i + 1, j + 1]), (PX[i, j + 1], PY[i, j + 1]), DE[i, j], DE[i + 1, j + 1], DE[i, j + 1])
+
+        def vis(sx, sy, d):
+            px = int((sx - sxmin) / (sxmax - sxmin) * (PXW - 1))
+            py = int((sy - symin) / (symax - symin) * (PXH - 1))
+            if px < 0 or px >= PXW or py < 0 or py >= PXH:
+                return True
+            return d >= zb[py, px] - bias
+
+        def draw(pts):
             run = []
-            for (kv, qv) in ch:
-                if qv >= kv - 0.5:
-                    run.append(to_paper(kv, qv))
+            for (i, j) in pts:
+                if vis(SX[i, j], SY[i, j], DE[i, j]):
+                    run.append((SX[i, j], SY[i, j]))
                 elif len(run) >= 2:
-                    for r in _clip_runs([run], frame_keep):
-                        out += _poly(r, color=black, f=feed)
+                    out.extend(_poly(run, color=black, f=feed))
                     run = []
                 else:
                     run = []
             if len(run) >= 2:
-                for r in _clip_runs([run], frame_keep):
-                    out += _poly(r, color=black, f=feed)
+                out.extend(_poly(run, color=black, f=feed))
 
-    # blue argmax summit ridgeline — each query's chosen key (the softmax verdict)
-    A = np.asarray(A, dtype=float)
-    summits = []
-    for q in range(tokens):
-        ks = A[q, : q + 1] if causal else A[q]
-        kstar = int(np.argmax(ks))
-        summits.append((q, kstar, float(A[q, kstar])))
-    rr = 0.02 * min(W, H)
-    order = sorted(range(tokens), key=lambda q: -summits[q][2])
-    big3 = set(order[:3])
-    gq, gk, gp = max(summits, key=lambda s: s[2])  # the single global max
-    for (q, kstar, p) in summits:
-        if (q, kstar) == (gq, gk):
-            continue
-        px, py = to_paper(kstar, q)
-        if not frame_keep((px, py)):
-            continue
-        r = max(1.4, rr * (0.4 + p) * 2.2)
-        out += fill_disc(px, py, r, spacing=0.5, pen=blue, f=feed)
-        if q in big3:
-            out += fill_disc(px, py, max(0.8, r - 0.6), spacing=0.5, pen=blue, f=feed)
+        for i in range(nu + 1):
+            draw([(i, j) for j in range(nv + 1)])
+        for j in range(nv + 1):
+            draw([(i, j) for i in range(nu + 1)])
 
-    # the one scarce pink peak — the single loudest relevance on the page
-    px, py = to_paper(gk, gq)
-    if frame_keep((px, py)):
-        out += fill_disc(px, py, max(2.2, rr * (0.4 + gp) * 2.6), spacing=0.5, pen=pink, f=feed)
-        out += circle(px, py, max(3.4, rr * (0.4 + gp) * 2.6 + 1.4), pen=pink, f=feed)
+    # ---- 1. CANVAS GRID (flat) + Q (left) & K (top) arrows ---------------
+    c0 = cyL[0]
+    gc = 16
+    for i in range(gc + 1):
+        wx = -1 + 2 * i / gc
+        out += _poly([proj(wx, 0, -1 + 2 * j / gc, c0) for j in range(gc + 1)], color=black, f=feed)
+    for j in range(gc + 1):
+        wz = -1 + 2 * j / gc
+        out += _poly([proj(-1 + 2 * i / gc, 0, wz, c0) for i in range(gc + 1)], color=black, f=feed)
+    for t in range(5):  # Q queries enter from the left
+        wz = -0.8 + 1.6 * t / 4
+        p = proj(-1, 0, wz, c0)
+        out += _poly([(p[0] - 22, p[1]), (p[0] - 2, p[1])], color=accent, f=feed)
+        out += _poly([(p[0] - 5, p[1] + 1.2), (p[0] - 2, p[1]), (p[0] - 5, p[1] - 1.2)], color=accent, f=feed)
+    for t in range(6):  # K keys descend from above
+        wx = -0.8 + 1.6 * t / 5
+        p = proj(wx, 0, 1, c0)
+        out += _poly([(p[0], p[1] + 20), (p[0], p[1] + 2)], color=black, f=feed)
+        out += _poly([(p[0] - 1.2, p[1] + 5), (p[0], p[1] + 2), (p[0] + 1.2, p[1] + 5)], color=black, f=feed)
+    out += _stroke_text(_spaced("Q QUERIES"), proj(-1, 0, -0.9, c0)[0] - 24, c0 + 0.10 * H, 1.7, color=accent, f=feed)
+    out += _stroke_text(_spaced("K KEYS"), proj(0, 0, 1, c0)[0] - 8, c0 + 0.15 * H, 1.7, color=black, f=feed)
 
-    xT = x0 + 0.02 * W
-    out += type_block(["RELEVANCE", "TERRAIN"], xT, y1 - 7.0, height=3.2, pen=black, f=feed)
-    out += _stroke_text(_spaced("WHO IS RELEVANT TO WHOM"), xT, y1 - 21.0, 2.0, color=black, f=feed)
-    out += swatch_bar(x1 - 9.0, y1 - 4.0, [black, blue, pink], size=2.6, f=feed)
-    p0 = to_paper(0, 0)
-    out += plus_mark(p0[0], p0[1], s=1.4, pen=black, f=feed)
-    out += scale_footer(bounds, text="S = Q.KT / SQRT D", pen=black, height=2.4, f=feed)
+    # ---- 2. QKT raw similarity peaks -------------------------------------
+    render_terrain(cyL[1], f_qkt, 0.9)
+
+    # ---- 3. SOFTMAX as smooth probability contours ----------------------
+    c2 = cyL[2]
+    gN = 90
+    xs = [-1 + 2 * i / gN for i in range(gN + 1)]
+    ys = [-1 + 2 * j / gN for j in range(gN + 1)]
+    F = [[f_smooth(xs[i], ys[j]) for i in range(gN + 1)] for j in range(gN + 1)]
+    fmax = max(max(r) for r in F)
+    for lv in range(1, 11):
+        iso = fmax * lv / 11.0
+        for ch in _chain_segments(_marching_squares(F, xs, ys, iso)):
+            if len(ch) < 4:
+                continue
+            out += _poly([proj(wx, iso * 0.6, wz, c2) for (wx, wz) in ch], color=black, f=feed)
+
+    # ---- 4. V semantic terrain ------------------------------------------
+    render_terrain(cyL[3], f_v, 0.9)
+
+    # ---- 5. OUTPUT — V pulled up by attention ---------------------------
+    render_terrain(cyL[4], f_out, 0.62)
+
+    # ---- droplines tying the 3 anchors through every stage --------------
+    for px, py, _a in peaks:
+        sx = cx + px * SXX + py * SXZ
+        yt = proj(px, 0, py, cyL[0])[1]
+        yb = proj(px, f_out(px, py) * 0.62, py, cyL[4])[1]
+        yv = min(yt, yb)
+        ye = max(yt, yb)
+        k = 0
+        while yv < ye:
+            if k % 2 == 0:
+                out += _poly([(sx, yv), (sx, min(ye, yv + 3.0))], color=black, f=feed)
+            yv += 5.0
+            k += 1
+
+    # ---- left numbered stages + right stage labels ----------------------
+    xL = x0 + 0.015 * W
+    stages = [
+        ("1", "THE CANVAS GRID", "QK T"),
+        ("2", "THE INTERSECTION", "QK T RAW"),
+        ("3", "SOFTMAX", "PROBABILITIES"),
+        ("4", "VALUES V", "SEMANTIC TERRAIN"),
+        ("5", "OUTPUT", "ATTENTION QKV"),
+    ]
+    for k, (num, title, rlab) in enumerate(stages):
+        out += _stroke_text(num, xL, cyL[k] + 4, 3.0, color=black, f=feed)
+        out += _stroke_text(_spaced(title), xL + 6, cyL[k] + 4, 1.9, color=black, f=feed)
+        out += _stroke_text(_spaced(rlab), x1 - 0.16 * W, cyL[k], 1.7, color=(accent if k in (1, 2) else black), f=feed)
+
+    out += type_block(["ATTENTION AS"], xL, y1 - 5.0, height=3.4, pen=black, underline=False, f=feed)
+    out += _stroke_text(_spaced("TOPOGRAPHY"), xL, y1 - 12.0, 3.0, color=black, f=feed)
+    out += _stroke_text(_spaced("QUERIES SHAPE CONTENT THROUGH CONTEXT"), xL, y1 - 18.0, 1.7, color=black, f=feed)
     return out
 
 
