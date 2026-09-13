@@ -214,6 +214,19 @@ deregistered — superseded by the loom+decision and WATERSHED reworks).
 Related one-off: `black_hole_bauhaus`. Renders go to ~/Downloads for voting; winners move
 to `leo/bauhaus/`.
 
+### Abstract neural-net series (3D pen-plotter engine)
+A sub-series of "abstract neural representations for penplotters" (fine-line, black+red on
+cream, +blue/green where a piece needs it): `bauhaus_locality` (CNN — stacked feature-map
+terrains, pixels→meaning), `bauhaus_memory` (LSTM — precessing figure-8 helix connecting
+INPUT·LATENT·OUTPUT), `bauhaus_relevance` (TRANSFORMER — ATTENTION AS TOPOGRAPHY: QKᵀ cones →
+softmax contours → V green → O), `bauhaus_manifold` (MLP — a folded petal-saddle). These share
+a from-scratch **3D engine**: `_zbuf_terrain(out, SX, SY, DEP, feed, PENV=, pen=)` rasterizes
+surface quads into a numpy z-buffer for **true hidden-line occlusion** and draws only visible
+mesh (near ridges hide far → solid surfaces); build `SX/SY/DEP` via an isometric `proj`+`dep`
+and a per-piece height field. Per-architecture design briefs (built + to-build: GAN, diffusion,
+VAE, GNN, MoE, SSM/Mamba, flow-matching, ViT, DINO, RL) live in `studio/nets/*.md` with the
+shared conventions in `studio/nets/README.md`.
+
 ## Multi-color pen layers
 Every drawing source (LLM, manual scripts, generative, imported files) can tag commands with a
 `color` index. When `config.color.enabled`, `postprocess.reorder_by_color` groups strokes by pen and
