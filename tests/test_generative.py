@@ -63,6 +63,7 @@ def test_all_generators_registered():
         "attention_matrix",
         "black_hole_bauhaus",
         "big_bang",
+        "big_bang_v1",
         "bauhaus_attractor",
         "bauhaus_attention",
         "bauhaus_weights",

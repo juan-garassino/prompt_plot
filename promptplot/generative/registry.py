@@ -54,6 +54,7 @@ GENERATOR_REGISTRY = {
     "attention_matrix": _g.attention_matrix,
     "black_hole_bauhaus": _g.black_hole_bauhaus,
     "big_bang": _g.big_bang,
+    "big_bang_v1": _g.big_bang_v1,
     "bauhaus_attractor": _b.bauhaus_attractor,
     "bauhaus_attention": _b.bauhaus_attention,
     "bauhaus_weights": _b.bauhaus_weights,
@@ -70,6 +71,7 @@ _SKIP_PARAMS = {"rng", "bounds"}
 COMPOSITIONS = {
     "black_hole_bauhaus",
     "big_bang",
+    "big_bang_v1",
     "bauhaus_attractor",
     "bauhaus_attention",
     "bauhaus_weights",

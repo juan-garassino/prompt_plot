@@ -5128,3 +5128,186 @@ def big_bang(
         out += _stroke_text(s2, x1 - _text_width(s2, mh), y0 + 3.2, mh, color=GRAY, f=feed)
         out += _poly([(B[0], B[1] - 10.5), (B[0], base1 + lh2 + 2.0)], color=GRAY, f=feed)
     return out
+
+
+# ---------------------------------------------------------------------------
+# big_bang_v1 — the ORIGINAL cosmology piece (recovered from session context
+# before the studio rework; kept alongside big_bang per the always-keep-versions
+# rule). "the original was not bad" — Juan.
+# ---------------------------------------------------------------------------
+
+
+def big_bang_v1(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 4,
+    n_lines: int = 20,
+    sink_lines: int = 16,
+    tilt_deg: float = 24.0,
+    burst: int = 90,
+    braid: int = 6,
+    labels: bool = True,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """BIG BANG -> GREAT ATTRACTOR (original): true 2D dipole field lines on a
+    dotted celestial sphere. Green lines erupt from the source and exit the
+    sphere with arrowheads; red lines converge into the attractor's spoked hub;
+    a dotted golden braid of particle trails links the two."""
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    cx, cy = x0 + W / 2, y0 + H / 2
+    R = 0.46 * min(W, H)
+    GREEN = 0 % colors if colors > 1 else None
+    RED = 1 % colors if colors > 1 else None
+    GOLD = 2 % colors if colors > 1 else None
+    GRAY = (colors - 1) if colors > 1 else None
+    out: List[GCodeCommand] = []
+
+    tilt = math.radians(tilt_deg)
+    ct, st = math.cos(tilt), math.sin(tilt)
+    lat = -78.0
+    while lat <= 78.0:
+        la = math.radians(lat)
+        n_dots = max(10, int(58 * math.cos(la)))
+        for k in range(n_dots):
+            th = 2 * math.pi * k / n_dots
+            px = cx + R * math.cos(th) * math.cos(la)
+            py = cy + R * (math.sin(la) * ct + math.sin(th) * math.cos(la) * st)
+            if x0 + 1 < px < x1 - 1 and y0 + 1 < py < y1 - 1:
+                out += _poly([(px - 0.14, py), (px + 0.14, py)], color=GRAY, f=feed)
+        lat += 13.0
+
+    A = (cx - 0.24 * R, cy + 0.60 * R)
+    B = (cx + 0.38 * R, cy - 0.42 * R)
+
+    def field(px, py):
+        dax, day = px - A[0], py - A[1]
+        dbx, dby = px - B[0], py - B[1]
+        ra2 = dax * dax + day * day + 4.0
+        rb2 = dbx * dbx + dby * dby + 4.0
+        vx = dax / ra2 - dbx / rb2
+        vy = day / ra2 - dby / rb2
+        n = math.hypot(vx, vy) or 1.0
+        return vx / n, vy / n
+
+    def arrow(px, py, dx, dy, pen):
+        a = math.atan2(dy, dx)
+        for da in (math.radians(155), math.radians(-155)):
+            out.append(GCodeCommand(command="G0", x=round(px, 2), y=round(py, 2)))
+            out.extend(
+                _poly(
+                    [
+                        (px, py),
+                        (px + 2.4 * math.cos(a + da), py + 2.4 * math.sin(a + da)),
+                    ],
+                    color=pen,
+                    f=feed,
+                )
+            )
+
+    def integrate(start, direction, pen, max_steps=520, arrow_at_edge=True):
+        px, py = start
+        pts = [(px, py)]
+        for _ in range(max_steps):
+            vx, vy = field(px, py)
+            px += 1.1 * vx * direction
+            py += 1.1 * vy * direction
+            if math.hypot(px - B[0], py - B[1]) < 6.5:
+                pts.append((B[0], B[1]))
+                break
+            if math.hypot(px - A[0], py - A[1]) < 5.0:
+                break
+            if math.hypot(px - cx, py - cy) > 0.985 * R:
+                pts.append((px, py))
+                if arrow_at_edge and len(pts) > 3:
+                    dx, dy = pts[-1][0] - pts[-3][0], pts[-1][1] - pts[-3][1]
+                    sm, _ = _catmull_subdivide(pts)
+                    out.extend(_poly(sm, color=pen, f=feed))
+                    arrow(px, py, dx * direction, dy * direction, pen)
+                    return True
+                break
+            pts.append((px, py))
+        if len(pts) >= 3:
+            sm, _ = _catmull_subdivide(pts)
+            out.extend(_poly(sm, color=pen, f=feed))
+        return False
+
+    for k in range(n_lines):
+        a = 2 * math.pi * (k + 0.5) / n_lines
+        start = (A[0] + 5.5 * math.cos(a), A[1] + 5.5 * math.sin(a))
+        integrate(start, +1.0, GREEN)
+
+    for k in range(sink_lines):
+        a = 2 * math.pi * (k + 0.5) / sink_lines
+        start = (B[0] + 6.0 * math.cos(a), B[1] + 6.0 * math.sin(a))
+        integrate(start, -1.0, RED, max_steps=340, arrow_at_edge=False)
+
+    base = [(A[0], A[1])]
+    dnx = (B[0] - A[0]) / math.hypot(B[0] - A[0], B[1] - A[1])
+    dny = (B[1] - A[1]) / math.hypot(B[0] - A[0], B[1] - A[1])
+    px, py = A[0] + 5.5 * dnx, A[1] + 5.5 * dny
+    for _ in range(520):
+        vx, vy = field(px, py)
+        px += 1.1 * vx
+        py += 1.1 * vy
+        if math.hypot(px - B[0], py - B[1]) < 5.5:
+            break
+        base.append((px, py))
+    L = len(base)
+    for bi in range(braid):
+        off0 = (bi - (braid - 1) / 2) * 1.15
+        phase = rng.uniform(0, math.pi)
+        step = 0
+        for i in range(1, L - 1, 2):
+            (xa, ya), (xb, yb) = base[i - 1], base[i + 1]
+            dx, dy = xb - xa, yb - ya
+            n = math.hypot(dx, dy) or 1.0
+            o = off0 + 0.9 * math.sin(i / L * 3.2 * math.pi + phase)
+            mx_, my_ = base[i][0] - dy / n * o, base[i][1] + dx / n * o
+            if step % 2 == 0:
+                out += _poly([(mx_ - 0.16, my_), (mx_ + 0.16, my_)], color=GOLD, f=feed)
+            step += 1
+
+    for _ in range(burst):
+        r_ = abs(rng.gauss(0.0, 9.0)) if hasattr(rng, "gauss") else 9.0 * rng.random()
+        a = 2 * math.pi * rng.random()
+        px, py = A[0] + r_ * math.cos(a), A[1] + r_ * math.sin(a)
+        if math.hypot(px - cx, py - cy) < 0.98 * R:
+            out += _poly([(px - 0.16, py), (px + 0.16, py)], color=GREEN, f=feed)
+
+    sp = []
+    for k in range(70):
+        t = k / 69.0
+        sp.append(
+            (A[0] + 3.4 * t * math.cos(6 * math.pi * t), A[1] + 3.4 * t * math.sin(6 * math.pi * t))
+        )
+    out += _poly(sp, color=GREEN, f=feed)
+    for rr in (2.4, 3.4):
+        ring = [
+            (B[0] + rr * math.cos(2 * math.pi * k / 36), B[1] + rr * math.sin(2 * math.pi * k / 36))
+            for k in range(37)
+        ]
+        out += _poly(ring, color=RED, f=feed)
+    for k in range(16):
+        a = 2 * math.pi * k / 16
+        out += _poly(
+            [
+                (B[0] + 3.6 * math.cos(a), B[1] + 3.6 * math.sin(a)),
+                (B[0] + 6.2 * math.cos(a), B[1] + 6.2 * math.sin(a)),
+            ],
+            color=RED,
+            f=feed,
+        )
+
+    if labels:
+        out += _stroke_text(" ".join("BIG BANG"), A[0] + 8.0, A[1] + 2.0, 2.6, color=GREEN, f=feed)
+        tw = _text_width(" ".join("GREAT ATTRACTOR"), 2.6)
+        out += _stroke_text(
+            " ".join("GREAT ATTRACTOR"),
+            max(x0 + 2, B[0] - tw - 9.0),
+            B[1] - 2.0,
+            2.6,
+            color=RED,
+            f=feed,
+        )
+    return out
