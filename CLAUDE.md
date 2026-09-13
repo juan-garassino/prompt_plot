@@ -195,8 +195,11 @@ orbits, plus marks, swatch bars, crosshair rules, spaced-caps `type_block`/`scal
 `BAUHAUS_PALETTE` blue|pink|black) plus poster pieces built on it: `bauhaus_attractor`
 (SENSITIVE DEPENDENCE — one Lorenz line, solid discs in the lobe eyes), `bauhaus_attention`
 (GPT-2 sink chords in bold pink), `bauhaus_weights` (PARAMETER FIELD — Q|K|V Hinton discs
-from the trained checkpoint), `bauhaus_perceptron` (FORWARD PASS), `bauhaus_gradient`
-(GRADIENT DESCENT — contour bowls + descent path), `bauhaus_resonance` (harmonograph).
+from the trained checkpoint), `bauhaus_gradient`
+(GRADIENT DESCENT — contour bowls + descent path), `bauhaus_resonance` (harmonograph),
+`bauhaus_loom` (FORWARD PASS — the perceptron rethought as an Anni-Albers weaving: a real
+weight matrix woven warp/weft, over/under by sign, float by magnitude; APPROVED). Retired:
+`bauhaus_perceptron` (kept in-file for version history, deregistered — superseded by the loom).
 Related one-off: `black_hole_bauhaus`. Renders go to ~/Downloads for voting; winners move
 to `leo/bauhaus/`.
 
