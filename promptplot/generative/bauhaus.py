@@ -2359,84 +2359,181 @@ def bauhaus_manifold(
     rng: SeededRNG,
     bounds: Bounds,
     colors: int = 3,
-    nstream: int = 168,
-    steps: int = 66,
-    petals: int = 5,
-    twist: float = 1.6,
+    nu: int = 34,
+    nv: int = 84,
+    petals: int = 3,
+    fold: float = 1.05,
+    twist: float = 1.2,
+    nstream: int = 52,
     feed: int = 2200,
 ) -> List[GCodeCommand]:
-    """NONLINEAR TRANSFORMATION — an MLP as the FOLD of space. Streamlines fall
-    from the INPUT plane (top), twist through a central petal-FOLD where the
-    nonlinear activation introduces curvature — bending the sheet so different
-    input points are matched to the SAME location (negative radius crosses the
-    fold) — then open onto the OUTPUT plane (bottom). Same tokens, richer
-    geometry. Bespoke fold geometry, black + red."""
+    """NONLINEAR TRANSFORMATION — an MLP rendered by a from-scratch 3D pen-plotter
+    engine. A parametric petal-saddle (the nonlinear activation FOLDING space so
+    far-apart points meet) is projected isometrically and hidden-line removed via
+    a z-buffer, so near folds occlude far ones and it reads as a solid form.
+    Streamlines funnel from the INPUT plane through the fold to the OUTPUT plane.
+    All output is lines. Black surface, red fold-ridges + flow accents."""
+    import numpy as np
+
     x0, y0, x1, y1 = bounds
     W, H = x1 - x0, y1 - y0
-    accent, black = _pen(PINK, colors), _pen(BLACK, colors)  # PINK slot rendered crimson
+    accent, black = _pen(PINK, colors), _pen(BLACK, colors)  # PINK slot → crimson
     out: List[GCodeCommand] = []
 
-    cx = x0 + 0.50 * W
-    ylo, yhi = y0 + 0.13 * H, y0 + 0.86 * H  # OUTPUT (bottom), INPUT (top)
-    span = yhi - ylo
-    Rin, Rwaist, Rpetal, ell = 0.30 * W, 0.03 * W, 0.17 * W, 0.32
+    # ---- 3D world → isometric screen -------------------------------------
+    cx0, cy0 = x0 + 0.50 * W, y0 + 0.50 * H
+    a, cd, bwy = 0.29 * W, 0.070 * H, 0.195 * H  # lower camera: taller wy, shallower iso
+    Hy = 1.30  # plane height (INPUT +Hy top, OUTPUT −Hy bottom)
 
-    def P(s, theta, r):
-        return (cx + r * math.cos(theta), (yhi - s * span) + r * math.sin(theta) * ell)
+    def proj(wx, wy, wz):
+        return (cx0 + (wx - wz) * a, cy0 + wy * bwy - (wx + wz) * cd)
 
-    # the fold: input → activation petal-fold → output
-    for i in range(nstream):
-        th0 = 2 * math.pi * i / nstream
-        pts = []
-        for kk in range(steps + 1):
-            s = kk / steps
-            r_hour = Rwaist + (Rin - Rwaist) * abs(2 * s - 1)
-            fold = Rpetal * (math.sin(math.pi * s) ** 1.4) * math.cos(petals * th0)
-            r = r_hour + fold  # r<0 crosses the fold → different inputs, same cardinal
-            pts.append(P(s, th0 + twist * s, r))
-        out += _poly(pts, color=(accent if i % 3 == 0 else black), f=feed)
+    def depth(wx, wy, wz):
+        return (wx + wz) + 0.12 * wy  # larger = nearer (front)
 
-    # INPUT / OUTPUT planes: dot clouds + frame parallelogram
-    def plane(y_at, label, above):
-        g = 9
-        for a in range(g):
-            for b in range(g):
-                gu, gv = -1 + 2 * a / (g - 1), -1 + 2 * b / (g - 1)
-                out.extend(_dot(cx + gu * Rin, y_at + gv * Rin * ell, 0.45, color=black, f=feed))
-        corners = [(-1, -1), (1, -1), (1, 1), (-1, 1), (-1, -1)]
-        out.extend(_poly([(cx + gu * Rin, y_at + gv * Rin * ell) for gu, gv in corners], color=black, f=feed))
-        ly = y_at + (Rin * ell + 7 if above else -Rin * ell - 4)
-        out.extend(_stroke_text(_spaced(label), cx - 0.10 * W, ly, 2.2, color=black, f=feed))
+    def surf(r, th):
+        return fold * ((r ** 1.1) * math.cos(petals * th) + 0.20 * (r ** 2) * math.cos(2 * petals * th))
 
-    plane(yhi, "INPUT SPACE", True)
-    plane(ylo, "OUTPUT SPACE", False)
+    # ---- surface vertex grid --------------------------------------------
+    SX = np.zeros((nu + 1, nv + 1))
+    SY = np.zeros((nu + 1, nv + 1))
+    DEP = np.zeros((nu + 1, nv + 1))
+    for i in range(nu + 1):
+        r = i / nu
+        for j in range(nv + 1):
+            th = 2 * math.pi * j / nv
+            wx, wz = r * math.cos(th), r * math.sin(th)
+            wy = surf(r, th)
+            sx, sy = proj(wx, wy, wz)
+            SX[i, j], SY[i, j], DEP[i, j] = sx, sy, depth(wx, wy, wz)
 
-    # right-side stage labels
-    rx = cx + 0.34 * W
-    out += _stroke_text(_spaced("LINEAR TRANSFORM"), rx, yhi - 0.10 * H, 1.8, color=black, f=feed)
-    out += _stroke_text(_spaced("NONLINEAR ACTIVATION"), rx, ylo + 0.50 * span, 1.8, color=accent, f=feed)
-    out += _stroke_text(_spaced("LINEAR TRANSFORM"), rx, ylo + 0.10 * H, 1.8, color=black, f=feed)
+    # ---- z-buffer (hidden-line): rasterize the surface quads -------------
+    PXW, PXH = 240, 320
+    pad = 4.0
+    sxmin, sxmax = float(SX.min()) - pad, float(SX.max()) + pad
+    symin, symax = float(SY.min()) - pad, float(SY.max()) + pad
+    zbuf = np.full((PXH, PXW), -1e18)
+    PX = (SX - sxmin) / (sxmax - sxmin) * (PXW - 1)
+    PY = (SY - symin) / (symax - symin) * (PXH - 1)
+    dspan = float(DEP.max() - DEP.min()) or 1.0
+    bias = 0.02 * dspan
 
-    # title + caption
-    xT = x0 + 0.03 * W
-    out += type_block(["MLP"], xT, y1 - 6.0, height=4.2, pen=black, underline=False, f=feed)
-    out += _stroke_text(_spaced("NONLINEAR TRANSFORMATION"), xT, y1 - 16.0, 2.2, color=black, f=feed)
-    out += _stroke_text(_spaced("SAME TOKENS"), xT, y0 + 26.0, 2.0, color=black, f=feed)
-    out += _stroke_text(_spaced("DIFFERENT GEOMETRY"), xT, y0 + 21.0, 2.0, color=black, f=feed)
-    out += _stroke_text(_spaced("A RICHER SPACE"), xT, y0 + 16.0, 2.0, color=black, f=feed)
+    def fill_tri(p0, p1, p2, d0, d1, d2):
+        minx = int(max(0, math.floor(min(p0[0], p1[0], p2[0]))))
+        maxx = int(min(PXW - 1, math.ceil(max(p0[0], p1[0], p2[0]))))
+        miny = int(max(0, math.floor(min(p0[1], p1[1], p2[1]))))
+        maxy = int(min(PXH - 1, math.ceil(max(p0[1], p1[1], p2[1]))))
+        if maxx < minx or maxy < miny:
+            return
+        den = (p1[1] - p2[1]) * (p0[0] - p2[0]) + (p2[0] - p1[0]) * (p0[1] - p2[1])
+        if abs(den) < 1e-9:
+            return
+        X, Y = np.meshgrid(np.arange(minx, maxx + 1), np.arange(miny, maxy + 1))
+        aa = ((p1[1] - p2[1]) * (X - p2[0]) + (p2[0] - p1[0]) * (Y - p2[1])) / den
+        bb = ((p2[1] - p0[1]) * (X - p2[0]) + (p0[0] - p2[0]) * (Y - p2[1])) / den
+        cc = 1 - aa - bb
+        inside = (aa >= -1e-4) & (bb >= -1e-4) & (cc >= -1e-4)
+        d = aa * d0 + bb * d1 + cc * d2
+        sub = zbuf[miny : maxy + 1, minx : maxx + 1]
+        m = inside & (d > sub)
+        sub[m] = d[m]
 
-    # bottom mini-diagram: grid → S → S → fold (each layer bends the space more)
-    my, gx, sq = y0 + 11.0, x0 + 0.52 * W, 11.0
-    for c in range(4):
-        bx = gx + c * (sq + 8)
-        out += _poly([(bx, my - sq / 2), (bx + sq, my - sq / 2), (bx + sq, my + sq / 2), (bx, my + sq / 2), (bx, my - sq / 2)], color=black, f=feed)
-        bend = c / 3.0
-        curve = [
-            (bx + sq * u / 20, my - sq / 2 + sq * (0.5 + 0.42 * math.sin(2 * math.pi * bend * u / 20 * 1.5)))
-            for u in range(21)
-        ]
-        out += _poly(curve, color=accent, f=feed)
-        if c < 3:
-            out += _poly([(bx + sq + 1, my), (bx + sq + 7, my)], color=black, f=feed)
-            out += _poly([(bx + sq + 5, my + 1.1), (bx + sq + 7, my), (bx + sq + 5, my - 1.1)], color=black, f=feed)
+    for i in range(nu):
+        for j in range(nv):
+            p00 = (PX[i, j], PY[i, j])
+            p10 = (PX[i + 1, j], PY[i + 1, j])
+            p11 = (PX[i + 1, j + 1], PY[i + 1, j + 1])
+            p01 = (PX[i, j + 1], PY[i, j + 1])
+            fill_tri(p00, p10, p11, DEP[i, j], DEP[i + 1, j], DEP[i + 1, j + 1])
+            fill_tri(p00, p11, p01, DEP[i, j], DEP[i + 1, j + 1], DEP[i, j + 1])
+
+    def visible(sx, sy, dep):
+        px = int((sx - sxmin) / (sxmax - sxmin) * (PXW - 1))
+        py = int((sy - symin) / (symax - symin) * (PXH - 1))
+        if px < 0 or px >= PXW or py < 0 or py >= PXH:
+            return True  # off-surface → nothing to occlude
+        return dep >= zbuf[py, px] - bias
+
+    def emit_visible(samples):
+        # samples: list of (sx, sy, dep, pen); draw only visible runs
+        run, runpen = [], None
+        for sx, sy, dep, pen in samples:
+            if visible(sx, sy, dep):
+                if runpen is None or pen == runpen:
+                    run.append((sx, sy))
+                    runpen = pen
+                else:
+                    if len(run) >= 2:
+                        out.extend(_poly(run, color=runpen, f=feed))
+                    run, runpen = [(sx, sy)], pen
+            else:
+                if len(run) >= 2:
+                    out.extend(_poly(run, color=runpen, f=feed))
+                run, runpen = [], None
+        if len(run) >= 2:
+            out.extend(_poly(run, color=runpen, f=feed))
+
+    # ---- draw the visible surface mesh (the fold, hidden-line removed) ----
+    ridge = {0, nv // (2 * petals)}  # crease columns → red fold-ridges
+    for j in range(nv + 1):  # radial lines
+        red = (j % (nv // petals)) < 1 or ((j - nv // (2 * petals)) % (nv // petals)) < 1
+        emit_visible([(SX[i, j], SY[i, j], DEP[i, j], accent if red else black) for i in range(nu + 1)])
+    for i in range(2, nu + 1):  # rings (skip the tiny center rings)
+        emit_visible([(SX[i, j], SY[i, j], DEP[i, j], black) for j in range(nv + 1)])
+
+    # ---- streamlines: INPUT plane → through the fold → OUTPUT plane -------
+    for s_i in range(nstream):
+        th0 = 2 * math.pi * s_i / nstream
+        r0 = 0.6 + 0.4 * rng.random()
+        samples = []
+        pen = accent if s_i % 4 == 0 else black
+        STEPS = 74
+        for k in range(STEPS + 1):
+            s = k / STEPS
+            wy_lin = Hy - 2 * Hy * s
+            rr = r0 * (0.42 + 0.58 * abs(2 * s - 1))  # funnel to a ring, not a point
+            th = th0 + twist * s
+            blend = math.exp(-((s - 0.5) / 0.22) ** 2)
+            wy = wy_lin * (1 - blend) + surf(min(1.0, rr), th) * blend
+            wx, wz = rr * math.cos(th), rr * math.sin(th)
+            sx, sy = proj(wx, wy, wz)
+            samples.append((sx, sy, depth(wx, wy, wz), pen))
+        emit_visible(samples)
+
+    # ---- INPUT / OUTPUT planes: dot lattice + frame + droplines ----------
+    def plane(wy, label, above):
+        g = 11
+        for ia in range(g):
+            for ib in range(g):
+                gu, gv = -1.15 + 2.3 * ia / (g - 1), -1.15 + 2.3 * ib / (g - 1)
+                sx, sy = proj(gu, wy, gv)
+                out.extend(_dot(sx, sy, 0.45, color=black, f=feed))
+        corners = [(-1.15, -1.15), (1.15, -1.15), (1.15, 1.15), (-1.15, 1.15), (-1.15, -1.15)]
+        out.extend(_poly([proj(gu, wy, gv) for gu, gv in corners], color=black, f=feed))
+        c = proj(0, wy, 0)
+        ly = c[1] + (14 if above else -8)
+        out.extend(_stroke_text(_spaced(label), c[0] - 0.10 * W, ly, 2.3, color=black, f=feed))
+
+    plane(Hy, "INPUT SPACE", True)
+    plane(-Hy, "OUTPUT SPACE", False)
+    for dl in range(10):  # a few vertical droplines through the ambient volume
+        gu = -1.0 + 2.0 * rng.random()
+        gv = -1.0 + 2.0 * rng.random()
+        seg = []
+        for k in range(0, 21, 2):
+            wy = Hy - 2 * Hy * k / 20
+            p = proj(gu, wy, gv)
+            seg.append(p)
+        for k in range(0, len(seg) - 1, 2):
+            out += _poly([seg[k], seg[k + 1]], color=black, f=feed)
+
+    # ---- furniture -------------------------------------------------------
+    xT = x0 + 0.02 * W
+    out += type_block(["MLP"], xT, y1 - 6.0, height=3.6, pen=black, underline=False, f=feed)
+    out += _stroke_text(_spaced("NONLINEAR TRANSFORMATION"), xT, y1 - 15.0, 2.0, color=black, f=feed)
+    rx = x1 - 0.20 * W
+    out += _stroke_text(_spaced("LINEAR TRANSFORM"), rx, cy0 + 0.30 * H, 1.7, color=black, f=feed)
+    out += _stroke_text(_spaced("NONLINEAR"), rx, cy0 + 0.02 * H, 1.7, color=accent, f=feed)
+    out += _stroke_text(_spaced("ACTIVATION"), rx, cy0 - 0.03 * H, 1.7, color=accent, f=feed)
+    out += _stroke_text(_spaced("LINEAR TRANSFORM"), rx, cy0 - 0.30 * H, 1.7, color=black, f=feed)
     return out
