@@ -18,7 +18,11 @@ scores **avg ≥ 8/10 with no dimension below 7** (all seven dimensions; a decla
    without flooding; no muddy ink-on-ink collisions; density plottable (≥0.8 mm
    spacing); ≤ 3–4 pen swaps.
 6. **Concept legibility** — the physics/ML idea lands in one glance without reading
-   the caption. The caption confirms, never explains.
+   the caption. The caption confirms, never explains. **NO SCHEMATICS**: if the
+   piece could appear in a textbook, a slide deck, or a Wikipedia article
+   (wiring diagrams, labeled arrows between boxes/circles, axis plots), it
+   fails this dimension outright (≤3). The subject is the PHENOMENON — what the
+   thing DOES — never the apparatus that does it.
 7. **Depth & dimensionality** — the default is NOT flat: use occlusion/overlap,
    projected 3D forms (spheres, tubes, perspective), line-weight or dash-density
    falling off with distance, tone gradients that turn planes into volumes.
