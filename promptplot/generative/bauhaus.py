@@ -1930,23 +1930,23 @@ def bauhaus_settling(
 def bauhaus_relevance(
     rng: SeededRNG,
     bounds: Bounds,
-    colors: int = 3,
+    colors: int = 4,
     nu: int = 48,
     nv: int = 48,
     feed: int = 2200,
 ) -> List[GCodeCommand]:
     """ATTENTION AS TOPOGRAPHY — a transformer's attention as a vertical stack of
-    5 terrain stages, rendered by the from-scratch 3D pen-plotter engine:
-    (1) the CANVAS GRID where Q and K meet, (2) QKᵀ raw similarity PEAKS (dot
-    products create terrain), (3) SOFTMAX as smooth probability CONTOURS,
-    (4) V the underlying semantic terrain, (5) OUTPUT — V pulled upward by the
-    gravity of context. Each surface is hidden-line removed (z-buffer); droplines
-    tie the same query·key locations through every stage. Black + red, lines only."""
+    5 hidden-line terrain stages (from-scratch 3D pen-plotter engine): the CANVAS
+    GRID where Q (red, from the left) and K (blue, from above) meet; QKᵀ where
+    their landscapes MERGE into raw similarity cones (red = query side, blue = key
+    side); SOFTMAX as smooth probability contours; V the semantic terrain (green);
+    OUTPUT = V pulled upward by attention. Colour-coded blue/red/green/black; best
+    plotted with 4 pens. Droplines tie the query·key anchors through every stage."""
     import numpy as np
 
     x0, y0, x1, y1 = bounds
     W, H = x1 - x0, y1 - y0
-    accent, black = _pen(PINK, colors), _pen(BLACK, colors)  # PINK slot → crimson
+    blue, red, green, blk = 0, 1, 2, 3  # render with dodgerblue/crimson/forestgreen/black
     out: List[GCodeCommand] = []
 
     cx = x0 + 0.52 * W
@@ -1959,13 +1959,12 @@ def bauhaus_relevance(
     def dep(wx, wy, wz):
         return -wz + 0.05 * wy
 
-    # shared query·key match peaks (X = query pos, Y = key pos) — the 3 anchors
     peaks = [(-0.52, 0.14, 1.0), (0.03, -0.22, 0.80), (0.52, 0.30, 0.92)]
 
     def f_qkt(wx, wz):
-        z = 0.06 * (rng.fbm(wx * 7.0 + 3.1, wz * 7.0 + 6.7) - 0.5) * 2  # fine jagged floor
+        z = 0.06 * (rng.fbm(wx * 7.0 + 3.1, wz * 7.0 + 6.7) - 0.5) * 2
         for px, py, a in peaks:
-            z += 1.5 * a * math.exp(-((wx - px) ** 2 + (wz - py) ** 2) / (2 * 0.028))  # sharp cones
+            z += 1.5 * a * math.exp(-((wx - px) ** 2 + (wz - py) ** 2) / (2 * 0.028))
         return z
 
     def f_smooth(wx, wz):
@@ -1987,11 +1986,12 @@ def bauhaus_relevance(
     step = (cy_top - cy_bot) / 4.0
     cyL = [cy_top - k * step for k in range(5)]
 
-    # ---- generic z-buffered terrain (self hidden-line removal) -----------
-    def render_terrain(cyc, hfun, hscale):
+    # ---- z-buffered terrain (self hidden-line) with optional per-vertex colour
+    def render_terrain(cyc, hfun, hscale, pen=blk, penfn=None):
         SX = np.zeros((nu + 1, nv + 1))
         SY = np.zeros((nu + 1, nv + 1))
         DE = np.zeros((nu + 1, nv + 1))
+        PV = np.full((nu + 1, nv + 1), pen)
         for i in range(nu + 1):
             wx = -1 + 2 * i / nu
             for j in range(nv + 1):
@@ -1999,6 +1999,8 @@ def bauhaus_relevance(
                 wy = hfun(wx, wz) * hscale
                 p = proj(wx, wy, wz, cyc)
                 SX[i, j], SY[i, j], DE[i, j] = p[0], p[1], dep(wx, wy, wz)
+                if penfn is not None:
+                    PV[i, j] = penfn(wx, wz)
         PXW, PXH = 210, 150
         sxmin, sxmax = float(SX.min()) - 3, float(SX.max()) + 3
         symin, symax = float(SY.min()) - 3, float(SY.max()) + 3
@@ -2040,61 +2042,78 @@ def bauhaus_relevance(
                 return True
             return d >= zb[py, px] - bias
 
-        def draw(pts):
-            run = []
-            for (i, j) in pts:
+        def draw(idx):
+            run, cur = [], None
+            for (i, j) in idx:
                 if vis(SX[i, j], SY[i, j], DE[i, j]):
-                    run.append((SX[i, j], SY[i, j]))
-                elif len(run) >= 2:
-                    out.extend(_poly(run, color=black, f=feed))
-                    run = []
+                    pp = int(PV[i, j])
+                    if cur is None or pp == cur:
+                        run.append((SX[i, j], SY[i, j]))
+                        cur = pp
+                    else:
+                        if len(run) >= 2:
+                            out.extend(_poly(run, color=cur, f=feed))
+                        run, cur = [(SX[i, j], SY[i, j])], pp
                 else:
-                    run = []
+                    if len(run) >= 2:
+                        out.extend(_poly(run, color=cur, f=feed))
+                    run, cur = [], None
             if len(run) >= 2:
-                out.extend(_poly(run, color=black, f=feed))
+                out.extend(_poly(run, color=cur, f=feed))
 
         for i in range(nu + 1):
             draw([(i, j) for j in range(nv + 1)])
         for j in range(nv + 1):
             draw([(i, j) for i in range(nu + 1)])
 
-    # ---- 1. CANVAS GRID (flat) + Q (left) & K (top) arrows ---------------
+    def near_anchor(wx, wz, r=0.24):
+        for k, (px, py, _a) in enumerate(peaks):
+            if math.hypot(wx - px, wz - py) < r:
+                return k
+        return -1
+
+    # ---- 1. CANVAS GRID (flat) + Q (red, left) & K (blue, top) arrows ----
     c0 = cyL[0]
     gc = 16
     for i in range(gc + 1):
         wx = -1 + 2 * i / gc
-        out += _poly([proj(wx, 0, -1 + 2 * j / gc, c0) for j in range(gc + 1)], color=black, f=feed)
+        out += _poly([proj(wx, 0, -1 + 2 * j / gc, c0) for j in range(gc + 1)], color=blk, f=feed)
     for j in range(gc + 1):
         wz = -1 + 2 * j / gc
-        out += _poly([proj(-1 + 2 * i / gc, 0, wz, c0) for i in range(gc + 1)], color=black, f=feed)
-    # arrows run PARALLEL to the isometric grid axes (not screen h/v)
+        out += _poly([proj(-1 + 2 * i / gc, 0, wz, c0) for i in range(gc + 1)], color=blk, f=feed)
     uxm = math.hypot(SXX, SYX)
-    uxx, uxy = SXX / uxm, SYX / uxm  # +X (query) screen direction
+    uxx, uxy = SXX / uxm, SYX / uxm
     uym = math.hypot(SXZ, SYZ)
-    uyx, uyy = SXZ / uym, SYZ / uym  # +Y (key) screen direction
+    uyx, uyy = SXZ / uym, SYZ / uym
 
-    def arrow(e, dx, dy, pen, ln=20.0):  # shaft ending at e, pointing (dx,dy)
+    def arrow(e, dx, dy, pen, ln=20.0):
         s = (e[0] - ln * dx, e[1] - ln * dy)
         out.extend(_poly([s, e], color=pen, f=feed))
         px, py = -dy, dx
         out.extend(_poly([(e[0] - 4 * dx + 1.5 * px, e[1] - 4 * dy + 1.5 * py), e,
                           (e[0] - 4 * dx - 1.5 * px, e[1] - 4 * dy - 1.5 * py)], color=pen, f=feed))
 
-    for t in range(5):  # Q queries enter along the +X grid axis from the left
+    for t in range(5):
         wz = -0.8 + 1.6 * t / 4
         e = proj(-1, 0, wz, c0)
-        arrow((e[0] - 3 * uxx, e[1] - 3 * uxy), uxx, uxy, accent)
-    for t in range(6):  # K keys descend along the −Y grid axis from the far edge
+        arrow((e[0] - 3 * uxx, e[1] - 3 * uxy), uxx, uxy, red)
+    for t in range(6):
         wx = -0.8 + 1.6 * t / 5
         e = proj(wx, 0, 1, c0)
-        arrow((e[0] + 3 * uyx, e[1] + 3 * uyy), -uyx, -uyy, black)
-    out += _stroke_text(_spaced("Q QUERIES"), proj(-1, 0, -0.9, c0)[0] - 24, c0 + 0.10 * H, 1.7, color=accent, f=feed)
-    out += _stroke_text(_spaced("K KEYS"), proj(0, 0, 1, c0)[0] - 8, c0 + 0.15 * H, 1.7, color=black, f=feed)
+        arrow((e[0] + 3 * uyx, e[1] + 3 * uyy), -uyx, -uyy, blue)
+    out += _stroke_text(_spaced("Q QUERIES"), proj(-1, 0, -0.9, c0)[0] - 26, c0 + 0.10 * H, 1.7, color=red, f=feed)
+    out += _stroke_text(_spaced("K KEYS"), proj(0, 0, 1, c0)[0] + 4, c0 + 0.14 * H, 1.7, color=blue, f=feed)
 
-    # ---- 2. QKT raw similarity peaks -------------------------------------
-    render_terrain(cyL[1], f_qkt, 0.9)
+    # ---- 2. QKT — Q(red) & K(blue) landscapes MERGE into similarity cones --
+    def qk_pen(wx, wz):
+        k = near_anchor(wx, wz, 0.26)
+        if k < 0:
+            return blk
+        return red if k % 2 == 0 else blue  # query-side red, key-side blue
 
-    # ---- 3. SOFTMAX as smooth probability contours ----------------------
+    render_terrain(cyL[1], f_qkt, 0.9, pen=blk, penfn=qk_pen)
+
+    # ---- 3. SOFTMAX probability contours ---------------------------------
     c2 = cyL[2]
     gN = 90
     xs = [-1 + 2 * i / gN for i in range(gN + 1)]
@@ -2106,45 +2125,47 @@ def bauhaus_relevance(
         for ch in _chain_segments(_marching_squares(F, xs, ys, iso)):
             if len(ch) < 4:
                 continue
-            out += _poly([proj(wx, iso * 0.6, wz, c2) for (wx, wz) in ch], color=black, f=feed)
+            out += _poly([proj(wx, iso * 0.6, wz, c2) for (wx, wz) in ch], color=blk, f=feed)
 
-    # ---- 4. V semantic terrain ------------------------------------------
-    render_terrain(cyL[3], f_v, 0.9)
+    # ---- 4. V — the semantic terrain (green) -----------------------------
+    render_terrain(cyL[3], f_v, 0.9, pen=green)
 
-    # ---- 5. OUTPUT — V pulled up by attention ---------------------------
-    render_terrain(cyL[4], f_out, 0.62)
+    # ---- 5. OUTPUT — V pulled up by attention (peaks tinted) -------------
+    def o_pen(wx, wz):
+        return green if near_anchor(wx, wz, 0.20) >= 0 else blk
+
+    render_terrain(cyL[4], f_out, 0.62, pen=blk, penfn=o_pen)
 
     # ---- droplines tying the 3 anchors through every stage --------------
     for px, py, _a in peaks:
         sx = cx + px * SXX + py * SXZ
         yt = proj(px, 0, py, cyL[0])[1]
         yb = proj(px, f_out(px, py) * 0.62, py, cyL[4])[1]
-        yv = min(yt, yb)
-        ye = max(yt, yb)
+        yv, ye = min(yt, yb), max(yt, yb)
         k = 0
         while yv < ye:
             if k % 2 == 0:
-                out += _poly([(sx, yv), (sx, min(ye, yv + 3.0))], color=black, f=feed)
+                out += _poly([(sx, yv), (sx, min(ye, yv + 3.0))], color=blk, f=feed)
             yv += 5.0
             k += 1
 
-    # ---- left numbered stages + right stage labels ----------------------
+    # ---- numbered stages (left) + stage labels (right) ------------------
     xL = x0 + 0.015 * W
     stages = [
-        ("1", "THE CANVAS GRID", "QK T"),
-        ("2", "THE INTERSECTION", "QK T RAW"),
-        ("3", "SOFTMAX", "PROBABILITIES"),
-        ("4", "VALUES V", "SEMANTIC TERRAIN"),
-        ("5", "OUTPUT", "ATTENTION QKV"),
+        ("1", "THE CANVAS GRID", "Q AND K MEET", blk),
+        ("2", "THE INTERSECTION", "S = QK T", red),
+        ("3", "SOFTMAX", "A = SOFTMAX S", blk),
+        ("4", "VALUES V", "SEMANTIC TERRAIN", green),
+        ("5", "OUTPUT", "O = A V", blk),
     ]
-    for k, (num, title, rlab) in enumerate(stages):
-        out += _stroke_text(num, xL, cyL[k] + 4, 3.0, color=black, f=feed)
-        out += _stroke_text(_spaced(title), xL + 6, cyL[k] + 4, 1.9, color=black, f=feed)
-        out += _stroke_text(_spaced(rlab), x1 - 0.16 * W, cyL[k], 1.7, color=(accent if k in (1, 2) else black), f=feed)
+    for k, (num, title, rlab, rc) in enumerate(stages):
+        out += _stroke_text(num, xL, cyL[k] + 4, 3.0, color=blk, f=feed)
+        out += _stroke_text(_spaced(title), xL + 6, cyL[k] + 4, 1.9, color=blk, f=feed)
+        out += _stroke_text(_spaced(rlab), x1 - 0.16 * W, cyL[k], 1.7, color=rc, f=feed)
 
-    out += type_block(["ATTENTION AS"], xL, y1 - 5.0, height=3.4, pen=black, underline=False, f=feed)
-    out += _stroke_text(_spaced("TOPOGRAPHY"), xL, y1 - 12.0, 3.0, color=black, f=feed)
-    out += _stroke_text(_spaced("QUERIES SHAPE CONTENT THROUGH CONTEXT"), xL, y1 - 18.0, 1.7, color=black, f=feed)
+    out += type_block(["ATTENTION AS"], xL, y1 - 5.0, height=3.4, pen=blk, underline=False, f=feed)
+    out += _stroke_text(_spaced("TOPOGRAPHY"), xL, y1 - 12.0, 3.0, color=blk, f=feed)
+    out += _stroke_text(_spaced("QUERIES SHAPE CONTENT THROUGH CONTEXT"), xL, y1 - 18.0, 1.7, color=blk, f=feed)
     return out
 
 
