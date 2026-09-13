@@ -2067,16 +2067,27 @@ def bauhaus_relevance(
     for j in range(gc + 1):
         wz = -1 + 2 * j / gc
         out += _poly([proj(-1 + 2 * i / gc, 0, wz, c0) for i in range(gc + 1)], color=black, f=feed)
-    for t in range(5):  # Q queries enter from the left
+    # arrows run PARALLEL to the isometric grid axes (not screen h/v)
+    uxm = math.hypot(SXX, SYX)
+    uxx, uxy = SXX / uxm, SYX / uxm  # +X (query) screen direction
+    uym = math.hypot(SXZ, SYZ)
+    uyx, uyy = SXZ / uym, SYZ / uym  # +Y (key) screen direction
+
+    def arrow(e, dx, dy, pen, ln=20.0):  # shaft ending at e, pointing (dx,dy)
+        s = (e[0] - ln * dx, e[1] - ln * dy)
+        out.extend(_poly([s, e], color=pen, f=feed))
+        px, py = -dy, dx
+        out.extend(_poly([(e[0] - 4 * dx + 1.5 * px, e[1] - 4 * dy + 1.5 * py), e,
+                          (e[0] - 4 * dx - 1.5 * px, e[1] - 4 * dy - 1.5 * py)], color=pen, f=feed))
+
+    for t in range(5):  # Q queries enter along the +X grid axis from the left
         wz = -0.8 + 1.6 * t / 4
-        p = proj(-1, 0, wz, c0)
-        out += _poly([(p[0] - 22, p[1]), (p[0] - 2, p[1])], color=accent, f=feed)
-        out += _poly([(p[0] - 5, p[1] + 1.2), (p[0] - 2, p[1]), (p[0] - 5, p[1] - 1.2)], color=accent, f=feed)
-    for t in range(6):  # K keys descend from above
+        e = proj(-1, 0, wz, c0)
+        arrow((e[0] - 3 * uxx, e[1] - 3 * uxy), uxx, uxy, accent)
+    for t in range(6):  # K keys descend along the −Y grid axis from the far edge
         wx = -0.8 + 1.6 * t / 5
-        p = proj(wx, 0, 1, c0)
-        out += _poly([(p[0], p[1] + 20), (p[0], p[1] + 2)], color=black, f=feed)
-        out += _poly([(p[0] - 1.2, p[1] + 5), (p[0], p[1] + 2), (p[0] + 1.2, p[1] + 5)], color=black, f=feed)
+        e = proj(wx, 0, 1, c0)
+        arrow((e[0] + 3 * uyx, e[1] + 3 * uyy), -uyx, -uyy, black)
     out += _stroke_text(_spaced("Q QUERIES"), proj(-1, 0, -0.9, c0)[0] - 24, c0 + 0.10 * H, 1.7, color=accent, f=feed)
     out += _stroke_text(_spaced("K KEYS"), proj(0, 0, 1, c0)[0] - 8, c0 + 0.15 * H, 1.7, color=black, f=feed)
 
