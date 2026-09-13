@@ -12,8 +12,9 @@ import inspect
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import generators as _g
-from . import bauhaus as _b
-from . import physics as _p
+from .pieces import abstract as _ab
+from .pieces import ml as _ml
+from .pieces import physics as _ph
 from .rng import SeededRNG
 
 GENERATOR_REGISTRY = {
@@ -56,24 +57,24 @@ GENERATOR_REGISTRY = {
     "black_hole_bauhaus": _g.black_hole_bauhaus,
     "big_bang": _g.big_bang,
     "big_bang_v1": _g.big_bang_v1,
-    "bauhaus_attractor": _b.bauhaus_attractor,
-    "bauhaus_attention": _b.bauhaus_attention,
-    "bauhaus_weights": _b.bauhaus_weights,
-    "bauhaus_gradient": _b.bauhaus_gradient,
-    "bauhaus_resonance": _b.bauhaus_resonance,
-    "bauhaus_loom": _b.bauhaus_loom,
-    "bauhaus_decision": _b.bauhaus_decision,
-    "bauhaus_warped_frame": _b.bauhaus_warped_frame,
-    "bauhaus_conveyor": _b.bauhaus_conveyor,
-    "bauhaus_settling": _b.bauhaus_settling,
-    "bauhaus_relevance": _b.bauhaus_relevance,
-    "bauhaus_relevance_v1": _b.bauhaus_relevance_v1,
-    "bauhaus_memory": _b.bauhaus_memory,
-    "bauhaus_memory_v1": _b.bauhaus_memory_v1,
-    "bauhaus_locality": _b.bauhaus_locality,
-    "bauhaus_locality_v1": _b.bauhaus_locality_v1,
-    "bauhaus_manifold": _b.bauhaus_manifold,
-    "gw150914": _p.gw150914,
+    "bauhaus_attractor": _ab.bauhaus_attractor,
+    "bauhaus_attention": _ml.bauhaus_attention,
+    "bauhaus_weights": _ml.bauhaus_weights,
+    "bauhaus_gradient": _ml.bauhaus_gradient,
+    "bauhaus_resonance": _ab.bauhaus_resonance,
+    "bauhaus_loom": _ml.bauhaus_loom,
+    "bauhaus_decision": _ml.bauhaus_decision,
+    "bauhaus_warped_frame": _ab.bauhaus_warped_frame,
+    "bauhaus_conveyor": _ml.bauhaus_conveyor,
+    "bauhaus_settling": _ml.bauhaus_settling,
+    "bauhaus_relevance": _ml.bauhaus_relevance,
+    "bauhaus_relevance_v1": _ml.bauhaus_relevance_v1,
+    "bauhaus_memory": _ml.bauhaus_memory,
+    "bauhaus_memory_v1": _ml.bauhaus_memory_v1,
+    "bauhaus_locality": _ml.bauhaus_locality,
+    "bauhaus_locality_v1": _ml.bauhaus_locality_v1,
+    "bauhaus_manifold": _ml.bauhaus_manifold,
+    "gw150914": _ph.gw150914,
 }
 
 _SKIP_PARAMS = {"rng", "bounds"}

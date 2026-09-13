@@ -423,3 +423,15 @@ def test_black_hole_retro80_smoke():
             assert BOUNDS[0] - 0.5 <= c.x <= BOUNDS[2] + 0.5
         if c.y is not None:
             assert BOUNDS[1] - 0.5 <= c.y <= BOUNDS[3] + 0.5
+
+
+def test_shim_reexports_are_identities():
+    """The bauhaus.py compat shim re-exports the SAME objects as the new homes."""
+    from promptplot.generative import bauhaus, engine3d, kit
+    from promptplot.generative.pieces import ml, physics as pieces_physics
+    from promptplot.generative import physics as physics_shim
+
+    assert bauhaus.bauhaus_memory is ml.bauhaus_memory
+    assert bauhaus.type_block is kit.type_block
+    assert bauhaus._zbuf_terrain is engine3d._zbuf_terrain
+    assert physics_shim.gw150914 is pieces_physics.gw150914
