@@ -196,15 +196,21 @@ orbits, plus marks, swatch bars, crosshair rules, spaced-caps `type_block`/`scal
 (SENSITIVE DEPENDENCE — one Lorenz line, solid discs in the lobe eyes), `bauhaus_attention`
 (GPT-2 sink chords in bold pink), `bauhaus_weights` (PARAMETER FIELD — Q|K|V Hinton discs
 from the trained checkpoint), `bauhaus_gradient`
-(GRADIENT DESCENT — contour bowls + descent path), `bauhaus_resonance` (harmonograph),
+(WATERSHED — gradient descent as a basin of attraction: the whole plane raining downhill via
+exact RK4 on an analytic 2-Gaussian loss into two sinks, the separatrix left as blank paper,
+one blue heavy-ball-momentum channel overshooting the deep sink and ringing back; APPROVED),
+`bauhaus_resonance` (harmonograph),
 `bauhaus_loom` (FORWARD PASS — the perceptron rethought as an Anni-Albers weaving: a real
 weight matrix woven warp/weft, over/under by sign, float by magnitude; APPROVED),
 `bauhaus_decision` (DECISION SURFACE — the network drawn as its FUNCTION not its wiring: the
 exact iso-0 marching-squares knife through input space, ±margin shoulders opening a corridor,
 support-vector discs on the shoulders, point clouds coloured by the true sign of f; trained
-query directions from the checkpoint drive the readout when `weights=` is given; APPROVED).
-Retired: `bauhaus_perceptron` (kept in-file for version history, deregistered — superseded by
-the loom + decision pieces).
+query directions from the checkpoint drive the readout when `weights=` is given; APPROVED),
+`bauhaus_warped_frame` (WARPED FRAME — gravity is the grid: a straight Bauhaus lattice bent by
+an exact closed-form Schwarzschild point-lens around an unpainted void, one loud pink photon
+ring at b=3√3·M; a fresh, disk-less black hole distinct from `black_hole_bauhaus`).
+Retired: `bauhaus_perceptron` and `bauhaus_gradient_v1` (kept in-file for version history,
+deregistered — superseded by the loom+decision and WATERSHED reworks).
 Related one-off: `black_hole_bauhaus`. Renders go to ~/Downloads for voting; winners move
 to `leo/bauhaus/`.
 

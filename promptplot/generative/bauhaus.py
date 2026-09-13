@@ -773,11 +773,248 @@ def bauhaus_perceptron(
 
 
 # ---------------------------------------------------------------------------
-# piece 06 — GRADIENT DESCENT
+# piece 06 — GRADIENT DESCENT  → reworked as WATERSHED (basin of attraction)
 # ---------------------------------------------------------------------------
 
 
 def bauhaus_gradient(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    n_seeds: int = 220,
+    min_sep: float = 2.4,
+    rk4_dt: float = 0.9,
+    max_steps: int = 420,
+    deep_depth: float = 1.0,
+    shallow_depth: float = 0.55,
+    settle_eps: float = 0.006,
+    momentum: float = 0.9,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """WATERSHED — gradient descent as a BASIN OF ATTRACTION. The whole
+    parameter plane rains downhill (exact RK4 on an analytic 2-Gaussian loss)
+    into two sinks; the separatrix is left as a knife of blank paper. Each
+    streamline is black on the plateau and inks its last stretch in its
+    destination's hue (blue = deep global well, pink = shallow local trap). One
+    blue heavy-ball-momentum channel visibly OVERSHOOTS the deep sink and rings
+    back — the optimizer, not decorative flow."""
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    blue, pink, black = _pen(BLUE, colors), _pen(PINK, colors), _pen(BLACK, colors)
+    out: List[GCodeCommand] = []
+
+    fx0, fy0, fx1, fy1 = x0 + 6, y0 + 12, x1 - 6, y1 - 22
+    fw, fh = fx1 - fx0, fy1 - fy0
+    rect_keep = _rect_keep((fx0, fy0, fx1, fy1))
+    typebox = lambda p: p[0] < fx0 + 0.34 * W and p[1] > fy1 - 0.16 * H
+    keep = lambda p: rect_keep(p) and not typebox(p)
+
+    def u2px(u):
+        return fx0 + (u + 1) / 2 * fw
+
+    def v2py(v):
+        return fy0 + (v + 1) / 2 * fh
+
+    # exact analytic loss: two negative Gaussians + a mild draining bowl
+    gux, guy, sd = -0.34, -0.30, 0.42  # deep global well (lower-left)
+    sux, svy, ss = 0.40, 0.34, 0.55  # shallow local trap (upper-right)
+
+    def gradL(u, v):
+        e1 = deep_depth * math.exp(-((u - gux) ** 2 + (v - guy) ** 2) / (2 * sd * sd))
+        e2 = shallow_depth * math.exp(-((u - sux) ** 2 + (v - svy) ** 2) / (2 * ss * ss))
+        gx = 0.24 * u + e1 * (u - gux) / (sd * sd) + e2 * (u - sux) / (ss * ss)
+        gy = 0.24 * v + e1 * (v - guy) / (sd * sd) + e2 * (v - svy) / (ss * ss)
+        return gx, gy
+
+    def rhs(u, v):
+        gx, gy = gradL(u, v)
+        n = math.hypot(gx, gy) or 1e-9
+        return -gx / n, -gy / n
+
+    # locate the TWO true sinks by descent from a coarse lattice
+    def descend(u, v):
+        for _ in range(800):
+            gx, gy = gradL(u, v)
+            n = math.hypot(gx, gy)
+            if n < settle_eps:
+                break
+            u -= 0.02 * gx
+            v -= 0.02 * gy
+        return u, v
+
+    ends = [descend(-1 + 2 * i / 5, -1 + 2 * j / 5) for i in range(6) for j in range(6)]
+    gc = [e for e in ends if (e[0] - gux) ** 2 + (e[1] - guy) ** 2 <= (e[0] - sux) ** 2 + (e[1] - svy) ** 2]
+    sc = [e for e in ends if e not in gc]
+    gsink = (sum(p[0] for p in gc) / len(gc), sum(p[1] for p in gc) / len(gc)) if gc else (gux, guy)
+    ssink = (sum(p[0] for p in sc) / len(sc), sum(p[1] for p in sc) / len(sc)) if sc else (sux, svy)
+    gpx, spx = (u2px(gsink[0]), v2py(gsink[1])), (u2px(ssink[0]), v2py(ssink[1]))
+    rscale = max(0.6, min(1.0, min(fw, fh) / 160))
+    deep_r, shallow_r = 13.0 * rscale, 5.0 * rscale
+
+    # evenly-spaced streamlines (Jobard–Lefebvre, seed-based)
+    cell = max(min_sep, 0.5)
+    occ: dict = {}
+
+    def gkey(px, py):
+        return (int((px - fx0) / cell), int((py - fy0) / cell))
+
+    def too_close(px, py):
+        # exempt a capture radius near each sink so tributaries reach the rim
+        if math.hypot(px - gpx[0], py - gpx[1]) < deep_r + 1.2 * min_sep:
+            return False
+        if math.hypot(px - spx[0], py - spx[1]) < shallow_r + 1.2 * min_sep:
+            return False
+        gk = gkey(px, py)
+        for di in (-1, 0, 1):
+            for dj in (-1, 0, 1):
+                for qx, qy in occ.get((gk[0] + di, gk[1] + dj), []):
+                    if (px - qx) ** 2 + (py - qy) ** 2 < min_sep * min_sep:
+                        return True
+        return False
+
+    def register(pts):
+        for px, py in pts:
+            occ.setdefault(gkey(px, py), []).append((px, py))
+
+    h = 0.02 * rk4_dt
+
+    def trace(u, v):
+        pts = [(u2px(u), v2py(v))]
+        skey = None
+        for _ in range(max_steps):
+            gx, gy = gradL(u, v)
+            if math.hypot(gx, gy) < settle_eps:
+                break
+            k1 = rhs(u, v)
+            k2 = rhs(u + 0.5 * h * k1[0], v + 0.5 * h * k1[1])
+            k3 = rhs(u + 0.5 * h * k2[0], v + 0.5 * h * k2[1])
+            k4 = rhs(u + h * k3[0], v + h * k3[1])
+            u += h / 6 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0])
+            v += h / 6 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1])
+            px, py = u2px(u), v2py(v)
+            if math.hypot(px - gpx[0], py - gpx[1]) < deep_r + 0.6:
+                skey = "b"
+                break
+            if math.hypot(px - spx[0], py - spx[1]) < shallow_r + 0.6:
+                skey = "p"
+                break
+            if not keep((px, py)) or too_close(px, py):
+                break
+            pts.append((px, py))
+        if skey is None:
+            db = (pts[-1][0] - gpx[0]) ** 2 + (pts[-1][1] - gpx[1]) ** 2
+            dp = (pts[-1][0] - spx[0]) ** 2 + (pts[-1][1] - spx[1]) ** 2
+            skey = "b" if db <= dp else "p"
+        return pts, skey
+
+    grid_n = max(6, int(math.sqrt(n_seeds)))
+    starts = []
+    for i in range(grid_n):
+        for j in range(grid_n):
+            su = -1.05 + 2.1 * (i + 0.5) / grid_n + rng.uniform(-0.3, 0.3) * (2.1 / grid_n)
+            sv = -1.05 + 2.1 * (j + 0.5) / grid_n + rng.uniform(-0.3, 0.3) * (2.1 / grid_n)
+            starts.append((su, sv))
+    rng.shuffle(starts)
+
+    streams = []  # (pts, skey, start_uv)
+    for su, sv in starts:
+        p0 = (u2px(su), v2py(sv))
+        if not keep(p0) or too_close(*p0):
+            continue
+        pts, skey = trace(su, sv)
+        if len(pts) < 4:
+            continue
+        register(pts)
+        streams.append((pts, skey, (su, sv)))
+
+    # the hero: the blue-basin tributary starting farthest up-plateau
+    hero_idx = -1
+    best_d = -1.0
+    for i, (pts, skey, st) in enumerate(streams):
+        if skey == "b":
+            d = (st[0] - gsink[0]) ** 2 + (st[1] - gsink[1]) ** 2
+            if d > best_d:
+                best_d, hero_idx = d, i
+
+    # draw the field: black plateau, destination-hued last stretch
+    for i, (pts, skey, _st) in enumerate(streams):
+        if i == hero_idx:
+            continue
+        ncut = max(1, int(len(pts) * 0.85))
+        out += _poly(pts[: ncut + 1], color=black, f=feed)
+        tail = pts[ncut:]
+        if len(tail) >= 2:
+            out += _poly(tail, color=(blue if skey == "b" else pink), f=feed)
+
+    # the OVERSHOOT braid — heavy-ball momentum into the deep sink
+    def offset_poly(pts, d):
+        n = len(pts)
+        res = []
+        for i, (px, py) in enumerate(pts):
+            ax, ay = pts[max(0, i - 1)]
+            bx, by = pts[min(n - 1, i + 1)]
+            tx, ty = bx - ax, by - ay
+            L = math.hypot(tx, ty) or 1.0
+            res.append((px - ty / L * d, py + tx / L * d))
+        return res
+
+    if hero_idx >= 0:
+        u, v = streams[hero_idx][2]
+        vel = [0.0, 0.0]
+        path = [(u2px(u), v2py(v))]
+        spd = [0.0]
+        left = False
+        for _ in range(max_steps):
+            gx, gy = gradL(u, v)
+            vel[0] = momentum * vel[0] - 0.03 * gx
+            vel[1] = momentum * vel[1] - 0.03 * gy
+            u += vel[0]
+            v += vel[1]
+            px, py = u2px(u), v2py(v)
+            if not keep((px, py)):
+                break
+            path.append((px, py))
+            spd.append(math.hypot(vel[0], vel[1]))
+            near = (u - gsink[0]) ** 2 + (v - gsink[1]) ** 2
+            if near > 0.09:
+                left = True
+            if left and near < 0.02 and math.hypot(vel[0], vel[1]) < 0.006:
+                break
+        smax = max(spd) or 1.0
+        out += _poly(path, color=blue, f=feed)  # center pass always
+        for d in (-0.38, 0.38):  # outer passes only on the fast opening reach
+            seg = []
+            for i, p in enumerate(path):
+                if spd[i] > 0.4 * smax:
+                    seg.append(p)
+                elif len(seg) >= 2:
+                    out += _poly(offset_poly(seg, d), color=blue, f=feed)
+                    seg = []
+                else:
+                    seg = []
+            if len(seg) >= 2:
+                out += _poly(offset_poly(seg, d), color=blue, f=feed)
+
+    # the sinks: hierarchy at 3m
+    out += circle(gpx[0], gpx[1], deep_r + 2.5, pen=black, f=feed)  # one seating ring = a well
+    out += fill_disc(gpx[0], gpx[1], deep_r, spacing=0.5, pen=blue, f=feed)
+    out += fill_disc(spx[0], spx[1], shallow_r, spacing=0.5, pen=pink, f=feed)
+    out += dotted_circle(spx[0], spx[1], shallow_r + 4, pen=pink, bounds=bounds, f=feed)
+
+    # furniture on a shared left axis
+    xT = x0 + 0.02 * W
+    out += type_block(["WATER", "SHED"], xT, y1 - 6.0, height=3.2, pen=black, f=feed)
+    out += _stroke_text(
+        _spaced("EVERY START FINDS THE VALLEY"), xT, y1 - 20.0, 2.0, color=black, f=feed
+    )
+    out += swatch_bar(x1 - 9.0, y1 - 4.0, [black, blue, pink], size=2.6, f=feed)
+    sad = (u2px((gsink[0] + ssink[0]) / 2), v2py((gsink[1] + ssink[1]) / 2))
+    out += plus_mark(sad[0], sad[1], s=1.4, pen=black, f=feed)
+    out += scale_footer(bounds, text="DTH = -GRAD L . DT", pen=black, height=2.4, f=feed)
+    return out
+
+
+def bauhaus_gradient_v1(
     rng: SeededRNG,
     bounds: Bounds,
     colors: int = 3,
@@ -786,8 +1023,10 @@ def bauhaus_gradient(
     lr: float = 0.22,
     feed: int = 2200,
 ) -> List[GCodeCommand]:
-    """A two-bowl loss landscape as thin contour ellipses; the descent path is a
-    bold pink polyline with solid step dots, the minimum a solid blue disc."""
+    """RETIRED (kept for version history, deregistered). The original GRADIENT
+    DESCENT: a two-bowl loss landscape as thin contour ellipses with a bold pink
+    descent path + step dots. Superseded by the WATERSHED rework of
+    ``bauhaus_gradient`` — flagged as textbook/schematic by the studio critics."""
     x0, y0, x1, y1 = bounds
     W, H = x1 - x0, y1 - y0
     out: List[GCodeCommand] = []
@@ -1259,4 +1498,130 @@ def bauhaus_decision(
     out += swatch_bar(x1 - 9.0, y1 - 4.0, [black, blue, pink], size=2.6, f=feed)
     out += plus_mark(fx1 - 0.16 * fw, fy0 + 0.12 * fh, s=1.4, pen=black, f=feed)
     out += scale_footer(bounds, text="F(X)=SIGN(W.X+B)", pen=black, height=2.4, f=feed)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# piece 09 — WARPED FRAME (gravity is the grid; a fresh, disk-less black hole)
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_warped_frame(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    n_rulings: int = 34,
+    void_frac: float = 0.34,
+    mass_scale: float = 5.19615242,
+    samples: int = 200,
+    blue_inner: int = 8,
+    ring_passes: int = 3,
+    ring_offset: float = 0.34,
+    echo: bool = True,
+    guard_mm: float = 1.5,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """WARPED FRAME — GRAVITY IS THE GRID. A straight Bauhaus lattice bent by an
+    exact closed-form Schwarzschild point-lens around an off-center void. The
+    outer-image map θ=½(β+√(β²+4θ_E²)) guarantees θ≥θ_E, so the shadow interior
+    is provably never inked — the event horizon is bare paper. One loud pink
+    photon ring sits at the critical impact parameter b=3√3·M; the innermost,
+    most-deflected rulings turn blue where space bends hardest."""
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    blue, pink, black = _pen(BLUE, colors), _pen(PINK, colors), _pen(BLACK, colors)
+    out: List[GCodeCommand] = []
+
+    frame_keep = _rect_keep(bounds, inset=0.5)
+    furn = lambda p: not (p[0] < x0 + 0.34 * W and p[1] < y0 + 26)  # bottom-left type band
+    lat_keep = lambda p: frame_keep(p) and furn(p)
+
+    # the void, off-center on the lower-left third (tension)
+    vcx, vcy = x0 + void_frac * W, y0 + 0.38 * H
+    theta_E = mass_scale  # = b_crit = 3√3 M, in M-units
+    shadow_r = 0.15 * H  # photon ring radius on paper
+    sc = shadow_r / theta_E  # mm per M-unit
+
+    def warp(px, py):
+        dx, dy = px - vcx, py - vcy
+        beta_mm = math.hypot(dx, dy)
+        if beta_mm < 1e-6:
+            return None, 1.0
+        beta = beta_mm / sc
+        theta = 0.5 * (beta + math.sqrt(beta * beta + 4 * theta_E * theta_E))
+        s = theta / beta
+        return (vcx + dx * s, vcy + dy * s), s
+
+    # straight background lattice over an over-sized (bleeding) source rect
+    bleed = 0.14
+    lx0, ly0, lx1, ly1 = x0 - bleed * W, y0 - bleed * H, x1 + bleed * W, y1 + bleed * H
+    rulings = []
+    for k in range(n_rulings):
+        yy = ly0 + (ly1 - ly0) * k / (n_rulings - 1)
+        yy += rng.uniform(-0.15, 0.15) * ((ly1 - ly0) / (n_rulings - 1))
+        rulings.append([(lx0 + (lx1 - lx0) * t / (samples - 1), yy) for t in range(samples)])
+    for k in range(n_rulings):
+        xx = lx0 + (lx1 - lx0) * k / (n_rulings - 1)
+        xx += rng.uniform(-0.15, 0.15) * ((lx1 - lx0) / (n_rulings - 1))
+        rulings.append([(xx, ly0 + (ly1 - ly0) * t / (samples - 1)) for t in range(samples)])
+
+    # warp each ruling; drop points inside the shadow+guard (the pile-up smear)
+    warped = []  # (points-with-None-gaps, max_deflection)
+    for line in rulings:
+        w = []
+        maxs = 1.0
+        for px, py in line:
+            q, s = warp(px, py)
+            maxs = max(maxs, s)
+            if q is None:
+                w.append(None)
+                continue
+            if math.hypot(q[0] - vcx, q[1] - vcy) < shadow_r + guard_mm:
+                w.append(None)
+            else:
+                w.append(q)
+        warped.append((w, maxs))
+
+    # the innermost / most-deflected rulings glow blue (curvature magnitude)
+    order = sorted(range(len(warped)), key=lambda i: -warped[i][1])
+    blue_set = set(order[:blue_inner])
+
+    def emit(w, pen):
+        seg = []
+        for p in w:
+            if p is None:
+                if len(seg) >= 2:
+                    for r in _clip_runs([seg], lat_keep):
+                        out.append(("_", r, pen))
+                seg = []
+            else:
+                seg.append(p)
+        if len(seg) >= 2:
+            for r in _clip_runs([seg], lat_keep):
+                out.append(("_", r, pen))
+
+    lattice: List = []
+    _bak = out
+    out = lattice  # collect lattice runs, then emit in pen order (black then blue)
+    for i, (w, _m) in enumerate(warped):
+        emit(w, blue if i in blue_set else black)
+    out = _bak
+    for _, r, pen in [x for x in lattice if x[2] == black]:
+        out += _poly(r, color=black, f=feed)
+    for _, r, pen in [x for x in lattice if x[2] == blue]:
+        out += _poly(r, color=blue, f=feed)
+
+    # the loud pink photon ring at b_crit (3 tight passes = one bold ring)
+    for kp in range(ring_passes):
+        out += circle(vcx, vcy, shadow_r + (kp - (ring_passes - 1) / 2) * ring_offset, pen=pink, f=feed)
+    if echo:  # one plottable self-similar echo (e^-π out); e^-2π is sub-0.8mm, dropped
+        out += circle(vcx, vcy, shadow_r * (1 + math.exp(-math.pi)), pen=pink, f=feed)
+
+    out += plus_mark(vcx, vcy, s=1.2, pen=black, f=feed)  # the singularity
+
+    xT = x0 + 0.02 * W
+    out += type_block(["WARPED", "FRAME"], xT, y0 + 22.0, height=3.2, pen=black, f=feed)
+    out += _stroke_text(_spaced("GRAVITY IS THE GRID"), xT, y0 + 7.0, 2.0, color=black, f=feed)
+    out += swatch_bar(x1 - 9.0, y0 + 22.0, [black, blue, pink], size=2.6, f=feed)
+    out += scale_footer(bounds, text="B = 3 SQRT3 M", pen=black, height=2.4, f=feed)
     return out
