@@ -17,7 +17,9 @@ from typing import List, Optional, Sequence, Tuple
 from ..models import GCodeCommand
 from .generators import (
     _attention_matrix,
+    _catmull_subdivide,
     _chain_segments,
+    _dot,
     _marching_squares,
     _poly,
     _stroke_text,
@@ -2083,93 +2085,107 @@ def bauhaus_memory(
     rng: SeededRNG,
     bounds: Bounds,
     colors: int = 3,
-    loops: int = 30,
-    steps: int = 440,
-    red_outer: int = 8,
+    loops: int = 40,
+    half: int = 130,
+    precess: float = 0.5,
+    grow: float = 1.0,
     feed: int = 2200,
 ) -> List[GCodeCommand]:
-    """MEMORY IN TIME — an LSTM as a vertical figure-8 of nested INFORMATION
-    LOOPS on an INPUT→FORGET→MEMORY→UPDATE→OUTPUT gate axis. The recurrence is a
-    loop; two lobes (forget below, update above) meet at the carried MEMORY
-    waist. Black loops fill, the outer envelope is red; gate nodes mark where the
-    state is written, forgotten, and read. Fine-line, black + red."""
+    """MEMORY IN TIME — an LSTM as a figure-8 of PRECESSING loops. The recurrence
+    loops back every step (REMEMBER c_t above, FORGET c_{t-1} below, meeting at the
+    hollow carried-state waist), but each iteration lands slightly ROTATED by the
+    transformation it underwent — a helix / logarithmic spiral of nested loops,
+    not one static 8. Gate leaders mark the input/forget/output gates. Black + red."""
     x0, y0, x1, y1 = bounds
     W, H = x1 - x0, y1 - y0
     accent, black = _pen(PINK, colors), _pen(BLACK, colors)  # PINK slot rendered crimson
     out: List[GCodeCommand] = []
 
-    cx = x0 + 0.44 * W
-    cy = y0 + 0.50 * H
-    halfH = 0.34 * H
-    Ax = 0.27 * W
+    cx, cyw = x0 + 0.48 * W, y0 + 0.50 * H
+    ru, rl, wx = 0.135 * H, 0.175 * H, 1.55  # top REMEMBER lobe, bigger FORGET lobe
 
-    # nested figure-8s: x=Ax·s·sin(2t+drift), y=Ay·s·sin(t) — crossing (MEMORY)
-    # at the center, forget lobe below, update lobe above; a slow phase drift
-    # weaves the waist so the family reads as looping information, not one curve.
+    def rot(px, py, ph):
+        c, s = math.cos(ph), math.sin(ph)
+        return (px * c - py * s, px * s + py * c)
+
+    # faint background orbits (the iterations echoing) + a light starfield
+    for e in range(3):
+        ea, eb = (0.34 + 0.05 * e) * W, (0.40 + 0.05 * e) * H
+        erot = rng.uniform(-0.3, 0.3)
+        seg = []
+        for k in range(241):
+            a = 2 * math.pi * k / 240
+            ox, oy = rot(ea * 0.5 * math.cos(a), eb * 0.5 * math.sin(a), erot)
+            if k % 6 < 3:
+                seg.append((cx + ox, cyw + oy))
+            elif len(seg) >= 2:
+                out += _poly(seg, color=black, f=feed)
+                seg = []
+            else:
+                seg = []
+        if len(seg) >= 2:
+            out += _poly(seg, color=black, f=feed)
+    for _ in range(26):
+        sxp, syp = rng.uniform(x0 + 4, x1 - 4), rng.uniform(y0 + 4, y1 - 4)
+        out += _dot(sxp, syp, rng.uniform(0.3, 0.9), color=black, f=feed)
+
+    # the precessing figure-8 family — each loop a rounded double-circle, rotated
     for i in range(loops):
-        s = (i + 1) / loops
-        drift = s * 0.55
+        t = i / (loops - 1)
+        sc = (0.26 + 0.74 * t) * (grow ** i)
+        ph = precess * t  # monotonic precession: the swept helix of iterations
+        jr = 1.0 + 0.04 * rng.gauss(0, 1)  # subtle per-iteration transformation
         pts = []
-        for k in range(steps + 1):
-            t = 2 * math.pi * k / steps
-            yy = math.sin(t)
-            lobe = 1.22 if yy < 0 else 0.86  # forget lobe fuller than update lobe
-            x = cx + Ax * s * math.sin(2 * t + drift)
-            y = cy + halfH * s * math.copysign(abs(yy) ** 0.82, yy) * lobe  # rounder lobes
-            pts.append((x, y))
-        out += _poly(pts, color=(accent if i >= loops - red_outer else black), f=feed)
+        for k in range(half + 1):  # upper lobe — REMEMBER
+            a = 2 * math.pi * k / half
+            ox, oy = rot(wx * ru * sc * jr * math.sin(a), ru * sc * (1 - math.cos(a)), ph)
+            pts.append((cx + ox, cyw + oy))
+        for k in range(half + 1):  # lower lobe — FORGET (bigger)
+            a = 2 * math.pi * k / half
+            ox, oy = rot(wx * rl * sc * jr * math.sin(a), -rl * sc * (1 - math.cos(a)), ph)
+            pts.append((cx + ox, cyw + oy))
+        pen = accent if (i % 3 == 0 or i >= loops - 2) else black
+        out += _poly(pts, color=pen, f=feed)
 
-    # the gate axis (dash-dot) INPUT (bottom) → OUTPUT (top)
-    ax_top, ax_bot = cy + halfH * 1.18 + 8, cy - halfH * 1.18 - 8
-    yv = ax_bot
-    dash = 0
-    while yv < ax_top:
-        seg = 4.0 if dash % 2 == 0 else 1.2
-        if dash % 2 == 0:
-            out += _poly([(cx, yv), (cx, min(ax_top, yv + seg))], color=black, f=feed)
-        yv += seg + 2.0
-        dash += 1
+    # the central line carries THREE points the helix connects: INPUT → LATENT → OUTPUT
+    top_node, bot_node = cyw + 1.98 * ru, cyw - 1.98 * rl
+    aT, aB = top_node + 11, bot_node - 11
+    out += _poly([(cx, aB), (cx, aT)], color=black, f=feed)
+    out += _poly([(cx - 1.6, aT - 4), (cx, aT), (cx + 1.6, aT - 4)], color=black, f=feed)
+    out += _poly([(cx - 1.6, aB + 4), (cx, aB), (cx + 1.6, aB + 4)], color=black, f=feed)
+    out += fill_disc(cx, top_node, 1.9, spacing=0.5, pen=black, f=feed)  # OUTPUT point
+    out += fill_disc(cx, bot_node, 1.9, spacing=0.5, pen=black, f=feed)  # INPUT point
+    out += circle(cx, cyw, 2.6, pen=accent, f=feed)  # LATENT — the carried state
+    out += _stroke_text(_spaced("OUTPUT"), cx + 6, aT - 1.2, 2.3, color=black, f=feed)
+    out += _stroke_text(_spaced("INPUT"), cx + 6, aB - 1.2, 2.3, color=black, f=feed)
+    out += _stroke_text(_spaced("LATENT"), cx + 6, cyw - 1.2, 2.2, color=accent, f=feed)
 
-    # gate nodes + labels (to the right of the axis)
-    lx = cx + Ax + 8
-    nodes = [
-        (cy + halfH * 1.18, "OUTPUT", "solid"),
-        (cy + halfH * 0.52, "UPDATE", "red"),
-        (cy, "MEMORY", "hollow"),
-        (cy - halfH * 0.52, "FORGET", "red"),
-        (cy - halfH * 1.18, "INPUT", "solid"),
-    ]
-    for ny, label, kind in nodes:
-        if kind == "solid":
-            out += fill_disc(cx, ny, 1.7, spacing=0.5, pen=black, f=feed)
-        elif kind == "red":
-            out += fill_disc(cx, ny, 1.7, spacing=0.5, pen=accent, f=feed)
-        else:  # hollow red (the carried state)
-            out += circle(cx, ny, 2.0, pen=accent, f=feed)
-        out += _stroke_text(_spaced(label), lx, ny - 1.3, 2.2, color=black, f=feed)
+    # lobe descriptions
+    out += _stroke_text(_spaced("REMEMBER"), cx - 13, cyw + ru * 0.95, 2.2, color=black, f=feed)
+    out += _stroke_text(_spaced("C T"), cx - 4, cyw + ru * 0.95 - 5.2, 1.9, color=black, f=feed)
+    out += _stroke_text(_spaced("FORGET"), cx - 11, cyw - rl * 0.98, 2.2, color=black, f=feed)
+    out += _stroke_text(_spaced("C T-1"), cx - 6, cyw - rl * 0.98 - 5.2, 1.9, color=black, f=feed)
 
-    # title + caption (top-left / bottom-left)
-    xT = x0 + 0.03 * W
-    out += type_block(["LSTM"], xT, y1 - 6.0, height=4.2, pen=black, underline=False, f=feed)
-    out += _stroke_text(_spaced("MEMORY IN TIME"), xT, y1 - 16.0, 2.4, color=black, f=feed)
-    out += _stroke_text(_spaced("INFORMATION LOOPS"), xT, y0 + 30.0, 2.0, color=black, f=feed)
-    out += _stroke_text(_spaced("SELECT WHAT TO KEEP"), xT, y0 + 24.0, 2.0, color=black, f=feed)
-    out += _stroke_text(_spaced("LET GO . MOVE FORWARD"), xT, y0 + 18.0, 2.0, color=black, f=feed)
+    # gate leaders (dot on an outer loop → dashed leader → label)
+    def leader(px, py, lx, ly, l1, l2):
+        out.extend(_dot(px, py, 1.4, color=black, f=feed))
+        n = 7
+        for s in range(0, n, 2):
+            a = (px + (lx - px) * s / n, py + (ly - py) * s / n)
+            b = (px + (lx - px) * (s + 1) / n, py + (ly - py) * (s + 1) / n)
+            out.extend(_poly([a, b], color=black, f=feed))
+        out.extend(_stroke_text(_spaced(l1), lx - 0.14 * W, ly + 2.2, 2.0, color=black, f=feed))
+        out.extend(_stroke_text(_spaced(l2), lx - 0.14 * W, ly - 2.4, 1.8, color=black, f=feed))
 
-    # bottom mini-diagram: the unrolled recurrence — loops with a gate dot + arrows
-    mx, my, mr = x0 + 0.50 * W, y0 + 12.0, 5.0
-    for c in range(3):
-        ccx = mx + c * (mr * 3.2)
-        out += circle(ccx, my, mr, pen=black, f=feed)
-        out += fill_disc(ccx - mr, my - mr * 0.2, 0.9, spacing=0.5, pen=black, f=feed)
-        if c < 2:
-            out += _poly([(ccx + mr + 1, my), (ccx + mr * 2.2 - 1, my)], color=black, f=feed)
-            out += _poly(
-                [(ccx + mr * 2.2 - 3, my + 1.2), (ccx + mr * 2.2 - 1, my), (ccx + mr * 2.2 - 3, my - 1.2)],
-                color=black,
-                f=feed,
-            )
-    out += _stroke_text("...", mx + 3 * (mr * 3.2), my - 1.5, 3.0, color=black, f=feed)
+    og = rot(-wx * ru, ru, precess * 0.5)
+    ig = rot(wx * ru, ru * 0.4, precess * 0.5)
+    fg = rot(-wx * rl, -rl, precess * 0.5)
+    leader(cx + og[0], cyw + og[1], x0 + 0.14 * W, cyw + 0.22 * H, "OUTPUT GATE", "O T")
+    leader(cx + ig[0], cyw + ig[1], x1 - 0.05 * W, cyw + 0.02 * H, "INPUT GATE", "I T")
+    leader(cx + fg[0], cyw + fg[1], x0 + 0.13 * W, cyw - 0.18 * H, "FORGET GATE", "F T")
+
+    # small series label
+    out += _stroke_text(_spaced("LSTM   MEMORY IN TIME"), x0 + 0.03 * W, y0 + 8.0, 2.0, color=black, f=feed)
     return out
 
 
@@ -2182,50 +2198,85 @@ def bauhaus_locality(
     rng: SeededRNG,
     bounds: Bounds,
     colors: int = 3,
-    layers: int = 5,
-    nx: int = 15,
-    ny: int = 15,
+    layers: int = 4,
+    nx: int = 26,
+    ny: int = 26,
     feed: int = 2200,
 ) -> List[GCodeCommand]:
-    """LOCALITY IN SPACE — a CNN as a stack of feature-map TERRAINS. From PIXELS
-    (bottom, fine and flat) up to HIGH-ORDER FEATURES (top, few big smooth
-    mountains), each layer a wireframe relief in oblique projection. A red
-    receptive-field window is tracked up the stack, growing as depth sees a
-    larger picture. Fine-line black + red."""
+    """LOCALITY IN SPACE — a CNN as a stack of feature-map TERRAINS, from PIXELS
+    to MEANING. Each layer varies in character: a nearly-flat fine PIXEL grid,
+    then small-bump LOW-level, rounded-hill MID-level, up to a few big smooth
+    HIGH-level peaks (the tallest in red). Smooth Catmull wireframes in oblique
+    projection; a red receptive-field window is tracked up the growing stack."""
     x0, y0, x1, y1 = bounds
     W, H = x1 - x0, y1 - y0
     accent, black = _pen(PINK, colors), _pen(BLACK, colors)  # PINK slot rendered crimson
     out: List[GCodeCommand] = []
 
-    LW, DX, DY = 0.50 * W, 0.26 * W, 0.075 * H
-    base_x = x0 + 0.12 * W
-    base_y0 = y0 + 0.16 * H
-    gap = 0.132 * H
+    LW, DX, DY = 0.52 * W, 0.27 * W, 0.075 * H
+    base_x = x0 + 0.11 * W
+    base_y0 = y0 + 0.15 * H
+    gap = 0.185 * H
+    freqs = [9.0, 6.0, 3.6, 2.2, 1.8]  # fine pixels → few big features
+    amps = [0.004, 0.030, 0.078, 0.150, 0.170]  # flat → tall
 
     def layer_z(i):
-        freq = max(1.5, 7.5 - i * 1.4)
-        Z = [[rng.fbm(u / (nx - 1) * freq + i * 7.1, v / (ny - 1) * freq + i * 3.3) for u in range(nx)] for v in range(ny)]
+        fr = freqs[min(i, len(freqs) - 1)]
+        Z = [[rng.fbm(u / (nx - 1) * fr + i * 11.3, v / (ny - 1) * fr + i * 5.7) for u in range(nx)] for v in range(ny)]
         lo = min(min(r) for r in Z)
         hi = max(max(r) for r in Z)
-        rng_ = (hi - lo) or 1.0
-        return [[(Z[v][u] - lo) / rng_ for u in range(nx)] for v in range(ny)]
+        rr = (hi - lo) or 1.0
+        return [[(Z[v][u] - lo) / rr for u in range(nx)] for v in range(ny)]
 
     def proj(i, u, v, z):
-        zh = (0.006 + i * 0.040) * H  # pixels nearly flat → features tall
+        zh = amps[min(i, len(amps) - 1)] * H
         return (base_x + u * LW + v * DX, base_y0 + i * gap + v * DY + z * zh)
+
+    def emit_by_pen(sm, smp):
+        segs, run, cur = [], [sm[0]], smp[0]
+        for p, pen in zip(sm[1:], smp[1:]):
+            run.append(p)
+            if pen != cur:
+                segs.append((run, cur))
+                run, cur = [p], pen
+        segs.append((run, cur))
+        res: List[GCodeCommand] = []
+        for r, pen in segs:
+            if len(r) >= 2:
+                res += _poly(r, color=pen, f=feed)
+        return res
 
     centers = []
     for i in range(layers):
         Z = layer_z(i)
+        top = i == layers - 1
+        pun = pvn = 0.5
+        if top:  # the tallest peak → drawn red
+            pv = max(range(ny), key=lambda v: max(Z[v]))
+            pu = max(range(nx), key=lambda u: Z[pv][u])
+            pun, pvn = pu / (nx - 1), pv / (ny - 1)
+
+        def penf(u, v):
+            if top and math.hypot(u - pun, v - pvn) < 0.20:
+                return accent
+            return black
+
         for jv in range(ny):
             v = jv / (ny - 1)
-            out += _poly([proj(i, iu / (nx - 1), v, Z[jv][iu]) for iu in range(nx)], color=black, f=feed)
+            pts = [proj(i, iu / (nx - 1), v, Z[jv][iu]) for iu in range(nx)]
+            pens = [penf(iu / (nx - 1), v) for iu in range(nx)]
+            sm, smp = _catmull_subdivide(pts, pens, subdiv=2)
+            out += emit_by_pen(sm, smp)
         for iu in range(nx):
             u = iu / (nx - 1)
-            out += _poly([proj(i, u, jv / (ny - 1), Z[jv][iu]) for jv in range(ny)], color=black, f=feed)
+            pts = [proj(i, u, jv / (ny - 1), Z[jv][iu]) for jv in range(ny)]
+            pens = [penf(u, jv / (ny - 1)) for jv in range(ny)]
+            sm, smp = _catmull_subdivide(pts, pens, subdiv=2)
+            out += emit_by_pen(sm, smp)
+
         # receptive-field window (red), larger toward the input (bottom)
         uc, vc = 0.52, 0.46
-        hw = 0.13 - i * 0.014
+        hw = 0.13 - i * 0.02
         zc = Z[int(vc * (ny - 1))][int(uc * (nx - 1))]
         sq = [
             proj(i, uc - hw, vc - hw, zc),
@@ -2236,6 +2287,12 @@ def bauhaus_locality(
         ]
         out += _poly(sq, color=accent, f=feed)
         centers.append(proj(i, uc, vc, zc))
+
+    # right-edge layer labels
+    lbls = ["PIXELS", "LOW-LEVEL", "MID-LEVEL", "HIGH-LEVEL"]
+    for i in range(layers):
+        p = proj(i, 1.0, 0.5, 0.5)
+        out += _stroke_text(_spaced(lbls[min(i, 3)]), p[0] + 5, p[1], 1.6, color=black, f=feed)
 
     # dashed red connectors up the receptive-field column
     for i in range(layers - 1):
@@ -2290,4 +2347,96 @@ def bauhaus_locality(
         if si < len(stages) - 1:
             out += _poly([(sx + gn * cs + 1, mgy + gn * cs / 2), (nxt - 1, mgy + gn * cs / 2)], color=black, f=feed)
         sx = nxt + 4
+    return out
+
+
+# ---------------------------------------------------------------------------
+# piece 15 — NONLINEAR TRANSFORMATION (MLP as a warped hourglass manifold)
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_manifold(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    nstream: int = 168,
+    steps: int = 66,
+    petals: int = 5,
+    twist: float = 1.6,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """NONLINEAR TRANSFORMATION — an MLP as the FOLD of space. Streamlines fall
+    from the INPUT plane (top), twist through a central petal-FOLD where the
+    nonlinear activation introduces curvature — bending the sheet so different
+    input points are matched to the SAME location (negative radius crosses the
+    fold) — then open onto the OUTPUT plane (bottom). Same tokens, richer
+    geometry. Bespoke fold geometry, black + red."""
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    accent, black = _pen(PINK, colors), _pen(BLACK, colors)  # PINK slot rendered crimson
+    out: List[GCodeCommand] = []
+
+    cx = x0 + 0.50 * W
+    ylo, yhi = y0 + 0.13 * H, y0 + 0.86 * H  # OUTPUT (bottom), INPUT (top)
+    span = yhi - ylo
+    Rin, Rwaist, Rpetal, ell = 0.30 * W, 0.03 * W, 0.17 * W, 0.32
+
+    def P(s, theta, r):
+        return (cx + r * math.cos(theta), (yhi - s * span) + r * math.sin(theta) * ell)
+
+    # the fold: input → activation petal-fold → output
+    for i in range(nstream):
+        th0 = 2 * math.pi * i / nstream
+        pts = []
+        for kk in range(steps + 1):
+            s = kk / steps
+            r_hour = Rwaist + (Rin - Rwaist) * abs(2 * s - 1)
+            fold = Rpetal * (math.sin(math.pi * s) ** 1.4) * math.cos(petals * th0)
+            r = r_hour + fold  # r<0 crosses the fold → different inputs, same cardinal
+            pts.append(P(s, th0 + twist * s, r))
+        out += _poly(pts, color=(accent if i % 3 == 0 else black), f=feed)
+
+    # INPUT / OUTPUT planes: dot clouds + frame parallelogram
+    def plane(y_at, label, above):
+        g = 9
+        for a in range(g):
+            for b in range(g):
+                gu, gv = -1 + 2 * a / (g - 1), -1 + 2 * b / (g - 1)
+                out.extend(_dot(cx + gu * Rin, y_at + gv * Rin * ell, 0.45, color=black, f=feed))
+        corners = [(-1, -1), (1, -1), (1, 1), (-1, 1), (-1, -1)]
+        out.extend(_poly([(cx + gu * Rin, y_at + gv * Rin * ell) for gu, gv in corners], color=black, f=feed))
+        ly = y_at + (Rin * ell + 7 if above else -Rin * ell - 4)
+        out.extend(_stroke_text(_spaced(label), cx - 0.10 * W, ly, 2.2, color=black, f=feed))
+
+    plane(yhi, "INPUT SPACE", True)
+    plane(ylo, "OUTPUT SPACE", False)
+
+    # right-side stage labels
+    rx = cx + 0.34 * W
+    out += _stroke_text(_spaced("LINEAR TRANSFORM"), rx, yhi - 0.10 * H, 1.8, color=black, f=feed)
+    out += _stroke_text(_spaced("NONLINEAR ACTIVATION"), rx, ylo + 0.50 * span, 1.8, color=accent, f=feed)
+    out += _stroke_text(_spaced("LINEAR TRANSFORM"), rx, ylo + 0.10 * H, 1.8, color=black, f=feed)
+
+    # title + caption
+    xT = x0 + 0.03 * W
+    out += type_block(["MLP"], xT, y1 - 6.0, height=4.2, pen=black, underline=False, f=feed)
+    out += _stroke_text(_spaced("NONLINEAR TRANSFORMATION"), xT, y1 - 16.0, 2.2, color=black, f=feed)
+    out += _stroke_text(_spaced("SAME TOKENS"), xT, y0 + 26.0, 2.0, color=black, f=feed)
+    out += _stroke_text(_spaced("DIFFERENT GEOMETRY"), xT, y0 + 21.0, 2.0, color=black, f=feed)
+    out += _stroke_text(_spaced("A RICHER SPACE"), xT, y0 + 16.0, 2.0, color=black, f=feed)
+
+    # bottom mini-diagram: grid → S → S → fold (each layer bends the space more)
+    my, gx, sq = y0 + 11.0, x0 + 0.52 * W, 11.0
+    for c in range(4):
+        bx = gx + c * (sq + 8)
+        out += _poly([(bx, my - sq / 2), (bx + sq, my - sq / 2), (bx + sq, my + sq / 2), (bx, my + sq / 2), (bx, my - sq / 2)], color=black, f=feed)
+        bend = c / 3.0
+        curve = [
+            (bx + sq * u / 20, my - sq / 2 + sq * (0.5 + 0.42 * math.sin(2 * math.pi * bend * u / 20 * 1.5)))
+            for u in range(21)
+        ]
+        out += _poly(curve, color=accent, f=feed)
+        if c < 3:
+            out += _poly([(bx + sq + 1, my), (bx + sq + 7, my)], color=black, f=feed)
+            out += _poly([(bx + sq + 5, my + 1.1), (bx + sq + 7, my), (bx + sq + 5, my - 1.1)], color=black, f=feed)
     return out

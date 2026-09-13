@@ -69,6 +69,7 @@ GENERATOR_REGISTRY = {
     "bauhaus_relevance": _b.bauhaus_relevance,
     "bauhaus_memory": _b.bauhaus_memory,
     "bauhaus_locality": _b.bauhaus_locality,
+    "bauhaus_manifold": _b.bauhaus_manifold,
     "gw150914": _p.gw150914,
 }
 
@@ -94,6 +95,7 @@ COMPOSITIONS = {
     "bauhaus_relevance",
     "bauhaus_memory",
     "bauhaus_locality",
+    "bauhaus_manifold",
     "gw150914",
 }
 
