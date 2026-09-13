@@ -2,7 +2,7 @@
 
 Two-role adversarial loop: a DESIGNER (edits generator code/params, renders) and a
 CRITIC (sees ONLY the rendered png, fresh eyes). A piece ships when the critic
-scores **avg ≥ 8/10 with no dimension below 7**, over at most 5 rounds.
+scores **avg ≥ 8/10 with no dimension below 7** (all seven dimensions; a declared-flat piece is scored on how well the flatness serves it), over at most 5 rounds.
 
 ## The six dimensions (1–10 each)
 
@@ -19,6 +19,13 @@ scores **avg ≥ 8/10 with no dimension below 7**, over at most 5 rounds.
    spacing); ≤ 3–4 pen swaps.
 6. **Concept legibility** — the physics/ML idea lands in one glance without reading
    the caption. The caption confirms, never explains.
+7. **Depth & dimensionality** — the default is NOT flat: use occlusion/overlap,
+   projected 3D forms (spheres, tubes, perspective), line-weight or dash-density
+   falling off with distance, tone gradients that turn planes into volumes.
+   Flatness is permitted ONLY as a conscious, declared decision — either the
+   assigned style canon is flat by nature (Swiss, Pop Ben-Day, classic Bauhaus)
+   and the designer says so in the report, or the concept demands it. Undeclared
+   flatness scores ≤ 4.
 
 ## Known failure modes of this codebase (critic: check these first)
 
