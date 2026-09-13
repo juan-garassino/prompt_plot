@@ -25,9 +25,50 @@ uv pip install -e ".[vision]"
 uv pip install -e ".[openai]"
 uv pip install -e ".[azure]"
 uv pip install -e ".[gemini]"
+
+# With SVG/DXF import (full curve/entity fidelity; stdlib fallback parsers ship built-in)
+uv pip install -e ".[io]"
+```
+
+## Three ways to drive PromptPlot
+
+Same postprocess + plotter, three controllers:
+
+```bash
+# 1. File — replay a curated .gcode from ~/.promptplot/library/
+promptplot library list
+promptplot library play sunset --simulate
+
+# 2. LLM — supervisor-worker fan-out (dense drawings, 10k+ commands)
+promptplot draw "a dense ocean of waves" --orchestrate --regions 8 --simulate
+
+# 3. Claude Code — drives the loop externally via the pp-orchestrate skill,
+#    calling promptplot.orchestrate: plan_regions, generate_region,
+#    validate_chunk, score_chunk, stream_chunk, merge_chunks.
 ```
 
 ## Quick start
+
+**Compose a lamina (a finished plottable sheet — single or multi-panel):**
+
+```bash
+# one science piece as a styled poster
+promptplot plate bauhaus_relevance:7 --style bauhaus --paper a4 --preview plate.png
+
+# a 3-panel plate (CNN | LSTM | MLP) in the science-poster style on A3
+promptplot plate bauhaus_locality:7 bauhaus_memory:7 bauhaus_manifold:7 \
+    --style science_poster --paper a3 --orientation landscape --preview plate3.png
+# styles: bauhaus | swiss | deco | pop | radial_viz | science_poster
+```
+
+**Browse the science-illustration briefs and run the native design loop:**
+
+```bash
+promptplot studio list                 # all briefs (studio/<domain>/*.md)
+promptplot studio brief transformer    # one brief, rendered
+promptplot studio design diffusion --style bauhaus --rounds 2 --provider nvidia
+# designer → render → vision critic → synth; artifacts in studio/<slug>/
+```
 
 **Draw something (simulated, no hardware needed):**
 
@@ -63,6 +104,62 @@ promptplot draw "a flower" --port /dev/cu.usbserial-1420 --min-grade B
 
 ```bash
 promptplot draw "a spiral galaxy" --port /dev/cu.usbserial-1420 --resume
+```
+
+**Multi-color pen (draw a color, pause to swap pens, continue):**
+
+```bash
+# LLM assigns colors; the plotter parks and waits for a keypress between colors
+promptplot draw "a red house with green grass and blue sky" --colors 3 --simulate --preview
+```
+
+**Choose the paper size:**
+
+```bash
+promptplot draw "a spiral" --paper a4 --simulate           # a3 | a4 | a5 | a6
+promptplot draw "a banner" --paper a3 --orientation landscape --simulate
+```
+
+**Seeded generative art (deterministic, no LLM):**
+
+### Built-in agent (LLM-agnostic)
+
+```bash
+promptplot agent                       # interactive REPL: renders, scores, iterates
+promptplot agent -p "render truchet seed 8 with 2 colors and report the grade"
+promptplot agent --provider ollama --model llama3.2   # runs fully local
+promptplot mcp                                        # serve the toolbox over MCP stdio
+```
+
+Claude Desktop / any MCP client:
+
+```json
+{"mcpServers": {"promptplot": {"command": "promptplot", "args": ["mcp"]}}}
+```
+
+
+```bash
+promptplot art --list                                       # list all 32 generators + params
+promptplot art tiled_field --seed 12345 --colors 3 --simulate --preview
+promptplot art ripple_field --seed now --paper a4 --preview # timestamp seed, printed for repro
+promptplot art iso_city --seed 7 --paper a4 --preview       # voxel city, hidden lines removed
+promptplot art vortex_field --seed 5 --anaglyph --glitch 3  # red/cyan 3D-glitch effect (any generator)
+# same seed + params → byte-identical GCode every time
+```
+
+**Draw a photo (dashes follow the picture's contours; cover-fits the paper):**
+
+```bash
+promptplot art scribble_halftone --param image=photo.jpg --paper a4 --preview
+promptplot art line_halftone     --param image=photo.jpg --preview   # line-screen, variable pen width
+promptplot art scribble_portrait --param image=photo.jpg --preview   # continuous scribble
+```
+
+**Import an SVG or DXF and draw it split by color/layer:**
+
+```bash
+promptplot import logo.svg --simulate --preview             # splits by SVG stroke color
+promptplot import part.dxf --group-by layer --paper a3 --preview
 ```
 
 **Generate GCode without plotting:**

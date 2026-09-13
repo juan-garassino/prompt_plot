@@ -7,6 +7,7 @@ from promptplot.llm import (
     build_gcode_prompt,
     build_reflection_prompt,
     build_next_command_prompt,
+    classify_creative_mode,
     STYLE_PRESETS,
 )
 
@@ -100,6 +101,33 @@ class TestBuildGcodePrompt:
         assert '"command": "M5"' in prompt
         assert '"command": "G0"' in prompt
 
+    def test_freeform_dsl_guidance_present(self):
+        """Prompt teaches the model to use the freeform DSL."""
+        prompt = build_gcode_prompt("draw organic clouds over hills", PaperConfig(), PenConfig())
+        assert "FREEFORM DRAWING DSL" in prompt
+        assert "silhouette_outline" in prompt
+        assert "texture_strokes" in prompt
+
+    def test_abstract_mode_prompt_guidance(self):
+        prompt = build_gcode_prompt(
+            "draw a moire interference field",
+            PaperConfig(),
+            PenConfig(),
+            creative_mode="abstract",
+        )
+        assert "CREATIVE MODE: ABSTRACT" in prompt
+        assert "moire_grid" in prompt
+
+    def test_hybrid_mode_prompt_guidance(self):
+        prompt = build_gcode_prompt(
+            "draw a bird with abstract flow fields",
+            PaperConfig(),
+            PenConfig(),
+            creative_mode="hybrid",
+        )
+        assert "CREATIVE MODE: HYBRID" in prompt
+        assert "subject readable" in prompt
+
 
 class TestBuildReflectionPrompt:
     def test_includes_coordinate_ranges(self):
@@ -131,3 +159,14 @@ class TestBuildNextCommandPrompt:
         assert "f=1500" in prompt or "F1500" in prompt
         assert "260" in prompt  # 300 - 2*20
         assert "360" in prompt  # 400 - 2*20
+
+
+class TestCreativeModeClassification:
+    def test_classify_figurative(self):
+        assert classify_creative_mode("draw a mountain landscape with trees") == "figurative"
+
+    def test_classify_abstract(self):
+        assert classify_creative_mode("draw a moire pattern flow field") == "abstract"
+
+    def test_classify_hybrid(self):
+        assert classify_creative_mode("draw a bird with abstract hatch fields") == "hybrid"

@@ -29,11 +29,17 @@ class CheckpointManager:
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     def save(self, data: dict) -> Path:
-        """Save a checkpoint. data must contain 'prompt'."""
+        """Save a checkpoint. data must contain 'prompt'.
+
+        Optional keys: region_index, completed_regions, pen_position.
+        """
         self._ensure_dir()
         prompt = data.get("prompt", "")
         cid = self._checkpoint_id(prompt)
         path = self.checkpoint_dir / f"{cid}.json"
+        data.setdefault("region_index", 0)
+        data.setdefault("completed_regions", [])
+        data.setdefault("pen_position", [0.0, 0.0])
         path.write_text(json.dumps(data, indent=2))
         _log.info("Checkpoint saved: %s", path)
         return path

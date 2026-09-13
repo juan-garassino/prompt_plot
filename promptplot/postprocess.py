@@ -28,6 +28,7 @@ _log = logging.getLogger(__name__)
 # 0. Bounds Validation
 # ---------------------------------------------------------------------------
 
+
 def validate_bounds(
     program: GCodeProgram,
     paper: PaperConfig,
@@ -44,6 +45,8 @@ def validate_bounds(
         Tuple of (possibly modified program, list of violation messages).
     """
     x0, y0, x1, y1 = paper.get_drawable_area()
+    # G0 travel may reach corners (0,0); only G1 draw must stay inside margins.
+    mx0, my0, mx1, my1 = 0.0, 0.0, paper.width, paper.height
     violations: List[str] = []
     new_commands: List[GCodeCommand] = []
 
@@ -52,21 +55,27 @@ def validate_bounds(
         clamped_x = cmd.x
         clamped_y = cmd.y
 
+        # Choose bounds per move type.
+        if cmd.command == "G1":
+            lx0, ly0, lx1, ly1 = x0, y0, x1, y1
+        else:
+            lx0, ly0, lx1, ly1 = mx0, my0, mx1, my1
+
         if cmd.x is not None:
-            if cmd.x < 0 or cmd.x > paper.width:
+            if cmd.x < lx0 or cmd.x > lx1:
                 out_of_bounds = True
                 violations.append(
-                    f"Cmd {i} ({cmd.command}): X={cmd.x:.1f} outside [0, {paper.width:.1f}]"
+                    f"Cmd {i} ({cmd.command}): X={cmd.x:.1f} outside [{lx0:.1f}, {lx1:.1f}]"
                 )
-                clamped_x = max(0, min(cmd.x, paper.width))
+                clamped_x = max(lx0, min(cmd.x, lx1))
 
         if cmd.y is not None:
-            if cmd.y < 0 or cmd.y > paper.height:
+            if cmd.y < ly0 or cmd.y > ly1:
                 out_of_bounds = True
                 violations.append(
-                    f"Cmd {i} ({cmd.command}): Y={cmd.y:.1f} outside [0, {paper.height:.1f}]"
+                    f"Cmd {i} ({cmd.command}): Y={cmd.y:.1f} outside [{ly0:.1f}, {ly1:.1f}]"
                 )
-                clamped_y = max(0, min(cmd.y, paper.height))
+                clamped_y = max(ly0, min(cmd.y, ly1))
 
         if out_of_bounds:
             if mode == "clamp":
@@ -110,15 +119,19 @@ def validate_single_command(
     warnings: list[str] = []
     prefix: list[GCodeCommand] = []
 
-    # Clamp coordinates to paper bounds
+    # Clamp coordinates: G1 draw → drawable area; G0 travel → machine extents.
     x0, y0, x1, y1 = paper.get_drawable_area()
+    if cmd.command == "G0":
+        lx0, ly0, lx1, ly1 = 0.0, 0.0, paper.width, paper.height
+    else:
+        lx0, ly0, lx1, ly1 = x0, y0, x1, y1
     fixed_x = cmd.x
     fixed_y = cmd.y
-    if cmd.x is not None and (cmd.x < 0 or cmd.x > paper.width):
-        fixed_x = max(0, min(cmd.x, paper.width))
+    if cmd.x is not None and (cmd.x < lx0 or cmd.x > lx1):
+        fixed_x = max(lx0, min(cmd.x, lx1))
         warnings.append(f"X={cmd.x:.1f} clamped to {fixed_x:.1f}")
-    if cmd.y is not None and (cmd.y < 0 or cmd.y > paper.height):
-        fixed_y = max(0, min(cmd.y, paper.height))
+    if cmd.y is not None and (cmd.y < ly0 or cmd.y > ly1):
+        fixed_y = max(ly0, min(cmd.y, ly1))
         warnings.append(f"Y={cmd.y:.1f} clamped to {fixed_y:.1f}")
 
     if fixed_x != cmd.x or fixed_y != cmd.y:
@@ -136,9 +149,42 @@ def validate_single_command(
     return cmd, warnings, prefix
 
 
+def validate_chunk(
+    commands: List[GCodeCommand],
+    prior_pen_state: "PenState",
+    paper: PaperConfig,
+) -> Tuple[List[GCodeCommand], List[str], "PenState"]:
+    """Validate a sequence of commands, threading pen state and clamping bounds.
+
+    Returns (fixed_commands, warnings, final_pen_state).
+    """
+    pen = PenState(prior_pen_state.state) if isinstance(prior_pen_state, PenState) else PenState()
+    out: List[GCodeCommand] = []
+    all_warnings: List[str] = []
+    for cmd in commands:
+        if cmd.command in ("M3", "M5"):
+            out.append(cmd)
+            if cmd.command == "M3":
+                pen.set_down()
+            else:
+                pen.set_up()
+            continue
+        fixed, warns, prefix = validate_single_command(cmd, paper, pen)
+        for p in prefix:
+            out.append(p)
+            if p.command == "M3":
+                pen.set_down()
+            elif p.command == "M5":
+                pen.set_up()
+        out.append(fixed)
+        all_warnings.extend(warns)
+    return out, all_warnings, pen
+
+
 # ---------------------------------------------------------------------------
 # 0.5 Arc Approximation (G2/G3 → G1 segments)
 # ---------------------------------------------------------------------------
+
 
 def approximate_arcs(program: GCodeProgram, segments_per_arc: int = 12) -> GCodeProgram:
     """Convert G2/G3 arc commands to short G1 line segments.
@@ -174,9 +220,7 @@ def approximate_arcs(program: GCodeProgram, segments_per_arc: int = 12) -> GCode
             t = i / segments_per_arc
             ix = cx + (ex - cx) * t
             iy = cy + (ey - cy) * t
-            new_commands.append(GCodeCommand(
-                command="G1", x=round(ix, 3), y=round(iy, 3), f=feed
-            ))
+            new_commands.append(GCodeCommand(command="G1", x=round(ix, 3), y=round(iy, 3), f=feed))
 
         cx, cy = ex, ey
 
@@ -190,8 +234,10 @@ def approximate_arcs(program: GCodeProgram, segments_per_arc: int = 12) -> GCode
 # 1. Pen Safety
 # ---------------------------------------------------------------------------
 
-def ensure_pen_safety(commands: List[GCodeCommand],
-                      pen_config: PenConfig = None) -> List[GCodeCommand]:
+
+def ensure_pen_safety(
+    commands: List[GCodeCommand], pen_config: PenConfig = None
+) -> List[GCodeCommand]:
     """Enforce pen safety invariants on LLM-generated GCode.
 
     Uses pen_config.pen_down_s_value (default 1000) instead of hardcoded S100.
@@ -241,16 +287,26 @@ def ensure_pen_safety(commands: List[GCodeCommand],
 # 2. Stroke Optimization (nearest-neighbor reorder)
 # ---------------------------------------------------------------------------
 
+
 def extract_strokes(commands: List[GCodeCommand]) -> List[List[GCodeCommand]]:
-    """Extract individual strokes (M3 ... G1s ... M5) from a command list."""
+    """Extract individual strokes (G0 + M3 ... G1s ... M5) from a command list.
+
+    Includes the preceding G0 travel in each stroke so the optimizer knows the
+    real start position — not just the first G1 endpoint.
+    """
     strokes: List[List[GCodeCommand]] = []
     current: List[GCodeCommand] = []
     pen_state = PenState()
+    last_g0: GCodeCommand | None = None  # None until an explicit G0 is seen
 
     for cmd in commands:
-        if cmd.command == "M3":
+        if cmd.command == "G0":
+            last_g0 = cmd
+        elif cmd.command == "M3":
             pen_state.set_down()
-            current = [cmd]
+            # Include the preceding G0 so the optimizer knows the true travel start.
+            # If no G0 was seen yet, omit it — _stroke_start will fall back to first G1.
+            current = [last_g0, cmd] if last_g0 is not None else [cmd]
         elif cmd.command == "M5":
             if current:
                 current.append(cmd)
@@ -268,6 +324,10 @@ def extract_strokes(commands: List[GCodeCommand]) -> List[List[GCodeCommand]]:
 
 
 def _stroke_start(stroke: List[GCodeCommand]) -> Tuple[float, float]:
+    # G0 is now captured in each stroke; use it as the true travel target.
+    for cmd in stroke:
+        if cmd.command == "G0" and cmd.x is not None and cmd.y is not None:
+            return (cmd.x, cmd.y)
     for cmd in stroke:
         if cmd.command == "G1" and cmd.x is not None and cmd.y is not None:
             return (cmd.x, cmd.y)
@@ -303,15 +363,14 @@ def optimize_stroke_order(
 
 
 def rebuild_program(strokes: List[List[GCodeCommand]]) -> List[GCodeCommand]:
-    """Rebuild a full command list from ordered strokes with G0 repositioning."""
+    """Rebuild a full command list from ordered strokes.
+
+    Strokes now carry their G0 travel command as the first element, so no
+    separate G0 is added here — the included G0 IS the repositioning move.
+    """
     commands: List[GCodeCommand] = [GCodeCommand(command="M5")]
-    pos = (0.0, 0.0)
     for stroke in strokes:
-        start = _stroke_start(stroke)
-        if _distance(pos, start) > 0.01:
-            commands.append(GCodeCommand(command="G0", x=start[0], y=start[1]))
         commands.extend(stroke)
-        pos = _stroke_end(stroke)
     if not commands or commands[-1].command != "M5":
         commands.append(GCodeCommand(command="M5"))
     commands.append(GCodeCommand(command="G0", x=0.0, y=0.0))
@@ -337,12 +396,82 @@ def optimize_gcode_program(program: GCodeProgram) -> GCodeProgram:
 
 
 # ---------------------------------------------------------------------------
+# 2b. Multi-color layering (group strokes by pen color)
+# ---------------------------------------------------------------------------
+
+
+def _stroke_color(stroke: List[GCodeCommand], default: int = 0) -> int:
+    """Color index of a stroke, taken from its first colored M3/G1 command."""
+    for c in stroke:
+        if c.command in ("M3", "G1") and c.color is not None:
+            return c.color
+    return default
+
+
+def group_strokes_by_color(commands, color_config):
+    """Bucket strokes by pen color, preserving ascending color order.
+
+    In ``round_robin`` mode, colors are assigned by stroke index
+    (``strokes_before_swap`` strokes per color) instead of read from commands.
+    Returns ``(buckets, color_sequence)``.
+    """
+    strokes = extract_strokes(commands)
+    n_colors = max(1, len(color_config.palette))
+
+    if color_config.assign_mode == "round_robin" and color_config.strokes_before_swap > 0:
+        per = color_config.strokes_before_swap
+        for i, stroke in enumerate(strokes):
+            ci = (i // per) % n_colors
+            for c in stroke:
+                if c.command in ("M3", "G1"):
+                    c.color = ci
+
+    buckets: dict = {}
+    for stroke in strokes:
+        ci = _stroke_color(stroke, 0)
+        buckets.setdefault(ci, []).append(stroke)
+    color_sequence = sorted(buckets.keys())
+    return buckets, color_sequence
+
+
+def reorder_by_color(program: GCodeProgram, color_config) -> GCodeProgram:
+    """Order the program by color layer, optimizing strokes WITHIN each color.
+
+    All strokes of color 0 are emitted, then color 1, etc. Stroke reordering
+    never crosses a color boundary. Streaming re-derives the layers by scanning
+    each command's ``.color`` (robust to later dip/dwell insertion).
+    """
+    buckets, color_sequence = group_strokes_by_color(program.commands, color_config)
+    if len(color_sequence) <= 1:
+        # Single (or no) color — fall back to plain optimization.
+        return optimize_gcode_program(program)
+
+    commands: List[GCodeCommand] = [GCodeCommand(command="M5")]
+    for ci in color_sequence:
+        for stroke in optimize_stroke_order(buckets[ci]):
+            commands.extend(stroke)
+    if not commands or commands[-1].command != "M5":
+        commands.append(GCodeCommand(command="M5"))
+    commands.append(GCodeCommand(command="G0", x=0.0, y=0.0))
+
+    return GCodeProgram(
+        commands=commands,
+        metadata={
+            **(program.metadata or {}),
+            "optimized": True,
+            "optimization_method": "per_color_nearest_neighbor",
+            "color_sequence": color_sequence,
+            "palette": list(color_config.palette),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # 3. Brush / Paint Dip Insertion
 # ---------------------------------------------------------------------------
 
-def insert_paint_dips(
-    program: GCodeProgram, brush_config: BrushConfig
-) -> GCodeProgram:
+
+def insert_paint_dips(program: GCodeProgram, brush_config: BrushConfig) -> GCodeProgram:
     """Insert ink reload sequences every N strokes.
 
     Sequence: M5 -> G0 to station -> G0 Z(dip_height) -> G4 hold -> G0 Z5 -> G4 drip -> resume
@@ -353,8 +482,9 @@ def insert_paint_dips(
     commands: List[GCodeCommand] = []
     stroke_count = 0
     cx, cy = brush_config.charge_position
-    dip_ms = int(brush_config.dip_duration * 1000)
-    drip_ms = int(brush_config.drip_duration * 1000)
+    fw = getattr(brush_config, "firmware", "grbl")
+    dip_p = _dwell_p(brush_config.dip_duration, fw) or 0
+    drip_p = _dwell_p(brush_config.drip_duration, fw) or 0
 
     for cmd in program.commands:
         if cmd.command == "M3":
@@ -363,18 +493,24 @@ def insert_paint_dips(
                 # Insert reload before this pen-down
                 commands.append(GCodeCommand(command="M5"))
                 commands.append(GCodeCommand(command="G0", x=cx, y=cy))
-                commands.append(GCodeCommand(
-                    command="G0", z=brush_config.dip_height,
-                    comment="dip into ink",
-                ))
-                commands.append(GCodeCommand(command="G4", p=dip_ms, comment="hold in ink"))
+                commands.append(
+                    GCodeCommand(
+                        command="G0",
+                        z=brush_config.dip_height,
+                        comment="dip into ink",
+                    )
+                )
+                commands.append(GCodeCommand(command="G4", p=dip_p, comment="hold in ink"))
                 commands.append(GCodeCommand(command="G0", z=5.0, comment="lift"))
-                commands.append(GCodeCommand(command="G4", p=drip_ms, comment="drip"))
+                commands.append(GCodeCommand(command="G4", p=drip_p, comment="drip"))
         commands.append(cmd)
 
     return GCodeProgram(
         commands=commands,
-        metadata={**(program.metadata or {}), "brush_reloads": stroke_count // brush_config.strokes_before_reload},
+        metadata={
+            **(program.metadata or {}),
+            "brush_reloads": stroke_count // brush_config.strokes_before_reload,
+        },
     )
 
 
@@ -382,26 +518,38 @@ def insert_paint_dips(
 # 4. Pen Dwell Injection (G4 after M3/M5)
 # ---------------------------------------------------------------------------
 
-def insert_pen_dwells(
-    program: GCodeProgram, pen_config: PenConfig
-) -> GCodeProgram:
+
+def _dwell_p(seconds: float, firmware: str):
+    """Return the right P value for G4 — Grbl reads seconds, Marlin reads ms."""
+    if seconds <= 0:
+        return None
+    if firmware == "marlin":
+        return int(seconds * 1000)
+    return float(seconds)
+
+
+def _dwell_p_values(pen_config: PenConfig):
+    fw = getattr(pen_config, "firmware", "grbl")
+    return _dwell_p(pen_config.pen_down_delay, fw), _dwell_p(pen_config.pen_up_delay, fw)
+
+
+def insert_pen_dwells(program: GCodeProgram, pen_config: PenConfig) -> GCodeProgram:
     """Insert G4 dwell commands after every M3 and M5.
 
     Skips insertion when the corresponding delay is 0.
     """
-    down_ms = int(pen_config.pen_down_delay * 1000)
-    up_ms = int(pen_config.pen_up_delay * 1000)
+    down_p, up_p = _dwell_p_values(pen_config)
 
-    if down_ms == 0 and up_ms == 0:
+    if not down_p and not up_p:
         return program
 
     commands: List[GCodeCommand] = []
     for cmd in program.commands:
         commands.append(cmd)
-        if cmd.command == "M3" and down_ms > 0:
-            commands.append(GCodeCommand(command="G4", p=down_ms, comment="pen down dwell"))
-        elif cmd.command == "M5" and up_ms > 0:
-            commands.append(GCodeCommand(command="G4", p=up_ms, comment="pen up dwell"))
+        if cmd.command == "M3" and down_p:
+            commands.append(GCodeCommand(command="G4", p=down_p, comment="pen down dwell"))
+        elif cmd.command == "M5" and up_p:
+            commands.append(GCodeCommand(command="G4", p=up_p, comment="pen up dwell"))
 
     return GCodeProgram(
         commands=commands,
@@ -412,6 +560,7 @@ def insert_pen_dwells(
 # ---------------------------------------------------------------------------
 # Full Pipeline
 # ---------------------------------------------------------------------------
+
 
 def run_pipeline(program: GCodeProgram, config: PromptPlotConfig) -> GCodeProgram:
     """Run the full post-processing pipeline in the correct order.
@@ -430,14 +579,20 @@ def run_pipeline(program: GCodeProgram, config: PromptPlotConfig) -> GCodeProgra
     if config.bounds.enforce:
         program, violations = validate_bounds(program, config.paper, config.bounds.mode)
         if violations:
-            _log.info("Bounds validation (%s mode): %d violations", config.bounds.mode, len(violations))
+            _log.info(
+                "Bounds validation (%s mode): %d violations", config.bounds.mode, len(violations)
+            )
 
     # 1. Pen safety
     safe_commands = ensure_pen_safety(program.commands, config.pen)
     program = GCodeProgram(commands=safe_commands, metadata=program.metadata)
 
-    # 2. Optimize stroke order
-    program = optimize_gcode_program(program)
+    # 2. Optimize stroke order (per-color when multi-color layering is enabled,
+    #    so strokes are grouped by pen and never reordered across a color)
+    if getattr(config, "color", None) is not None and config.color.enabled:
+        program = reorder_by_color(program, config.color)
+    else:
+        program = optimize_gcode_program(program)
 
     # 3. Brush reload sequences
     if config.brush.enabled:

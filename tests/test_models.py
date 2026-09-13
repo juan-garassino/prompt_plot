@@ -1,7 +1,18 @@
 """Tests for promptplot/models.py — GCodeCommand, GCodeProgram, WorkflowResult."""
 
 import pytest
-from promptplot.models import GCodeCommand, GCodeProgram, WorkflowResult
+from promptplot.models import (
+    GCodeCommand,
+    GCodeProgram,
+    WorkflowResult,
+    FreeformCommand,
+    DrawProgram,
+    FigurativeCompositionPlan,
+    AbstractCompositionPlan,
+    CompositionSubject,
+    FigurativeRegion,
+    AbstractRegion,
+)
 
 
 class TestGCodeCommand:
@@ -211,3 +222,46 @@ class TestWorkflowResult:
         )
         assert result.success is False
         assert result.error_message == "LLM timeout"
+
+
+class TestStructuredPrograms:
+    def test_freeform_command_validation(self):
+        cmd = FreeformCommand(
+            type="texture_strokes",
+            params={"centers": [[10, 10], [20, 20]], "stroke_length": 6},
+        )
+        assert cmd.command == "FREEFORM"
+        assert cmd.type == "texture_strokes"
+
+    def test_draw_program_parses_freeform(self):
+        program = DrawProgram(
+            commands=[
+                {
+                    "command": "FREEFORM",
+                    "type": "silhouette_outline",
+                    "params": {"points": [[10, 10], [20, 20], [30, 10]], "closed": False},
+                }
+            ]
+        )
+        assert program.has_freeform() is True
+
+
+class TestModeSpecificPlans:
+    def test_figurative_plan_requires_void_region(self):
+        plan = FigurativeCompositionPlan(
+            subjects=[CompositionSubject(name="bird", x=100, y=120, width=60, height=40)],
+            regions=[
+                FigurativeRegion(name="subject", role="subject", x=70, y=80, width=80, height=80, line_mode="silhouette"),
+                FigurativeRegion(name="quiet", role="void", x=150, y=40, width=30, height=50, line_mode="accent", density="sparse"),
+            ],
+        )
+        assert "FIGURATIVE PLAN" in plan.to_prompt_guidance()
+
+    def test_abstract_plan_requires_focal_and_void(self):
+        plan = AbstractCompositionPlan(
+            regions=[
+                AbstractRegion(name="focus", role="focal", x=30, y=30, width=60, height=80, field_family="moire_grid", density="dense", rhythm="interference"),
+                AbstractRegion(name="quiet", role="void", x=120, y=50, width=40, height=70, field_family="mask_region", density="sparse", rhythm="parallel"),
+            ]
+        )
+        assert "ABSTRACT PLAN" in plan.to_prompt_guidance()

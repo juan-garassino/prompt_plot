@@ -183,15 +183,9 @@ class BasePlotter(ABC):
         program: GCodeProgram,
         on_command: Optional[Callable[[int, int, str, bool], Awaitable[None]]] = None,
         start_index: int = 0,
+        verbose: bool = False,
     ) -> Tuple[int, int]:
-        """Stream an entire program, returning (success_count, error_count).
-
-        Args:
-            program: The GCode program to stream.
-            on_command: Optional async callback(index, total, gcode_str, success)
-                        called after each command is sent.
-            start_index: Skip commands before this index (for checkpoint resume).
-        """
+        """Stream an entire program, returning (success_count, error_count)."""
         success = 0
         errors = 0
         total = len(program.commands)
@@ -206,6 +200,9 @@ class BasePlotter(ABC):
                 success += 1
             else:
                 errors += 1
+            if verbose:
+                tag = "ok" if ok else "ERR"
+                print(f"[{i+1:5d} / {total}]  {gcode:<44}  ->  {tag}", flush=True)
             if on_command is not None:
                 await on_command(i, total, gcode, ok)
         return success, errors
@@ -249,6 +246,11 @@ class SerialPlotter(BasePlotter):
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._shutdown_event = asyncio.Event()
         self._dispatcher = Dispatcher()
+        # Single-reader discipline: the heartbeat and command-ack paths must never
+        # read the serial reader concurrently, or asyncio raises "readuntil while
+        # another coroutine is already waiting" and commands (incl. pen-ups) get
+        # dropped. Every write+read cycle acquires this lock.
+        self._io_lock = asyncio.Lock()
 
     async def connect(self) -> bool:
         try:
@@ -316,11 +318,13 @@ class SerialPlotter(BasePlotter):
         try:
             self.status.is_busy = True
             self.status.current_command = command
-            self.writer.write(f"{command}\n".encode("utf-8"))
-            await self.writer.drain()
-            self.command_history.append(command)
-
-            response = await self._read_response()
+            # Hold the I/O lock across write+read so the heartbeat (or any other
+            # coroutine) can't read the ack concurrently and desync the stream.
+            async with self._io_lock:
+                self.writer.write(f"{command}\n".encode("utf-8"))
+                await self.writer.drain()
+                self.command_history.append(command)
+                response = await self._read_response()
             self.status.last_response = response
             self.status.is_busy = False
 
@@ -344,8 +348,9 @@ class SerialPlotter(BasePlotter):
         program: GCodeProgram,
         on_command: Optional[Callable[[int, int, str, bool], Awaitable[None]]] = None,
         start_index: int = 0,
+        verbose: bool = False,
     ) -> Tuple[int, int]:
-        """Stream with backpressure via Dispatcher."""
+        """Stream with backpressure via Dispatcher. verbose=True prints per-line progress."""
         success = 0
         errors = 0
         sent_idx = 0
@@ -353,16 +358,19 @@ class SerialPlotter(BasePlotter):
         self._dispatcher._active = True
         self._connection.transition(ConnectionState.STREAMING)
 
+        def _report(idx: int, line: str, ok: bool) -> None:
+            if verbose:
+                tag = "ok" if ok else "ERR"
+                print(f"[{idx+1:5d} / {total}]  {line:<44}  ->  {tag}", flush=True)
+
         for i, cmd in enumerate(program.commands):
             if i < start_index:
                 continue
             gcode = cmd.to_gcode()
             if gcode == "COMPLETE":
                 continue
-            # Wait for buffer space
             while not await self._dispatcher.add_command(gcode):
                 await asyncio.sleep(self._dispatcher.command_delay)
-            # Send from queue
             queued = await self._dispatcher.get_next_command()
             if queued:
                 ok = await self.send_command(queued)
@@ -370,11 +378,11 @@ class SerialPlotter(BasePlotter):
                     success += 1
                 else:
                     errors += 1
+                _report(sent_idx, queued, ok)
                 if on_command is not None:
                     await on_command(sent_idx, total, queued, ok)
                 sent_idx += 1
 
-        # Drain remaining
         while True:
             queued = await self._dispatcher.get_next_command()
             if queued is None:
@@ -384,6 +392,7 @@ class SerialPlotter(BasePlotter):
                 success += 1
             else:
                 errors += 1
+            _report(sent_idx, queued, ok)
             if on_command is not None:
                 await on_command(sent_idx, total, queued, ok)
             sent_idx += 1
@@ -453,10 +462,18 @@ class SerialPlotter(BasePlotter):
                     )
                     break
                 except asyncio.TimeoutError:
-                    if self._active and self.writer:
-                        self.writer.write(b"?\n")
-                        await self.writer.drain()
-                        await self._read_response()
+                    # Poll only when idle AND no command is mid-flight, and take the
+                    # I/O lock so the poll's read can't collide with a command ack.
+                    if (
+                        self.writer
+                        and not self.status.is_busy
+                        and self._connection.state == ConnectionState.IDLE
+                        and not self._io_lock.locked()
+                    ):
+                        async with self._io_lock:
+                            self.writer.write(b"?\n")
+                            await self.writer.drain()
+                            await self._read_response()
         except asyncio.CancelledError:
             pass
 

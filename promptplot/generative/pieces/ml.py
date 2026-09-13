@@ -1,0 +1,2548 @@
+"""ML pieces — neural networks & learning drawn as phenomena, not diagrams.
+
+The "abstract neural representations for penplotters" series plus the earlier
+ML compositions. Every function is a seeded composition
+``(rng, bounds, colors=3, ...) -> List[GCodeCommand]``; the seed fine-tunes.
+Style is applied at the lamina level.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import List, Optional, Tuple
+
+from ...models import GCodeCommand
+from ..rng import SeededRNG
+from ..engine3d import _fit_out, _zbuf_terrain  # noqa: F401
+from ..kit import (  # noqa: F401
+    Bounds,
+    BAUHAUS_PALETTE,
+    BLUE,
+    PINK,
+    BLACK,
+    _pen,
+    fill_rect,
+    fill_disc,
+    fill_quarter,
+    fill_ring,
+    _runs_from_cmds,
+    _cut,
+    _clip_runs,
+    _rect_keep,
+    _fit_runs_cover,
+    _emit_runs,
+    circle,
+    dotted_circle,
+    plus_mark,
+    crosshair_rules,
+    swatch_bar,
+    _spaced,
+    type_block,
+    scale_footer,
+    _attention_matrix,
+    _catmull_subdivide,
+    _chain_segments,
+    _dot,
+    _limit_overdraw,
+    _marching_squares,
+    _poly,
+    _stroke_text,
+    _text_width,
+)
+
+import io
+import zipfile
+
+
+
+# ---------------------------------------------------------------------------
+# piece 04 — PARAMETER FIELD (Hinton diagram)
+# ---------------------------------------------------------------------------
+
+
+def _load_qkv(weights: str, block: int):
+    import numpy as np
+
+    buf = io.BytesIO(zipfile.ZipFile(weights).read("model.weights.h5"))
+    import h5py
+
+    f5 = h5py.File(buf, "r")
+    base = "layers/transformer_encoder_block" + ("" if block == 0 else f"_{block}")
+
+    def att(nm):
+        Wm = np.array(f5[f"{base}/att/{nm}/vars/0"])
+        return Wm.reshape(Wm.shape[0], -1)
+
+    return [att("query_dense"), att("key_dense"), att("value_dense")]
+
+
+
+
+# ---------------------------------------------------------------------------
+# piece 03 — ATTENTION
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_attention(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    tokens: int = 24,
+    topk: int = 2,
+    temp: float = 1.0,
+    attn_npz: str = "",
+    block: int = 5,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """A huge token ring cropped at three frame edges; the ring is rotated so
+    the sink token lands on the left axis as one big solid blue disc, and the
+    strongest chords into it run pink — a directional wedge of attention."""
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    out: List[GCodeCommand] = []
+    blue, pink, black = _pen(BLUE, colors), _pen(PINK, colors), _pen(BLACK, colors)
+    frame_keep = _rect_keep(bounds)
+
+    A = None
+    if attn_npz:
+        try:
+            import numpy as np
+
+            A = np.load(attn_npz)["attn"][block][0]
+            tokens = A.shape[-1]
+        except Exception:
+            A = None
+    if A is None:
+        A = _attention_matrix(rng, tokens, 0, temp, True, "", 0)
+
+    col_mass = [sum(float(A[q][k]) for q in range(tokens)) for k in range(tokens)]
+    sink = max(range(tokens), key=lambda k: col_mass[k])
+
+    # ring center right of middle; radius huge so the ring crops at the frame;
+    # phase rotated so the sink token sits on the left axis at mid-height
+    ccx, ccy = x0 + 0.62 * W, y0 + 0.46 * H
+    R = min(0.66 * H, 0.60 * W)
+    phase = math.pi - 2 * math.pi * sink / tokens
+    pos = [
+        (
+            ccx + R * math.cos(2 * math.pi * t / tokens + phase),
+            ccy + R * math.sin(2 * math.pi * t / tokens + phase),
+        )
+        for t in range(tokens)
+    ]
+    sk = pos[sink]
+    r_sink = min(10.0, sk[0] - x0 - 0.8, x1 - sk[0] - 0.8, sk[1] - y0 - 0.8, y1 - sk[1] - 0.8)
+    r_sink = max(1.5, r_sink)
+
+    out += dotted_circle(ccx, ccy, R, pen=black, bounds=bounds, f=feed)
+
+    # chords into the sink, ranked: top 12 pink (top 3 of those triple-pass),
+    # the next 12 thin black, the rest dropped — no fan flood
+    into_sink = []
+    plain = []
+    for q in range(tokens):
+        row = sorted(range(tokens), key=lambda k: -float(A[q][k]))[:topk]
+        for k in row:
+            if k == q or float(A[q][k]) < 0.03:
+                continue
+            if k == sink:
+                into_sink.append((float(A[q][k]), q))
+            else:
+                plain.append((k, q))
+    into_sink.sort(reverse=True)
+
+    for k, q in plain:
+        if q == sink:
+            continue
+        for seg in _clip_runs([[pos[k], pos[q]]], frame_keep):
+            out += _poly(seg, color=black, f=feed)
+
+    for rank, (_w, q) in enumerate(into_sink[:24]):
+        xb, yb = pos[q]
+        dx, dy = xb - sk[0], yb - sk[1]
+        n = math.hypot(dx, dy) or 1.0
+        ax_, ay_ = sk[0] + dx / n * (r_sink + 1.0), sk[1] + dy / n * (r_sink + 1.0)
+        if rank < 12:
+            passes = 3 if rank < 3 else 1
+            for pp in range(passes):
+                o = (pp - (passes - 1) / 2) * 0.32
+                oxp, oyp = -dy / n * o, dx / n * o
+                for seg in _clip_runs([[(ax_ + oxp, ay_ + oyp), (xb + oxp, yb + oyp)]], frame_keep):
+                    out += _poly(seg, color=pink, f=feed)
+        else:
+            for seg in _clip_runs([[(ax_, ay_), (xb, yb)]], frame_keep):
+                out += _poly(seg, color=black, f=feed)
+
+    for t in range(tokens):
+        if t == sink:
+            continue
+        px, py = pos[t]
+        if x0 + 2.2 < px < x1 - 2.2 and y0 + 2.2 < py < y1 - 2.2:
+            out += fill_disc(px, py, 1.4, spacing=0.45, pen=black, f=feed)
+    out += fill_disc(sk[0], sk[1], r_sink, spacing=0.5, pen=blue, f=feed)
+
+    # left axis: type over the sink, swatches, footer
+    xT = x0 + 0.015 * W
+    out += type_block(["ATTENTION"], xT, y1 - 7.0, height=2.8, pen=black, f=feed)
+    out += swatch_bar(xT, y1 - 17.0, [black, blue, pink], size=3.2, f=feed)
+    out += _stroke_text(_spaced("M 1:80"), xT, y0 + 2.0, 2.2, color=black, f=feed)
+    return out
+
+
+
+
+def bauhaus_weights(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    weights: str = "",
+    block: int = 0,
+    rows: int = 22,
+    cols: int = 16,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """A true Hinton diagram in the Bauhaus language: Q | K | V panels on a
+    strict grid, every weight a solid circle — radius by magnitude, blue
+    positive, pink negative. Trained weights when a checkpoint is given."""
+    import numpy as np
+
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    out: List[GCodeCommand] = []
+    blue, pink, black = _pen(BLUE, colors), _pen(PINK, colors), _pen(BLACK, colors)
+
+    panels = None
+    if weights:
+        try:
+            panels = _load_qkv(weights, block)
+        except Exception:
+            panels = None
+    if panels is None:
+        panels = [
+            np.array([[rng.random() * 2 - 1 for _ in range(48)] for _ in range(72)])
+            for _ in range(3)
+        ]
+
+    gap = 0.045 * W
+    pw = (W - 4 * gap) / 3.0
+    pitch = min(pw / cols, (H * 0.62) / rows)
+    ph = pitch * rows
+    py_top = y1 - 0.14 * H
+    labels = ["Q", "K", "V"]
+    for pi, Wm in enumerate(panels):
+        # block-mean downsample to rows x cols, signed
+        R0, C0 = Wm.shape
+        br, bc = max(1, R0 // rows), max(1, C0 // cols)
+        M = np.zeros((rows, cols))
+        for i in range(rows):
+            for j in range(cols):
+                blk = Wm[i * br : (i + 1) * br, j * bc : (j + 1) * bc]
+                if blk.size:
+                    # magnitude by |w| mean (doesn't cancel), sign by mean
+                    M[i, j] = math.copysign(float(np.abs(blk).mean()), float(blk.mean()))
+        norm = float(np.percentile(np.abs(M), 90)) or 1.0
+        rx = x0 + gap + pi * (pw + gap) + (pw - pitch * cols) / 2.0
+        for i in range(rows):
+            cy_ = py_top - pitch * (i + 0.5)
+            for j in range(cols):
+                w = float(M[i, j])
+                rr = min(1.0, abs(w) / norm) * pitch * 0.38
+                if rr < 0.22:
+                    continue
+                cx_ = rx + pitch * (j + 0.5)
+                pen = blue if w >= 0 else pink
+                if rr < 0.55:
+                    out += _poly([(cx_ - rr, cy_), (cx_ + rr, cy_)], color=pen, f=feed)
+                else:
+                    out += fill_disc(cx_, cy_, rr, spacing=0.42, pen=pen, f=feed)
+        cap = labels[pi]
+        out += _stroke_text(
+            _spaced(cap), rx + pitch * cols / 2 - 2.0, py_top - ph - 6.5, 3.0, color=black, f=feed
+        )
+        if pi < 2:
+            bx = x0 + gap + (pi + 1) * (pw + gap) - gap / 2
+            out += _poly([(bx, py_top - ph), (bx, py_top)], color=black, f=feed)
+
+    out += type_block(["PARAMETER", "FIELD"], x0 + 5.0, y0 + 16.5, pen=black, f=feed)
+    out += swatch_bar(x1 - 8.0, y1 - 4.0, [black, blue, pink], f=feed)
+    out += plus_mark(x1 - 9.0, y0 + 20.0, pen=black, f=feed)
+    out += scale_footer(bounds, pen=black, f=feed)
+    return out
+
+
+
+
+# ---------------------------------------------------------------------------
+# piece 05 — FORWARD PASS (perceptron)
+# ---------------------------------------------------------------------------
+
+
+# RETIRED (curation, no-schematics rule): a wiring diagram cannot be art. The
+# 'forward pass' concept is superseded by the ml-01 space-warping piece. Kept
+# for version history; deregistered from GENERATOR_REGISTRY.
+def bauhaus_perceptron(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    layers: Sequence[int] = (6, 8, 8, 3),
+    weights: str = "",
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """An MLP as constructivist art: neurons are solid discs, connections carry
+    1-3 parallel passes by |w|, the winning forward path runs bold pink."""
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    out: List[GCodeCommand] = []
+    blue, pink, black = _pen(BLUE, colors), _pen(PINK, colors), _pen(BLACK, colors)
+
+    # weight matrices: slices of the real checkpoint when given, else seeded
+    mats = []
+    try:
+        if weights:
+            qkv = _load_qkv(weights, 0)
+            src = qkv[0]
+            for a, b in zip(layers, layers[1:]):
+                mats.append(
+                    [
+                        [float(src[i % src.shape[0]][j % src.shape[1]]) for j in range(b)]
+                        for i in range(a)
+                    ]
+                )
+    except Exception:
+        mats = []
+    if not mats:
+        for a, b in zip(layers, layers[1:]):
+            mats.append([[rng.random() * 2 - 1 for _ in range(b)] for _ in range(a)])
+
+    n_l = len(layers)
+    lx = [x0 + W * (0.14 + 0.72 * i / (n_l - 1)) for i in range(n_l)]
+
+    def ys(n):
+        span = H * 0.62
+        return [y0 + H * 0.52 - span / 2 + span * (j + 0.5) / n for j in range(n)]
+
+    pos = [[(lx[i], y) for y in ys(n)] for i, n in enumerate(layers)]
+
+    # bar behind the second hidden layer
+    bx = lx[min(2, n_l - 1)]
+    out += fill_rect(bx - 5.0, y0 + 0.5, bx + 5.0, y1 - 0.5, spacing=0.6, pen=black, f=feed)
+
+    # winning path: greedy argmax |w| from a seeded input neuron
+    path = [rng.randint(0, layers[0] - 1)]
+    for li, M in enumerate(mats):
+        row = M[path[-1]]
+        path.append(max(range(len(row)), key=lambda j: abs(row[j])))
+
+    for li, M in enumerate(mats):
+        norm = max(abs(v) for row in M for v in row) or 1.0
+        for i, row in enumerate(M):
+            for j, w in enumerate(row):
+                t = abs(w) / norm
+                if t < 0.45:
+                    continue
+                (xa, ya), (xb, yb) = pos[li][i], pos[li + 1][j]
+                on_path = path[li] == i and path[li + 1] == j
+                pen = pink if on_path else black
+                passes = 3 if on_path else (2 if t > 0.75 else 1)
+                dx, dy = xb - xa, yb - ya
+                n = math.hypot(dx, dy) or 1.0
+                oxp, oyp = -dy / n * 0.3, dx / n * 0.3
+                for pp in range(passes):
+                    o = pp - (passes - 1) / 2
+                    out += _poly(
+                        [(xa + oxp * o, ya + oyp * o), (xb + oxp * o, yb + oyp * o)],
+                        color=pen,
+                        f=feed,
+                    )
+
+    for li, col in enumerate(pos):
+        for j, (px, py) in enumerate(col):
+            r = 2.0 + 1.6 * rng.random()
+            if li == 0:
+                out += fill_disc(px, py, r, spacing=0.5, pen=blue, f=feed)
+            elif li == n_l - 1:
+                out += fill_disc(px, py, r, spacing=0.5, pen=pink, f=feed)
+            elif path[li] == j:
+                out += fill_disc(px, py, r * 0.9, spacing=0.5, pen=black, f=feed)
+            else:
+                out += circle(px, py, r * 0.9, pen=black, f=feed)
+
+    out += type_block(["FORWARD", "PASS"], x0 + 5.0, y1 - 6.0, pen=black, f=feed)
+    out += swatch_bar(x0 + 5.0, y1 - 22.0, [black, blue, pink], f=feed)
+    out += plus_mark(x1 - 9.0, y1 - 9.0, pen=black, f=feed)
+    out += scale_footer(bounds, pen=black, f=feed)
+    return out
+
+
+
+
+# ---------------------------------------------------------------------------
+# piece 06 — GRADIENT DESCENT  → reworked as WATERSHED (basin of attraction)
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_gradient(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    n_seeds: int = 220,
+    min_sep: float = 2.4,
+    rk4_dt: float = 0.9,
+    max_steps: int = 420,
+    deep_depth: float = 1.0,
+    shallow_depth: float = 0.55,
+    settle_eps: float = 0.006,
+    momentum: float = 0.9,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """WATERSHED — gradient descent as a BASIN OF ATTRACTION. The whole
+    parameter plane rains downhill (exact RK4 on an analytic 2-Gaussian loss)
+    into two sinks; the separatrix is left as a knife of blank paper. Each
+    streamline is black on the plateau and inks its last stretch in its
+    destination's hue (blue = deep global well, pink = shallow local trap). One
+    blue heavy-ball-momentum channel visibly OVERSHOOTS the deep sink and rings
+    back — the optimizer, not decorative flow."""
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    blue, pink, black = _pen(BLUE, colors), _pen(PINK, colors), _pen(BLACK, colors)
+    out: List[GCodeCommand] = []
+
+    fx0, fy0, fx1, fy1 = x0 + 6, y0 + 12, x1 - 6, y1 - 22
+    fw, fh = fx1 - fx0, fy1 - fy0
+    rect_keep = _rect_keep((fx0, fy0, fx1, fy1))
+    typebox = lambda p: p[0] < fx0 + 0.34 * W and p[1] > fy1 - 0.16 * H
+    keep = lambda p: rect_keep(p) and not typebox(p)
+
+    def u2px(u):
+        return fx0 + (u + 1) / 2 * fw
+
+    def v2py(v):
+        return fy0 + (v + 1) / 2 * fh
+
+    # exact analytic loss: two negative Gaussians + a mild draining bowl
+    gux, guy, sd = -0.34, -0.30, 0.42  # deep global well (lower-left)
+    sux, svy, ss = 0.40, 0.34, 0.55  # shallow local trap (upper-right)
+
+    def gradL(u, v):
+        e1 = deep_depth * math.exp(-((u - gux) ** 2 + (v - guy) ** 2) / (2 * sd * sd))
+        e2 = shallow_depth * math.exp(-((u - sux) ** 2 + (v - svy) ** 2) / (2 * ss * ss))
+        gx = 0.24 * u + e1 * (u - gux) / (sd * sd) + e2 * (u - sux) / (ss * ss)
+        gy = 0.24 * v + e1 * (v - guy) / (sd * sd) + e2 * (v - svy) / (ss * ss)
+        return gx, gy
+
+    def rhs(u, v):
+        gx, gy = gradL(u, v)
+        n = math.hypot(gx, gy) or 1e-9
+        return -gx / n, -gy / n
+
+    # locate the TWO true sinks by descent from a coarse lattice
+    def descend(u, v):
+        for _ in range(800):
+            gx, gy = gradL(u, v)
+            n = math.hypot(gx, gy)
+            if n < settle_eps:
+                break
+            u -= 0.02 * gx
+            v -= 0.02 * gy
+        return u, v
+
+    ends = [descend(-1 + 2 * i / 5, -1 + 2 * j / 5) for i in range(6) for j in range(6)]
+    gc = [e for e in ends if (e[0] - gux) ** 2 + (e[1] - guy) ** 2 <= (e[0] - sux) ** 2 + (e[1] - svy) ** 2]
+    sc = [e for e in ends if e not in gc]
+    gsink = (sum(p[0] for p in gc) / len(gc), sum(p[1] for p in gc) / len(gc)) if gc else (gux, guy)
+    ssink = (sum(p[0] for p in sc) / len(sc), sum(p[1] for p in sc) / len(sc)) if sc else (sux, svy)
+    gpx, spx = (u2px(gsink[0]), v2py(gsink[1])), (u2px(ssink[0]), v2py(ssink[1]))
+    rscale = max(0.6, min(1.0, min(fw, fh) / 160))
+    deep_r, shallow_r = 13.0 * rscale, 5.0 * rscale
+
+    # evenly-spaced streamlines (Jobard–Lefebvre, seed-based)
+    cell = max(min_sep, 0.5)
+    occ: dict = {}
+
+    def gkey(px, py):
+        return (int((px - fx0) / cell), int((py - fy0) / cell))
+
+    def too_close(px, py):
+        # exempt a capture radius near each sink so tributaries reach the rim
+        if math.hypot(px - gpx[0], py - gpx[1]) < deep_r + 1.2 * min_sep:
+            return False
+        if math.hypot(px - spx[0], py - spx[1]) < shallow_r + 1.2 * min_sep:
+            return False
+        gk = gkey(px, py)
+        for di in (-1, 0, 1):
+            for dj in (-1, 0, 1):
+                for qx, qy in occ.get((gk[0] + di, gk[1] + dj), []):
+                    if (px - qx) ** 2 + (py - qy) ** 2 < min_sep * min_sep:
+                        return True
+        return False
+
+    def register(pts):
+        for px, py in pts:
+            occ.setdefault(gkey(px, py), []).append((px, py))
+
+    h = 0.02 * rk4_dt
+
+    def trace(u, v):
+        pts = [(u2px(u), v2py(v))]
+        skey = None
+        for _ in range(max_steps):
+            gx, gy = gradL(u, v)
+            if math.hypot(gx, gy) < settle_eps:
+                break
+            k1 = rhs(u, v)
+            k2 = rhs(u + 0.5 * h * k1[0], v + 0.5 * h * k1[1])
+            k3 = rhs(u + 0.5 * h * k2[0], v + 0.5 * h * k2[1])
+            k4 = rhs(u + h * k3[0], v + h * k3[1])
+            u += h / 6 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0])
+            v += h / 6 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1])
+            px, py = u2px(u), v2py(v)
+            if math.hypot(px - gpx[0], py - gpx[1]) < deep_r + 0.6:
+                skey = "b"
+                break
+            if math.hypot(px - spx[0], py - spx[1]) < shallow_r + 0.6:
+                skey = "p"
+                break
+            if not keep((px, py)) or too_close(px, py):
+                break
+            pts.append((px, py))
+        if skey is None:
+            db = (pts[-1][0] - gpx[0]) ** 2 + (pts[-1][1] - gpx[1]) ** 2
+            dp = (pts[-1][0] - spx[0]) ** 2 + (pts[-1][1] - spx[1]) ** 2
+            skey = "b" if db <= dp else "p"
+        return pts, skey
+
+    grid_n = max(6, int(math.sqrt(n_seeds)))
+    starts = []
+    for i in range(grid_n):
+        for j in range(grid_n):
+            su = -1.05 + 2.1 * (i + 0.5) / grid_n + rng.uniform(-0.3, 0.3) * (2.1 / grid_n)
+            sv = -1.05 + 2.1 * (j + 0.5) / grid_n + rng.uniform(-0.3, 0.3) * (2.1 / grid_n)
+            starts.append((su, sv))
+    rng.shuffle(starts)
+
+    streams = []  # (pts, skey, start_uv)
+    for su, sv in starts:
+        p0 = (u2px(su), v2py(sv))
+        if not keep(p0) or too_close(*p0):
+            continue
+        pts, skey = trace(su, sv)
+        if len(pts) < 4:
+            continue
+        register(pts)
+        streams.append((pts, skey, (su, sv)))
+
+    # the hero: the blue-basin tributary starting farthest up-plateau
+    hero_idx = -1
+    best_d = -1.0
+    for i, (pts, skey, st) in enumerate(streams):
+        if skey == "b":
+            d = (st[0] - gsink[0]) ** 2 + (st[1] - gsink[1]) ** 2
+            if d > best_d:
+                best_d, hero_idx = d, i
+
+    # draw the field: black plateau, destination-hued last stretch
+    for i, (pts, skey, _st) in enumerate(streams):
+        if i == hero_idx:
+            continue
+        ncut = max(1, int(len(pts) * 0.85))
+        out += _poly(pts[: ncut + 1], color=black, f=feed)
+        tail = pts[ncut:]
+        if len(tail) >= 2:
+            out += _poly(tail, color=(blue if skey == "b" else pink), f=feed)
+
+    # the OVERSHOOT braid — heavy-ball momentum into the deep sink
+    def offset_poly(pts, d):
+        n = len(pts)
+        res = []
+        for i, (px, py) in enumerate(pts):
+            ax, ay = pts[max(0, i - 1)]
+            bx, by = pts[min(n - 1, i + 1)]
+            tx, ty = bx - ax, by - ay
+            L = math.hypot(tx, ty) or 1.0
+            res.append((px - ty / L * d, py + tx / L * d))
+        return res
+
+    if hero_idx >= 0:
+        u, v = streams[hero_idx][2]
+        vel = [0.0, 0.0]
+        path = [(u2px(u), v2py(v))]
+        spd = [0.0]
+        left = False
+        for _ in range(max_steps):
+            gx, gy = gradL(u, v)
+            vel[0] = momentum * vel[0] - 0.03 * gx
+            vel[1] = momentum * vel[1] - 0.03 * gy
+            u += vel[0]
+            v += vel[1]
+            px, py = u2px(u), v2py(v)
+            if not keep((px, py)):
+                break
+            path.append((px, py))
+            spd.append(math.hypot(vel[0], vel[1]))
+            near = (u - gsink[0]) ** 2 + (v - gsink[1]) ** 2
+            if near > 0.09:
+                left = True
+            if left and near < 0.02 and math.hypot(vel[0], vel[1]) < 0.006:
+                break
+        smax = max(spd) or 1.0
+        out += _poly(path, color=blue, f=feed)  # center pass always
+        for d in (-0.38, 0.38):  # outer passes only on the fast opening reach
+            seg = []
+            for i, p in enumerate(path):
+                if spd[i] > 0.4 * smax:
+                    seg.append(p)
+                elif len(seg) >= 2:
+                    out += _poly(offset_poly(seg, d), color=blue, f=feed)
+                    seg = []
+                else:
+                    seg = []
+            if len(seg) >= 2:
+                out += _poly(offset_poly(seg, d), color=blue, f=feed)
+
+    # the sinks: hierarchy at 3m
+    out += circle(gpx[0], gpx[1], deep_r + 2.5, pen=black, f=feed)  # one seating ring = a well
+    out += fill_disc(gpx[0], gpx[1], deep_r, spacing=0.5, pen=blue, f=feed)
+    out += fill_disc(spx[0], spx[1], shallow_r, spacing=0.5, pen=pink, f=feed)
+    out += dotted_circle(spx[0], spx[1], shallow_r + 4, pen=pink, bounds=bounds, f=feed)
+
+    # furniture on a shared left axis
+    xT = x0 + 0.02 * W
+    out += type_block(["WATER", "SHED"], xT, y1 - 6.0, height=3.2, pen=black, f=feed)
+    out += _stroke_text(
+        _spaced("EVERY START FINDS THE VALLEY"), xT, y1 - 20.0, 2.0, color=black, f=feed
+    )
+    out += swatch_bar(x1 - 9.0, y1 - 4.0, [black, blue, pink], size=2.6, f=feed)
+    sad = (u2px((gsink[0] + ssink[0]) / 2), v2py((gsink[1] + ssink[1]) / 2))
+    out += plus_mark(sad[0], sad[1], s=1.4, pen=black, f=feed)
+    out += scale_footer(bounds, text="DTH = -GRAD L . DT", pen=black, height=2.4, f=feed)
+    return out
+
+
+
+
+def bauhaus_gradient_v1(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    levels: int = 14,
+    steps: int = 70,
+    lr: float = 0.22,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """RETIRED (kept for version history, deregistered). The original GRADIENT
+    DESCENT: a two-bowl loss landscape as thin contour ellipses with a bold pink
+    descent path + step dots. Superseded by the WATERSHED rework of
+    ``bauhaus_gradient`` — flagged as textbook/schematic by the studio critics."""
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    out: List[GCodeCommand] = []
+    blue, pink, black = _pen(BLUE, colors), _pen(PINK, colors), _pen(BLACK, colors)
+    cx_, cy_ = x0 + 0.54 * W, y0 + 0.5 * H
+
+    m1 = (cx_ - 0.16 * W, cy_ - 0.07 * H)  # global minimum
+    m2 = (cx_ + 0.22 * W, cy_ + 0.13 * H)  # shallow second bowl
+
+    def loss(px, py):
+        d1 = ((px - m1[0]) / (0.30 * W)) ** 2 + ((py - m1[1]) / (0.26 * H)) ** 2
+        d2 = ((px - m2[0]) / (0.20 * W)) ** 2 + ((py - m2[1]) / (0.18 * H)) ** 2
+        return min(d1, 0.35 + 0.8 * d2)
+
+    # marching-squares-lite: sample a grid, draw iso segments per cell
+    nxg, nyg = 90, 62
+    gx = [x0 + 4 + (W - 8) * i / (nxg - 1) for i in range(nxg)]
+    gy = [y0 + 8 + (H - 16) * j / (nyg - 1) for j in range(nyg)]
+    field = [[loss(px, py) for py in gy] for px in gx]
+    vmax = 1.15
+    for lv in range(1, levels + 1):
+        iso = vmax * (lv / levels) ** 1.4
+        for i in range(nxg - 1):
+            for j in range(nyg - 1):
+                quad = (field[i][j], field[i + 1][j], field[i + 1][j + 1], field[i][j + 1])
+                pts_c = []
+                corners = [
+                    (gx[i], gy[j]),
+                    (gx[i + 1], gy[j]),
+                    (gx[i + 1], gy[j + 1]),
+                    (gx[i], gy[j + 1]),
+                ]
+                for k in range(4):
+                    a_, b_ = quad[k], quad[(k + 1) % 4]
+                    if (a_ < iso) != (b_ < iso):
+                        t = (iso - a_) / (b_ - a_)
+                        pa, pb = corners[k], corners[(k + 1) % 4]
+                        pts_c.append((pa[0] + (pb[0] - pa[0]) * t, pa[1] + (pb[1] - pa[1]) * t))
+                if len(pts_c) >= 2:
+                    out += _poly(pts_c[:2], color=black, f=feed)
+
+    # descent path from a seeded start, bold pink with step dots
+    px, py = x0 + W * rng.uniform(0.20, 0.30), y0 + H * rng.uniform(0.78, 0.88)
+    path = [(px, py)]
+    for _ in range(steps):
+        e = 1.5
+        gx_ = (loss(px + e, py) - loss(px - e, py)) / (2 * e)
+        gy_ = (loss(px, py + e) - loss(px, py - e)) / (2 * e)
+        px -= lr * W * gx_
+        py -= lr * H * gy_
+        path.append((px, py))
+    for o in (-0.35, 0.0, 0.35):
+        out += _poly([(p_[0], p_[1] + o) for p_ in path], color=pink, f=feed)
+    for k, (sx, sy) in enumerate(path[:: max(1, steps // 14)]):
+        out += fill_disc(sx, sy, 1.0, spacing=0.45, pen=pink, f=feed)
+    out += fill_disc(m1[0], m1[1], 3.2, spacing=0.5, pen=blue, f=feed)
+    out += dotted_circle(m2[0], m2[1], 6.0, pen=black, bounds=bounds, f=feed)
+
+    out += type_block(["GRADIENT", "DESCENT"], x0 + 5.0, y1 - 6.0, pen=black, f=feed)
+    out += swatch_bar(x0 + 5.0, y1 - 22.0, [black, blue, pink], f=feed)
+    out += plus_mark(x1 - 9.0, y1 - 9.0, pen=black, f=feed)
+    out += scale_footer(bounds, pen=black, f=feed)
+    return out
+
+
+
+
+# ---------------------------------------------------------------------------
+# FORWARD PASS, rethought — the weight matrix as an Anni-Albers weave draft.
+# A network layer IS a grid of connections = a loom. Warp (blue) = inputs,
+# weft (pink) = outputs; at each crossing the thread on TOP is set by the real
+# weight's SIGN, its FLOAT length by magnitude. Not a wiring diagram — a textile
+# that happens to be the exact matrix.
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_loom(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    weights: str = "",
+    block: int = 0,
+    n_warp: int = 52,
+    n_weft: int = 34,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """FORWARD PASS as weaving: a real weight matrix woven as warp/weft threads,
+    over/under by sign, float by magnitude. Bauhaus by lineage (the weaving
+    workshop), true by construction (it is the matrix), lines by nature."""
+    import numpy as np
+
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    blue, pink, black = _pen(BLUE, colors), _pen(PINK, colors), _pen(BLACK, colors)
+    out: List[GCodeCommand] = []
+
+    Wm = None
+    if weights:
+        try:
+            Wm = _load_qkv(weights, block)[0]  # query matrix
+        except Exception:
+            Wm = None
+    if Wm is None:
+        Wm = np.array([[rng.random() * 2 - 1 for _ in range(96)] for _ in range(96)])
+
+    # block-mean downsample to n_warp x n_weft, keep sign + magnitude
+    R0, C0 = Wm.shape
+    br, bc = max(1, R0 // n_warp), max(1, C0 // n_weft)
+    M = np.zeros((n_warp, n_weft))
+    for i in range(n_warp):
+        for j in range(n_weft):
+            blk = Wm[i * br : (i + 1) * br, j * bc : (j + 1) * bc]
+            if blk.size:
+                M[i, j] = math.copysign(float(np.abs(blk).mean()), float(blk.mean()))
+    # sort warp rows + weft cols by mean weight so same-sign regions CLUSTER —
+    # a legitimate neuron reorder (permutation-invariant), revealing the block/
+    # diagonal structure a trained matrix hides in arbitrary index order.
+    ri = sorted(range(n_warp), key=lambda i: float(M[i].mean()))
+    ci = sorted(range(n_weft), key=lambda j: float(M[:, j].mean()))
+    M = M[np.ix_(ri, ci)]
+    norm = float(np.percentile(np.abs(M), 92)) or 1.0
+
+    # the tapestry fills the page (dominant mass); title band above, footer below
+    mx0, mx1 = x0 + 6, x1 - 6
+    my0, my1 = y0 + 16, y1 - 20
+    dx = (mx1 - mx0) / (n_warp - 1)
+    dy = (my1 - my0) / (n_weft - 1)
+    gap = min(dx, dy) * 0.34  # the interlace gap: the under-thread ducks here
+
+    def strong(w):
+        return abs(w) / norm > 0.85  # heaviest floats get a second pass (sheen)
+
+    # WARP threads (vertical, blue) — broken where the warp dips UNDER (w < 0)
+    for i in range(n_warp):
+        xi = mx0 + i * dx
+        cuts = []
+        for j in range(n_weft):
+            if M[i, j] < 0:  # weft on top here -> warp ducks under
+                yj = my0 + j * dy
+                cuts.append((yj - gap, yj + gap))
+        yptr = my0
+        segs = []
+        for a, b in cuts:
+            if a > yptr:
+                segs.append((yptr, a))
+            yptr = max(yptr, b)
+        if yptr < my1:
+            segs.append((yptr, my1))
+        for a, b in segs:
+            out += _poly([(xi, a), (xi, b)], color=blue, f=feed)
+
+    # WEFT threads (horizontal, pink) — broken where the weft dips UNDER (w >= 0)
+    for j in range(n_weft):
+        yj = my0 + j * dy
+        cuts = []
+        for i in range(n_warp):
+            if M[i, j] >= 0:  # warp on top -> weft ducks under
+                xi = mx0 + i * dx
+                cuts.append((xi - gap, xi + gap))
+        xptr = mx0
+        segs = []
+        for a, b in cuts:
+            if a > xptr:
+                segs.append((xptr, a))
+            xptr = max(xptr, b)
+        if xptr < mx1:
+            segs.append((xptr, mx1))
+        for a, b in segs:
+            out += _poly([(a, yj), (b, yj)], color=pink, f=feed)
+            if b - a > dx * 2.4:  # a long float catches the light -> doubled
+                out += _poly([(a, yj + 0.25), (b, yj + 0.25)], color=pink, f=feed)
+
+    # black selvage: the woven edge, framing the cloth (the only closed rects)
+    out += _poly(
+        [
+            (mx0 - 2, my0 - 2),
+            (mx1 + 2, my0 - 2),
+            (mx1 + 2, my1 + 2),
+            (mx0 - 2, my1 + 2),
+            (mx0 - 2, my0 - 2),
+        ],
+        color=black,
+        f=feed,
+    )
+
+    # type: title top-left over the cloth's head, spec footer
+    out += type_block(["FORWARD PASS"], x0 + 4, y1 - 4, height=3.0, pen=black, f=feed)
+    out += _stroke_text(_spaced("THE WEIGHTS, WOVEN"), x0 + 4, y1 - 11, 2.2, color=black, f=feed)
+    out += swatch_bar(x1 - 8, y1 - 4, [black, blue, pink], size=1.8, f=feed)
+    out += scale_footer(
+        bounds, text="LAYER Q  52x34  WARP=IN WEFT=OUT", pen=black, height=2.2, f=feed
+    )
+    return out
+
+
+
+
+# ---------------------------------------------------------------------------
+# piece 08 — DECISION SURFACE (the network as its function, not its wiring)
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_decision(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    weights: str = "",
+    block: int = 0,
+    hidden: int = 6,
+    n_points: int = 120,
+    margin: float = 0.22,
+    boundary_passes: int = 3,
+    grid: int = 140,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """DECISION SURFACE — a neural network drawn as its decision FUNCTION, not
+    its wiring. A small readout f(u,v)=Σ aᵢ·tanh(Wᵢ·[u,v]+bᵢ) scores the input
+    plane; the bold black knife is the EXACT iso-0 contour (marching squares),
+    flanked by ±margin shoulders and the hidden-unit hyperplane creases the cut
+    visibly kinks on (the fingerprint of composition — no neuron drawn). Every
+    dot is coloured by the TRUE sign of f: blue = class +1, pink = class −1.
+    Trained query directions drive the readout when a checkpoint is given."""
+    import numpy as np
+
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    blue, pink, black = _pen(BLUE, colors), _pen(PINK, colors), _pen(BLACK, colors)
+    out: List[GCodeCommand] = []
+
+    # bands: title on top, field in the middle, footer below → the corner→corner
+    # cut lives in the field and never fights the type.
+    title_h, foot_h = 24.0, 12.0
+    fx0, fx1 = x0 + 6.0, x1 - 6.0
+    fy0, fy1 = y0 + foot_h, y1 - title_h
+    fw, fh = fx1 - fx0, fy1 - fy0
+    keep = _rect_keep((fx0, fy0, fx1, fy1))
+
+    def px2u(px: float) -> float:
+        return (px - fx0) / fw * 2.0 - 1.0
+
+    def py2v(py: float) -> float:
+        return (py - fy0) / fh * 2.0 - 1.0
+
+    def u2px(u: float) -> float:
+        return fx0 + (u + 1.0) / 2.0 * fw
+
+    def v2py(v: float) -> float:
+        return fy0 + (v + 1.0) / 2.0 * fh
+
+    # ---- the readout f(u,v) = Σ aᵢ tanh(Wᵢ·[u,v] + bᵢ) --------------------
+    Wq = None
+    if weights:
+        try:
+            Wq = _load_qkv(weights, block)[0]  # trained query matrix (~96×96)
+        except Exception:
+            Wq = None
+
+    def build_field(attempt: int):
+        """Return (W1, b1, a). Real path rotates which trained columns feed the
+        2D readout; fallback re-draws seeded gaussians at a shrinking scale."""
+        if Wq is not None:
+            C = Wq.shape[1]
+            c = (attempt * 2) % max(1, C - 3)
+            W1 = np.array(Wq[:hidden, c : c + 2], dtype=float)
+            b1 = np.array([float(Wq[i, (c + 2) % C]) for i in range(hidden)])
+            a = np.array(
+                [
+                    float(np.linalg.norm(Wq[i, :hidden]))
+                    * (1.0 if float(Wq[i].mean()) >= 0 else -1.0)
+                    for i in range(hidden)
+                ]
+            )
+        else:
+            sc = 1.6 * (0.82**attempt)
+            W1 = np.array([[rng.gauss(0, sc) for _ in range(2)] for _ in range(hidden)])
+            b1 = np.array([rng.gauss(0, 0.55) for _ in range(hidden)])
+            a = np.array([rng.gauss(0, 1.0) for _ in range(hidden)])
+        # normalise input scale so tanh isn't saturated flat
+        s = float(np.abs(W1).mean()) or 1.0
+        W1 = W1 / s * 1.7
+        return W1, b1, a
+
+    def eval_grid(W1, b1, a, us, vs):
+        U, V = np.meshgrid(us, vs)  # (ny, nx) → F[j][i], j indexes vs/ys
+        F = np.zeros_like(U)
+        for i in range(hidden):
+            F += a[i] * np.tanh(W1[i, 0] * U + W1[i, 1] * V + b1[i])
+        return F
+
+    def chains_at(F_list, xs, ys, iso, minlen=6):
+        segs = _marching_squares(F_list, xs, ys, iso)
+        return [c for c in _chain_segments(segs) if len(c) >= minlen]
+
+    def span(ch):
+        xs_ = [p[0] for p in ch]
+        ys_ = [p[1] for p in ch]
+        return math.hypot(max(xs_) - min(xs_), max(ys_) - min(ys_))
+
+    # ---- boundary-quality gate: pick the cleanest single folded knife -------
+    cxs = [fx0 + i * (fw / 44) for i in range(45)]
+    cys = [fy0 + j * (fh / 44) for j in range(45)]
+    cus = np.array([px2u(x) for x in cxs])
+    cvs = np.array([py2v(y) for y in cys])
+    best = None
+    for attempt in range(8):
+        W1, b1, a = build_field(attempt)
+        Fc = eval_grid(W1, b1, a, cus, cvs).tolist()
+        chs = chains_at(Fc, cxs, cys, 0.0)
+        if not chs:
+            continue
+        dom = max(chs, key=span)
+
+        def diag_score(ch):
+            xs_ = [p[0] for p in ch]
+            ys_ = [p[1] for p in ch]
+            dx, dy = max(xs_) - min(xs_), max(ys_) - min(ys_)
+            aspect = min(dx, dy) / (max(dx, dy) + 1e-9)  # 1 → true diagonal
+            return span(ch) * (0.35 + 0.65 * aspect)
+
+        # fewest components, then the longest chain that best spans the diagonal
+        score = (len(chs), -diag_score(dom))
+        if best is None or score < best[0]:
+            best = (score, (W1, b1, a))
+    if best is None:
+        W1, b1, a = build_field(0)
+    else:
+        W1, b1, a = best[1]
+
+    # ---- fine field, reused for boundary + both margins --------------------
+    xs = [fx0 + i * (fw / grid) for i in range(grid + 1)]
+    ys = [fy0 + j * (fh / grid) for j in range(grid + 1)]
+    us = np.array([px2u(x) for x in xs])
+    vs = np.array([py2v(y) for y in ys])
+    Fnp = eval_grid(W1, b1, a, us, vs)
+    # normalise field magnitude so `margin` is a consistent fraction of the
+    # range whatever the weight source (the iso-0 cut is scale-invariant, so
+    # only the shoulders + point classification depend on this).
+    fscale = float(np.percentile(np.abs(Fnp), 88)) or 1.0
+    a = a / fscale
+    F_list = (Fnp / fscale).tolist()
+
+    def offset_poly(pts, d):
+        n = len(pts)
+        res = []
+        for i, (px, py) in enumerate(pts):
+            ax, ay = pts[max(0, i - 1)]
+            bx, by = pts[min(n - 1, i + 1)]
+            tx, ty = bx - ax, by - ay
+            L = math.hypot(tx, ty) or 1.0
+            res.append((px - ty / L * d, py + tx / L * d))
+        return res
+
+    # ---- MARGIN SHOULDERS first (thin, so the knife overprints them) -------
+    for iso in (margin, -margin):
+        for ch in chains_at(F_list, xs, ys, iso):
+            for r in _clip_runs([ch], keep):
+                out += _poly(r, color=black, f=feed)
+
+    # ---- THE DECISION CUT: iso-0, the hero. The curve is already piecewise-
+    # bent (a NETWORK's boundary, not one perceptron's straight line); drawn as
+    # a solid multi-line knife. Secondary components stay a single quiet stroke.
+    b_chains = sorted(chains_at(F_list, xs, ys, 0.0), key=span, reverse=True)
+    for ci, ch in enumerate(b_chains):
+        for r in _clip_runs([ch], keep):
+            if len(r) < 2:
+                continue
+            offs = [-0.5, -0.25, 0.0, 0.25, 0.5] if ci == 0 else [0.0]
+            for d in offs:
+                out += _poly(offset_poly(r, d) if d else r, color=black, f=feed)
+
+    # ---- POINT CLOUDS labelled by the true sign of f ----------------------
+    def fval(u, v):
+        return sum(
+            float(a[i]) * math.tanh(float(W1[i, 0]) * u + float(W1[i, 1]) * v + float(b1[i]))
+            for i in range(hidden)
+        )
+
+    def dot(cx, cy, r, pen):
+        turns = max(1, int(r / 0.55))
+        n = max(10, int(r * 16))
+        pts = []
+        for k in range(n + 1):
+            t = k / n
+            ang = 2 * math.pi * turns * t
+            pts.append((cx + r * t * math.cos(ang), cy + r * t * math.sin(ang)))
+        return _poly(pts, color=pen, f=feed)
+
+    # 1:2 blue:pink mass — pink is the dense, loud field. A CLEAR corridor
+    # (|f|<0.7·margin) hugs the cut; a few big "support vector" discs sit on the
+    # shoulders (0.7·margin ≤ |f| < 1.5·margin); the rest is the small field.
+    n_blue = n_points // 3
+    n_pink = n_points - n_blue
+    want = {"b": n_blue, "p": n_pink}
+    got = {"b": [], "p": []}
+    sup = {"b": 0, "p": 0}
+    SUPMAX = 5
+    typebox = lambda px, py: px < fx0 + 0.30 * fw and py > fy1 - 0.14 * fh
+    tries = 0
+    while (len(got["b"]) < n_blue or len(got["p"]) < n_pink) and tries < 12000:
+        tries += 1
+        px = rng.uniform(fx0 + 2, fx1 - 2)
+        py = rng.uniform(fy0 + 2, fy1 - 2)
+        if typebox(px, py):
+            continue
+        val = fval(px2u(px), py2v(py))
+        key = "b" if val >= 0 else "p"
+        if len(got[key]) >= want[key]:
+            continue
+        av = abs(val)
+        if av < 0.7 * margin:  # the spine corridor stays a clean void
+            continue
+        if av < 1.5 * margin:  # support shoulder — a few big discs only
+            if sup[key] >= SUPMAX:
+                continue
+            sup[key] += 1
+            got[key].append((px, py, True))
+        else:
+            got[key].append((px, py, False))
+    for px, py, is_sup in got["b"]:
+        out += dot(px, py, 2.1 if is_sup else 1.0, blue)
+    for px, py, is_sup in got["p"]:
+        out += dot(px, py, 2.1 if is_sup else 1.0, pink)
+
+    # ---- FURNITURE on a shared left axis ----------------------------------
+    xT = x0 + 0.02 * W
+    out += type_block(["DECISION", "SURFACE"], xT, y1 - 5.0, height=3.2, pen=black, f=feed)
+    out += _stroke_text(
+        _spaced("THE CUT THROUGH INPUT SPACE"), xT, y1 - 19.0, 2.0, color=black, f=feed
+    )
+    out += swatch_bar(x1 - 9.0, y1 - 4.0, [black, blue, pink], size=2.6, f=feed)
+    out += plus_mark(fx1 - 0.16 * fw, fy0 + 0.12 * fh, s=1.4, pen=black, f=feed)
+    out += scale_footer(bounds, text="F(X)=SIGN(W.X+B)", pen=black, height=2.4, f=feed)
+    return out
+
+
+
+
+# ---------------------------------------------------------------------------
+# piece 10 — THE LONG NOW (LSTM cell state as one modulated memory band)
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_conveyor(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    weights: str = "",
+    block: int = 0,
+    steps: int = 64,
+    forget_events: int = 2,
+    write_events: int = 4,
+    band_max_frac: float = 0.20,
+    full_pitch: float = 0.9,
+    void_pitch: float = 5.0,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """THE LONG NOW — an LSTM's memory carried through time. The exact cell
+    update cₜ = fₜ·cₜ₋₁ + iₜ·gₜ runs across `steps`; the black conveyor band's
+    thickness AND ink density are |cₜ| (dense = strong memory, near-void where it
+    decays). Forget gates pinch the band to a thread; pink write-stitches inject
+    new information into one selvage; a thin blue ghost shows the prior value
+    being overwritten. Time is the horizontal axis."""
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    blue, pink, black = _pen(BLUE, colors), _pen(PINK, colors), _pen(BLACK, colors)
+    out: List[GCodeCommand] = []
+
+    dt = (0.78 * W) / steps
+    A = band_max_frac * H
+    yb = y0 + 0.46 * H
+    xL = x0 + 0.20 * W
+
+    # gate schedule — the fallback runs the SAME true recurrence as a real ckpt
+    f = [0.80 + 0.19 * rng.fbm(t * 0.11, 7.3) for t in range(steps)]
+    ig = [(0.15 + 0.10 * rng.fbm(t * 0.09, 2.1)) * (2.0 * rng.fbm(t * 0.07, 9.9) - 1.0) for t in range(steps)]
+
+    def scatter(nev):
+        idx = []
+        for k in range(nev):
+            base = (k + 1) / (nev + 1)
+            idx.append(int(min(steps - 2, max(1, (base + rng.uniform(-0.05, 0.05)) * steps))))
+        return sorted(set(idx))
+
+    forgets = scatter(forget_events)
+    writes = scatter(write_events)
+    for t in forgets:
+        f[t] = 0.06  # a scripted pinch-to-thread
+    deepest = forgets[len(forgets) // 2] if forgets else 0
+    for w in writes:
+        ig[w] = rng.choice([-1, 1]) * 0.9  # a strong signed injection
+    # the write just after the deepest forget is the loudest (cause & effect)
+    after = min([w for w in writes if w > deepest], default=None)
+    if after is not None:
+        ig[after] = math.copysign(1.15, ig[after])
+
+    c = 0.0
+    c_now, c_prev = [], []
+    for t in range(steps):
+        c_prev.append(c)
+        c = f[t] * c + ig[t]
+        c_now.append(c)
+    cmax = max(1e-6, max(abs(v) for v in c_now))
+    h = [max(0.6, A * abs(v) / cmax) for v in c_now]
+
+    xc = [xL + (t + 0.5) * dt for t in range(steps)]
+
+    # body — aligned horizontal striations clipped to the tube envelope: the
+    # number of lines at each column IS |cₜ|, so the ribbon swells with memory
+    # and collapses toward the baseline through a forget (density = tone).
+    nlev = int(A / full_pitch) + 1
+    for k in range(nlev + 1):
+        off = k * full_pitch
+        if off > A + 1e-6:
+            break
+        for sgn in ((1, -1) if k > 0 else (1,)):
+            run: List[Tuple[float, float]] = []
+            for t in range(steps):
+                if h[t] >= off:
+                    run.append((xc[t], yb + sgn * off))
+                elif len(run) >= 2:
+                    out += _poly(run, color=black, f=feed)
+                    run = []
+                else:
+                    run = []
+            if len(run) >= 2:
+                out += _poly(run, color=black, f=feed)
+
+    # smooth tube selvages (the rounded memory ribbon) + through-baseline
+    out += _poly([(xc[t], yb + h[t]) for t in range(steps)], color=black, f=feed)
+    out += _poly([(xc[t], yb - h[t]) for t in range(steps)], color=black, f=feed)
+    out += _poly([(xL, yb), (xc[-1], yb)], color=black, f=feed)
+
+    # blue prior-memory ghost in a clear lane below the band
+    yg = yb - A - 4.0
+    out += _poly([(xc[t], yg - A * 0.35 * abs(c_prev[t]) / cmax) for t in range(steps)], color=blue, f=feed)
+
+    # pink write-stitches into one selvage (sign of c picks top/bottom)
+    for w in writes:
+        top = c_now[w] >= 0
+        y_from = yb + h[w] if top else yb - h[w]
+        length = min(0.9 * h[w], A * abs(ig[w]) / cmax * 1.4)
+        length *= 1.3 if w == after else 1.0
+        y_to = y_from - length if top else y_from + length
+        out += _poly([(xc[w], y_from), (xc[w], y_to)], color=pink, f=feed)
+
+    # forget anchor — the singularity of forgetting, on the baseline
+    out += plus_mark(xc[deepest], yb, s=1.4, pen=black, f=feed)
+
+    xT = x0 + 0.02 * W
+    out += type_block(["THE LONG", "NOW"], xT, yb + 0.24 * H, height=3.2, pen=black, f=feed)
+    out += _stroke_text(_spaced("FORGET . WRITE . CARRY"), xT, yb + 0.10 * H, 2.0, color=black, f=feed)
+    out += swatch_bar(xT, yb - 0.02 * H, [black, blue, pink], size=2.6, f=feed)
+    real = bool(weights)
+    out += scale_footer(
+        bounds,
+        text=("GATES REAL RECURRENCE EXACT" if real else "GATES SYNTHETIC RECURRENCE EXACT"),
+        pen=black,
+        height=2.2,
+        f=feed,
+    )
+    return out
+
+
+
+
+# ---------------------------------------------------------------------------
+# piece 11 — SETTLING (the perceptron boundary as a rotating sweep of errors)
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_settling(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    weights: str = "",
+    block: int = 0,
+    n_points: int = 90,
+    margin_gap: float = 0.14,
+    eta: float = 1.0,
+    max_epochs: int = 40,
+    ghost_lines: int = 16,
+    final_passes: int = 3,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """SETTLING — a perceptron's decision boundary drawn as MOTION: the line
+    that its own errors pushed into place. Real online Rosenblatt updates on a
+    seeded separable cloud leave a fan of successive boundary positions (black,
+    ghosting from wild to settled); the converged cut is the loud pink knife; the
+    2-3 misclassified points that rotated the boundary most are the scarce large
+    discs — the CAUSE of the cut. Time here is the learning."""
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    blue, pink, black = _pen(BLUE, colors), _pen(PINK, colors), _pen(BLACK, colors)
+    out: List[GCodeCommand] = []
+
+    fx0, fy0, fx1, fy1 = x0 + 0.24 * W, y0 + 8, x1 - 6, y1 - 8
+    fw, fh = fx1 - fx0, fy1 - fy0
+    fieldkeep = _rect_keep((fx0, fy0, fx1, fy1))
+
+    def dx2px(x):
+        return fx0 + (x + 1) / 2 * fw
+
+    def dy2py(y):
+        return fy0 + (y + 1) / 2 * fh
+
+    def make_data(phi, theta):
+        ws = (math.cos(phi), math.sin(phi))
+        pts, lab = [], []
+        tries = 0
+        while len(pts) < n_points and tries < n_points * 25:
+            tries += 1
+            x = (rng.uniform(-1, 1), rng.uniform(-1, 1))
+            s = ws[0] * x[0] + ws[1] * x[1] - theta
+            if abs(s) < margin_gap:
+                continue
+            pts.append(x)
+            lab.append(1 if s > 0 else -1)
+        return pts, lab
+
+    def train(pts, lab):
+        w = [0.0, 0.0]
+        b = 0.0
+        hist = []
+        for _ in range(max_epochs):
+            updated = False
+            for x, y in zip(pts, lab):
+                if (1 if (w[0] * x[0] + w[1] * x[1] + b) > 0 else -1) != y:
+                    w[0] += eta * y * x[0]
+                    w[1] += eta * y * x[1]
+                    b += eta * y
+                    hist.append((w[0], w[1], b, x, y))
+                    updated = True
+            if not updated:
+                break
+        return w, b, hist
+
+    # resample until the trajectory is long enough to read as a sweep
+    best = None
+    for _ in range(20):
+        phi = rng.uniform(0.35, 0.75) * math.pi
+        theta = rng.uniform(-0.15, 0.15)
+        pts, lab = make_data(phi, theta)
+        w, b, hist = train(pts, lab)
+        if best is None or len(hist) > len(best[4]):
+            best = (pts, lab, w, b, hist)
+        if len(hist) >= ghost_lines:
+            break
+    pts, lab, wf, bf, hist = best
+
+    def boundary_seg(wx, wy, bb):
+        n2 = wx * wx + wy * wy
+        if n2 < 1e-9:
+            return [(fx0, fy0), (fx0, fy0)]
+        ox, oy = -bb * wx / n2, -bb * wy / n2
+        dx, dy = -wy, wx
+        dl = math.hypot(dx, dy) or 1.0
+        dx, dy = dx / dl, dy / dl
+        L, N = 4.0, 48  # densify so _clip_runs keeps the in-rect portion
+        p0 = (ox - L * dx, oy - L * dy)
+        p1 = (ox + L * dx, oy + L * dy)
+        return [
+            (dx2px(p0[0] + (p1[0] - p0[0]) * t / N), dy2py(p0[1] + (p1[1] - p0[1]) * t / N))
+            for t in range(N + 1)
+        ]
+
+    def offset_poly(p, d):
+        n = len(p)
+        res = []
+        for i, (px, py) in enumerate(p):
+            ax, ay = p[max(0, i - 1)]
+            bx, by = p[min(n - 1, i + 1)]
+            tx, ty = bx - ax, by - ay
+            ln = math.hypot(tx, ty) or 1.0
+            res.append((px - ty / ln * d, py + tx / ln * d))
+        return res
+
+    # thinned scatter — quiet context so the sweep dominates
+    keepn = max(10, int(0.6 * len(pts)))
+    for (x, y) in list(zip(pts, lab))[:keepn]:
+        px, py = dx2px(x[0]), dy2py(x[1])
+        if y > 0:
+            out += fill_disc(px, py, 0.8, spacing=0.5, pen=blue, f=feed)
+        else:
+            out += circle(px, py, 0.9, pen=pink, f=feed)
+
+    # the fan of past-guess boundaries — subsample by EVEN ANGLE of the normal
+    # so it reads as one clean rotating sweep (a fan closing), not random sticks.
+    ang_all = [math.atan2(h[1], h[0]) for h in hist]
+    order = sorted(range(len(hist)), key=lambda i: ang_all[i])
+    if len(order) <= ghost_lines:
+        sel = order
+    else:
+        sel = [order[int(round(k * (len(order) - 1) / (ghost_lines - 1)))] for k in range(ghost_lines)]
+    final_ang = math.atan2(wf[1], wf[0])
+    for si in sel:
+        wx, wy, bb, _, _ = hist[si]
+        near = abs(math.atan2(math.sin(ang_all[si] - final_ang), math.cos(ang_all[si] - final_ang)))
+        for r in _clip_runs([boundary_seg(wx, wy, bb)], fieldkeep):
+            out += _poly(r, color=black, f=feed)
+            if near < 0.12:  # the ghosts nearest the settled angle gain weight
+                out += _poly(offset_poly(r, 0.3), color=black, f=feed)
+
+    # the hero: the converged cut, a bold pink knife that dominates at 3m
+    for r in _clip_runs([boundary_seg(wf[0], wf[1], bf)], fieldkeep):
+        for d in (-0.7, -0.42, -0.14, 0.14, 0.42, 0.7):
+            out += _poly(offset_poly(r, d), color=pink, f=feed)
+
+    # the scarce accent — the culprit points that rotated the boundary most
+    def angdiff(a, b):
+        return math.atan2(math.sin(a - b), math.cos(a - b))
+
+    angs = [math.atan2(h[1], h[0]) for h in hist]
+    rot = [0.0] + [abs(angdiff(angs[i], angs[i - 1])) for i in range(1, len(hist))]
+    top = sorted(range(len(hist)), key=lambda i: -rot[i])[:3]
+    for i in top:
+        _, _, _, cx, cy = hist[i]
+        px, py = dx2px(cx[0]), dy2py(cx[1])
+        _, _, _, _, yv = hist[i]
+        out += fill_disc(px, py, 2.2, spacing=0.5, pen=(blue if yv > 0 else pink), f=feed)
+        out += circle(px, py, 3.0, pen=black, f=feed)
+    if top:
+        _, _, _, c0, _ = hist[top[0]]
+        out += plus_mark(dx2px(c0[0]), dy2py(c0[1]), s=1.2, pen=black, f=feed)
+
+    xT = x0 + 0.02 * W
+    out += type_block(["SETTLING"], xT, y1 - 6.0, height=3.2, pen=black, f=feed)
+    out += _stroke_text(_spaced("THE LINE THAT ERRORS BUILT"), xT, y1 - 20.0, 2.0, color=black, f=feed)
+    out += swatch_bar(xT, y1 - 26.0, [black, blue, pink], size=3.0, f=feed)
+    out += scale_footer(bounds, text=f"W += Y X   {len(hist)} UPDATES", pen=black, height=2.4, f=feed)
+    return out
+
+
+
+
+# ---------------------------------------------------------------------------
+# piece 12 — RELEVANCE TERRAIN (transformer Q·K score field as a sheared relief)
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_relevance_v1(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 4,
+    nu: int = 48,
+    nv: int = 48,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """ATTENTION AS TOPOGRAPHY — a transformer's attention as a vertical stack of
+    5 hidden-line terrain stages (from-scratch 3D pen-plotter engine): the CANVAS
+    GRID where Q (red, from the left) and K (blue, from above) meet; QKᵀ where
+    their landscapes MERGE into raw similarity cones (red = query side, blue = key
+    side); SOFTMAX as smooth probability contours; V the semantic terrain (green);
+    OUTPUT = V pulled upward by attention. Colour-coded blue/red/green/black; best
+    plotted with 4 pens. Droplines tie the query·key anchors through every stage."""
+    import numpy as np
+
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    blue, red, green, blk = 0, 1, 2, 3  # render with dodgerblue/crimson/forestgreen/black
+    out: List[GCodeCommand] = []
+
+    cx = x0 + 0.52 * W
+    SXX, SXZ = 0.30 * W, 0.16 * W
+    SYX, SYZ, SYY = 0.055 * H, -0.065 * H, 0.085 * H
+
+    def proj(wx, wy, wz, cyL):
+        return (cx + wx * SXX + wz * SXZ, cyL + wx * SYX + wz * SYZ - wy * SYY)
+
+    def dep(wx, wy, wz):
+        return -wz + 0.05 * wy
+
+    peaks = [(-0.52, 0.14, 1.0), (0.03, -0.22, 0.80), (0.52, 0.30, 0.92)]
+
+    def f_qkt(wx, wz):
+        z = 0.06 * (rng.fbm(wx * 7.0 + 3.1, wz * 7.0 + 6.7) - 0.5) * 2
+        for px, py, a in peaks:
+            z += 1.5 * a * math.exp(-((wx - px) ** 2 + (wz - py) ** 2) / (2 * 0.028))
+        return z
+
+    def f_smooth(wx, wz):
+        z = 0.0
+        for px, py, a in peaks:
+            z += a * math.exp(-((wx - px) ** 2 + (wz - py) ** 2) / (2 * 0.16))
+        return z
+
+    def f_v(wx, wz):
+        return 0.42 * (math.sin(2.2 * wx + 0.4) * math.cos(1.9 * wz) + 0.5 * math.sin(3.0 * wz + 1.1))
+
+    def f_out(wx, wz):
+        z = f_v(wx, wz)
+        for px, py, a in peaks:
+            z += 1.3 * a * math.exp(-((wx - px) ** 2 + (wz - py) ** 2) / (2 * 0.028))
+        return z
+
+    cy_top, cy_bot = y1 - 0.16 * H, y0 + 0.17 * H
+    step = (cy_top - cy_bot) / 4.0
+    cyL = [cy_top - k * step for k in range(5)]
+
+    # ---- z-buffered terrain (self hidden-line) with optional per-vertex colour
+    def render_terrain(cyc, hfun, hscale, pen=blk, penfn=None):
+        SX = np.zeros((nu + 1, nv + 1))
+        SY = np.zeros((nu + 1, nv + 1))
+        DE = np.zeros((nu + 1, nv + 1))
+        PV = np.full((nu + 1, nv + 1), pen)
+        for i in range(nu + 1):
+            wx = -1 + 2 * i / nu
+            for j in range(nv + 1):
+                wz = -1 + 2 * j / nv
+                wy = hfun(wx, wz) * hscale
+                p = proj(wx, wy, wz, cyc)
+                SX[i, j], SY[i, j], DE[i, j] = p[0], p[1], dep(wx, wy, wz)
+                if penfn is not None:
+                    PV[i, j] = penfn(wx, wz)
+        _zbuf_terrain(out, SX, SY, DE, feed=feed, PENV=PV)
+
+    def near_anchor(wx, wz, r=0.24):
+        for k, (px, py, _a) in enumerate(peaks):
+            if math.hypot(wx - px, wz - py) < r:
+                return k
+        return -1
+
+    # ---- 1. CANVAS GRID (flat) + Q (red, left) & K (blue, top) arrows ----
+    c0 = cyL[0]
+    gc = 16
+    for i in range(gc + 1):
+        wx = -1 + 2 * i / gc
+        out += _poly([proj(wx, 0, -1 + 2 * j / gc, c0) for j in range(gc + 1)], color=blk, f=feed)
+    for j in range(gc + 1):
+        wz = -1 + 2 * j / gc
+        out += _poly([proj(-1 + 2 * i / gc, 0, wz, c0) for i in range(gc + 1)], color=blk, f=feed)
+    uxm = math.hypot(SXX, SYX)
+    uxx, uxy = SXX / uxm, SYX / uxm
+    uym = math.hypot(SXZ, SYZ)
+    uyx, uyy = SXZ / uym, SYZ / uym
+
+    def arrow(e, dx, dy, pen, ln=20.0):
+        s = (e[0] - ln * dx, e[1] - ln * dy)
+        out.extend(_poly([s, e], color=pen, f=feed))
+        px, py = -dy, dx
+        out.extend(_poly([(e[0] - 4 * dx + 1.5 * px, e[1] - 4 * dy + 1.5 * py), e,
+                          (e[0] - 4 * dx - 1.5 * px, e[1] - 4 * dy - 1.5 * py)], color=pen, f=feed))
+
+    for t in range(5):
+        wz = -0.8 + 1.6 * t / 4
+        e = proj(-1, 0, wz, c0)
+        arrow((e[0] - 3 * uxx, e[1] - 3 * uxy), uxx, uxy, red)
+    for t in range(6):
+        wx = -0.8 + 1.6 * t / 5
+        e = proj(wx, 0, 1, c0)
+        arrow((e[0] + 3 * uyx, e[1] + 3 * uyy), -uyx, -uyy, blue)
+    out += _stroke_text(_spaced("Q QUERIES"), proj(-1, 0, -0.9, c0)[0] - 26, c0 + 0.10 * H, 1.7, color=red, f=feed)
+    out += _stroke_text(_spaced("K KEYS"), proj(0, 0, 1, c0)[0] + 4, c0 + 0.14 * H, 1.7, color=blue, f=feed)
+
+    # ---- 2. QKT — Q(red) & K(blue) landscapes MERGE into similarity cones --
+    def qk_pen(wx, wz):
+        k = near_anchor(wx, wz, 0.26)
+        if k < 0:
+            return blk
+        return red if k % 2 == 0 else blue  # query-side red, key-side blue
+
+    render_terrain(cyL[1], f_qkt, 0.9, pen=blk, penfn=qk_pen)
+
+    # ---- 3. SOFTMAX probability contours ---------------------------------
+    c2 = cyL[2]
+    gN = 90
+    xs = [-1 + 2 * i / gN for i in range(gN + 1)]
+    ys = [-1 + 2 * j / gN for j in range(gN + 1)]
+    F = [[f_smooth(xs[i], ys[j]) for i in range(gN + 1)] for j in range(gN + 1)]
+    fmax = max(max(r) for r in F)
+    for lv in range(1, 11):
+        iso = fmax * lv / 11.0
+        for ch in _chain_segments(_marching_squares(F, xs, ys, iso)):
+            if len(ch) < 4:
+                continue
+            out += _poly([proj(wx, iso * 0.6, wz, c2) for (wx, wz) in ch], color=blk, f=feed)
+
+    # ---- 4. V — the semantic terrain (green) -----------------------------
+    render_terrain(cyL[3], f_v, 0.9, pen=green)
+
+    # ---- 5. OUTPUT — V pulled up by attention (peaks tinted) -------------
+    def o_pen(wx, wz):
+        return green if near_anchor(wx, wz, 0.20) >= 0 else blk
+
+    render_terrain(cyL[4], f_out, 0.62, pen=blk, penfn=o_pen)
+
+    # ---- droplines tying the 3 anchors through every stage --------------
+    for px, py, _a in peaks:
+        sx = cx + px * SXX + py * SXZ
+        yt = proj(px, 0, py, cyL[0])[1]
+        yb = proj(px, f_out(px, py) * 0.62, py, cyL[4])[1]
+        yv, ye = min(yt, yb), max(yt, yb)
+        k = 0
+        while yv < ye:
+            if k % 2 == 0:
+                out += _poly([(sx, yv), (sx, min(ye, yv + 3.0))], color=blk, f=feed)
+            yv += 5.0
+            k += 1
+
+    # ---- numbered stages (left) + stage labels (right) ------------------
+    xL = x0 + 0.015 * W
+    stages = [
+        ("1", "THE CANVAS GRID", "Q AND K MEET", blk),
+        ("2", "THE INTERSECTION", "S = QK T", red),
+        ("3", "SOFTMAX", "A = SOFTMAX S", blk),
+        ("4", "VALUES V", "SEMANTIC TERRAIN", green),
+        ("5", "OUTPUT", "O = A V", blk),
+    ]
+    for k, (num, title, rlab, rc) in enumerate(stages):
+        out += _stroke_text(num, xL, cyL[k] + 4, 3.0, color=blk, f=feed)
+        out += _stroke_text(_spaced(title), xL + 6, cyL[k] + 4, 1.9, color=blk, f=feed)
+        out += _stroke_text(_spaced(rlab), x1 - 0.16 * W, cyL[k], 1.7, color=rc, f=feed)
+
+    out += type_block(["ATTENTION AS"], xL, y1 - 5.0, height=3.4, pen=blk, underline=False, f=feed)
+    out += _stroke_text(_spaced("TOPOGRAPHY"), xL, y1 - 12.0, 3.0, color=blk, f=feed)
+    out += _stroke_text(_spaced("QUERIES SHAPE CONTENT THROUGH CONTEXT"), xL, y1 - 18.0, 1.7, color=blk, f=feed)
+    return out
+
+
+
+
+# ---------------------------------------------------------------------------
+# piece 13 — MEMORY IN TIME (LSTM as a vertical figure-8 of information loops)
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_memory_v1(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    loops: int = 40,
+    half: int = 130,
+    precess: float = 0.5,
+    grow: float = 1.0,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """MEMORY IN TIME — an LSTM as a figure-8 of PRECESSING loops. The recurrence
+    loops back every step (REMEMBER c_t above, FORGET c_{t-1} below, meeting at the
+    hollow carried-state waist), but each iteration lands slightly ROTATED by the
+    transformation it underwent — a helix / logarithmic spiral of nested loops,
+    not one static 8. Gate leaders mark the input/forget/output gates. Black + red."""
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    accent, black = _pen(PINK, colors), _pen(BLACK, colors)  # PINK slot rendered crimson
+    out: List[GCodeCommand] = []
+
+    cx, cyw = x0 + 0.48 * W, y0 + 0.50 * H
+    ru, rl, wx = 0.135 * H, 0.175 * H, 1.55  # top REMEMBER lobe, bigger FORGET lobe
+
+    def rot(px, py, ph):
+        c, s = math.cos(ph), math.sin(ph)
+        return (px * c - py * s, px * s + py * c)
+
+    # faint background orbits (the iterations echoing) + a light starfield
+    for e in range(3):
+        ea, eb = (0.34 + 0.05 * e) * W, (0.40 + 0.05 * e) * H
+        erot = rng.uniform(-0.3, 0.3)
+        seg = []
+        for k in range(241):
+            a = 2 * math.pi * k / 240
+            ox, oy = rot(ea * 0.5 * math.cos(a), eb * 0.5 * math.sin(a), erot)
+            if k % 6 < 3:
+                seg.append((cx + ox, cyw + oy))
+            elif len(seg) >= 2:
+                out += _poly(seg, color=black, f=feed)
+                seg = []
+            else:
+                seg = []
+        if len(seg) >= 2:
+            out += _poly(seg, color=black, f=feed)
+    for _ in range(26):
+        sxp, syp = rng.uniform(x0 + 4, x1 - 4), rng.uniform(y0 + 4, y1 - 4)
+        out += _dot(sxp, syp, rng.uniform(0.3, 0.9), color=black, f=feed)
+
+    # the precessing figure-8 family — each loop a rounded double-circle, rotated
+    for i in range(loops):
+        t = i / (loops - 1)
+        sc = (0.26 + 0.74 * t) * (grow ** i)
+        ph = precess * t  # monotonic precession: the swept helix of iterations
+        jr = 1.0 + 0.04 * rng.gauss(0, 1)  # subtle per-iteration transformation
+        pts = []
+        for k in range(half + 1):  # upper lobe — REMEMBER
+            a = 2 * math.pi * k / half
+            ox, oy = rot(wx * ru * sc * jr * math.sin(a), ru * sc * (1 - math.cos(a)), ph)
+            pts.append((cx + ox, cyw + oy))
+        for k in range(half + 1):  # lower lobe — FORGET (bigger)
+            a = 2 * math.pi * k / half
+            ox, oy = rot(wx * rl * sc * jr * math.sin(a), -rl * sc * (1 - math.cos(a)), ph)
+            pts.append((cx + ox, cyw + oy))
+        pen = accent if (i % 3 == 0 or i >= loops - 2) else black
+        out += _poly(pts, color=pen, f=feed)
+
+    # the central line carries THREE points the helix connects: INPUT → LATENT → OUTPUT
+    top_node, bot_node = cyw + 1.98 * ru, cyw - 1.98 * rl
+    aT, aB = top_node + 11, bot_node - 11
+    out += _poly([(cx, aB), (cx, aT)], color=black, f=feed)
+    out += _poly([(cx - 1.6, aT - 4), (cx, aT), (cx + 1.6, aT - 4)], color=black, f=feed)
+    out += _poly([(cx - 1.6, aB + 4), (cx, aB), (cx + 1.6, aB + 4)], color=black, f=feed)
+    out += fill_disc(cx, top_node, 1.9, spacing=0.5, pen=black, f=feed)  # OUTPUT point
+    out += fill_disc(cx, bot_node, 1.9, spacing=0.5, pen=black, f=feed)  # INPUT point
+    out += circle(cx, cyw, 2.6, pen=accent, f=feed)  # LATENT — the carried state
+    out += _stroke_text(_spaced("OUTPUT"), cx + 6, aT - 1.2, 2.3, color=black, f=feed)
+    out += _stroke_text(_spaced("INPUT"), cx + 6, aB - 1.2, 2.3, color=black, f=feed)
+    out += _stroke_text(_spaced("LATENT"), cx + 6, cyw - 1.2, 2.2, color=accent, f=feed)
+
+    # lobe descriptions
+    out += _stroke_text(_spaced("REMEMBER"), cx - 13, cyw + ru * 0.95, 2.2, color=black, f=feed)
+    out += _stroke_text(_spaced("C T"), cx - 4, cyw + ru * 0.95 - 5.2, 1.9, color=black, f=feed)
+    out += _stroke_text(_spaced("FORGET"), cx - 11, cyw - rl * 0.98, 2.2, color=black, f=feed)
+    out += _stroke_text(_spaced("C T-1"), cx - 6, cyw - rl * 0.98 - 5.2, 1.9, color=black, f=feed)
+
+    # gate leaders (dot on an outer loop → dashed leader → label)
+    def leader(px, py, lx, ly, l1, l2):
+        out.extend(_dot(px, py, 1.4, color=black, f=feed))
+        n = 7
+        for s in range(0, n, 2):
+            a = (px + (lx - px) * s / n, py + (ly - py) * s / n)
+            b = (px + (lx - px) * (s + 1) / n, py + (ly - py) * (s + 1) / n)
+            out.extend(_poly([a, b], color=black, f=feed))
+        out.extend(_stroke_text(_spaced(l1), lx - 0.14 * W, ly + 2.2, 2.0, color=black, f=feed))
+        out.extend(_stroke_text(_spaced(l2), lx - 0.14 * W, ly - 2.4, 1.8, color=black, f=feed))
+
+    og = rot(-wx * ru, ru, precess * 0.5)
+    ig = rot(wx * ru, ru * 0.4, precess * 0.5)
+    fg = rot(-wx * rl, -rl, precess * 0.5)
+    leader(cx + og[0], cyw + og[1], x0 + 0.14 * W, cyw + 0.22 * H, "OUTPUT GATE", "O T")
+    leader(cx + ig[0], cyw + ig[1], x1 - 0.05 * W, cyw + 0.02 * H, "INPUT GATE", "I T")
+    leader(cx + fg[0], cyw + fg[1], x0 + 0.13 * W, cyw - 0.18 * H, "FORGET GATE", "F T")
+
+    # small series label
+    out += _stroke_text(_spaced("LSTM   MEMORY IN TIME"), x0 + 0.03 * W, y0 + 8.0, 2.0, color=black, f=feed)
+    return out
+
+
+
+
+# ---------------------------------------------------------------------------
+# piece 14 — LOCALITY IN SPACE (CNN as stacked wireframe feature-map terrains)
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_locality_v1(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    layers: int = 4,
+    nx: int = 38,
+    ny: int = 38,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """LOCALITY IN SPACE — a CNN as a stack of feature-map TERRAINS, rendered by
+    the shared 3D pen-plotter engine (z-buffer hidden-line, so each surface reads
+    solid). The layers VARY with depth: a nearly-flat fine PIXEL grid, small-bump
+    LOW-level, rounded-hill MID-level, up to a few big smooth HIGH-level peaks
+    (the tallest in red). A red receptive-field window is tracked up the stack."""
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    accent, black = _pen(PINK, colors), _pen(BLACK, colors)  # PINK slot → crimson
+    out: List[GCodeCommand] = []
+
+    LW, DX, DY = 0.52 * W, 0.27 * W, 0.075 * H
+    base_x = x0 + 0.11 * W
+    base_y0 = y0 + 0.15 * H
+    gap = 0.185 * H
+    freqs = [9.0, 6.0, 3.6, 2.2, 1.8]
+    amps = [0.004, 0.030, 0.078, 0.150, 0.170]
+
+    def layer_z(i):
+        fr = freqs[min(i, len(freqs) - 1)]
+        Z = [[rng.fbm(iu / nx * fr + i * 11.3, jv / ny * fr + i * 5.7) for jv in range(ny + 1)] for iu in range(nx + 1)]
+        lo = min(min(r) for r in Z)
+        hi = max(max(r) for r in Z)
+        rr = (hi - lo) or 1.0
+        return [[(Z[iu][jv] - lo) / rr for jv in range(ny + 1)] for iu in range(nx + 1)]
+
+    def proj(i, u, v, z):
+        zh = amps[min(i, len(amps) - 1)] * H
+        return (base_x + u * LW + v * DX, base_y0 + i * gap + v * DY + z * zh)
+
+    import numpy as np
+
+    centers = []
+    for i in range(layers):
+        Z = layer_z(i)
+        top = i == layers - 1
+        pun = pvn = 0.5
+        if top:  # tallest peak → red
+            bi = bj = 0
+            bz = -1e9
+            for iu in range(nx + 1):
+                for jv in range(ny + 1):
+                    if Z[iu][jv] > bz:
+                        bz, bi, bj = Z[iu][jv], iu, jv
+            pun, pvn = bi / nx, bj / ny
+        SX = np.zeros((nx + 1, ny + 1))
+        SY = np.zeros((nx + 1, ny + 1))
+        DEP = np.zeros((nx + 1, ny + 1))
+        PENV = np.full((nx + 1, ny + 1), black if black is not None else 0)
+        for iu in range(nx + 1):
+            u = iu / nx
+            for jv in range(ny + 1):
+                v = jv / ny
+                z = Z[iu][jv]
+                p = proj(i, u, v, z)
+                SX[iu, jv], SY[iu, jv] = p[0], p[1]
+                DEP[iu, jv] = -v + 0.2 * z
+                if top and math.hypot(u - pun, v - pvn) < 0.20:
+                    PENV[iu, jv] = accent if accent is not None else 0
+        _zbuf_terrain(out, SX, SY, DEP, feed=feed, PENV=PENV, PXW=220, PXH=170)
+
+        # receptive-field window (red), larger toward the input (bottom)
+        uc, vc = 0.52, 0.46
+        hw = 0.13 - i * 0.02
+        zc = Z[int(uc * nx)][int(vc * ny)]
+        sq = [
+            proj(i, uc - hw, vc - hw, zc),
+            proj(i, uc + hw, vc - hw, zc),
+            proj(i, uc + hw, vc + hw, zc),
+            proj(i, uc - hw, vc + hw, zc),
+            proj(i, uc - hw, vc - hw, zc),
+        ]
+        out += _poly(sq, color=accent, f=feed)
+        centers.append(proj(i, uc, vc, zc))
+
+    # right-edge layer labels
+    lbls = ["PIXELS", "LOW-LEVEL", "MID-LEVEL", "HIGH-LEVEL"]
+    for i in range(layers):
+        p = proj(i, 1.0, 0.5, 0.5)
+        out += _stroke_text(_spaced(lbls[min(i, 3)]), p[0] + 5, p[1], 1.6, color=black, f=feed)
+
+    # dashed red connectors up the receptive-field column
+    for i in range(layers - 1):
+        a, b = centers[i], centers[i + 1]
+        n = 9
+        for s in range(0, n, 2):
+            p0 = (a[0] + (b[0] - a[0]) * s / n, a[1] + (b[1] - a[1]) * s / n)
+            p1 = (a[0] + (b[0] - a[0]) * (s + 1) / n, a[1] + (b[1] - a[1]) * (s + 1) / n)
+            out += _poly([p0, p1], color=accent, f=feed)
+
+    # left depth arrow: PIXELS (bottom) ↔ HIGH-ORDER FEATURES (top)
+    ax = x0 + 0.05 * W
+    ay0, ay1 = base_y0, base_y0 + (layers - 1) * gap + 0.10 * H
+    out += _poly([(ax, ay0), (ax, ay1)], color=black, f=feed)
+    out += _poly([(ax - 1.4, ay1 - 3), (ax, ay1), (ax + 1.4, ay1 - 3)], color=black, f=feed)
+    out += _poly([(ax - 1.4, ay0 + 3), (ax, ay0), (ax + 1.4, ay0 + 3)], color=black, f=feed)
+    out += _stroke_text(_spaced("PIXELS"), ax - 2, ay0 - 5, 1.9, color=black, f=feed)
+    out += _stroke_text(_spaced("HIGH-ORDER"), ax - 2, ay1 + 6.5, 1.9, color=black, f=feed)
+    out += _stroke_text(_spaced("FEATURES"), ax - 2, ay1 + 2.0, 1.9, color=black, f=feed)
+
+    # title + caption
+    xT = x0 + 0.03 * W
+    out += type_block(["CNN"], xT, y1 - 6.0, height=4.2, pen=black, underline=False, f=feed)
+    out += _stroke_text(_spaced("LOCALITY IN SPACE"), xT, y1 - 16.0, 2.4, color=black, f=feed)
+    cxp = x0 + 0.58 * W
+    out += _stroke_text(_spaced("SMALL WINDOWS"), cxp, y0 + 20.0, 1.9, color=black, f=feed)
+    out += _stroke_text(_spaced("DEEPER PATTERNS"), cxp, y0 + 15.0, 1.9, color=black, f=feed)
+    out += _stroke_text(_spaced("A LARGER PICTURE"), cxp, y0 + 10.0, 1.9, color=black, f=feed)
+
+    # bottom mini-diagram: receptive field shrinking grid → window → cell
+    mgx, mgy, celln, cs = x0 + 0.10 * W, y0 + 10.0, 6, 2.2
+    stages = [(celln, 3), (celln, 2), (celln, 1)]
+    sx = mgx
+    for si, (gn, winr) in enumerate(stages):
+        for r in range(gn + 1):
+            out += _poly([(sx, mgy + r * cs), (sx + gn * cs, mgy + r * cs)], color=black, f=feed)
+        for c in range(gn + 1):
+            out += _poly([(sx + c * cs, mgy), (sx + c * cs, mgy + gn * cs)], color=black, f=feed)
+        cc = gn / 2.0
+        out += _poly(
+            [
+                (sx + (cc - winr) * cs, mgy + (cc - winr) * cs),
+                (sx + (cc + winr) * cs, mgy + (cc - winr) * cs),
+                (sx + (cc + winr) * cs, mgy + (cc + winr) * cs),
+                (sx + (cc - winr) * cs, mgy + (cc + winr) * cs),
+                (sx + (cc - winr) * cs, mgy + (cc - winr) * cs),
+            ],
+            color=accent,
+            f=feed,
+        )
+        nxt = sx + gn * cs + 5
+        if si < len(stages) - 1:
+            out += _poly([(sx + gn * cs + 1, mgy + gn * cs / 2), (nxt - 1, mgy + gn * cs / 2)], color=black, f=feed)
+        sx = nxt + 4
+    return out
+
+
+
+
+# ---------------------------------------------------------------------------
+# piece 15 — NONLINEAR TRANSFORMATION (MLP as a warped hourglass manifold)
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_manifold(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    nu: int = 34,
+    nv: int = 84,
+    petals: int = 3,
+    fold: float = 1.05,
+    twist: float = 1.2,
+    nstream: int = 52,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """NONLINEAR TRANSFORMATION — an MLP rendered by a from-scratch 3D pen-plotter
+    engine. A parametric petal-saddle (the nonlinear activation FOLDING space so
+    far-apart points meet) is projected isometrically and hidden-line removed via
+    a z-buffer, so near folds occlude far ones and it reads as a solid form.
+    Streamlines funnel from the INPUT plane through the fold to the OUTPUT plane.
+    All output is lines. Black surface, red fold-ridges + flow accents."""
+    import numpy as np
+
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    accent, black = _pen(PINK, colors), _pen(BLACK, colors)  # PINK slot → crimson
+    out: List[GCodeCommand] = []
+
+    # ---- 3D world → isometric screen -------------------------------------
+    cx0, cy0 = x0 + 0.50 * W, y0 + 0.50 * H
+    a, cd, bwy = 0.29 * W, 0.070 * H, 0.195 * H  # lower camera: taller wy, shallower iso
+    Hy = 1.30  # plane height (INPUT +Hy top, OUTPUT −Hy bottom)
+
+    def proj(wx, wy, wz):
+        return (cx0 + (wx - wz) * a, cy0 + wy * bwy - (wx + wz) * cd)
+
+    def depth(wx, wy, wz):
+        return (wx + wz) + 0.12 * wy  # larger = nearer (front)
+
+    def surf(r, th):
+        return fold * ((r ** 1.1) * math.cos(petals * th) + 0.20 * (r ** 2) * math.cos(2 * petals * th))
+
+    # ---- surface vertex grid --------------------------------------------
+    SX = np.zeros((nu + 1, nv + 1))
+    SY = np.zeros((nu + 1, nv + 1))
+    DEP = np.zeros((nu + 1, nv + 1))
+    for i in range(nu + 1):
+        r = i / nu
+        for j in range(nv + 1):
+            th = 2 * math.pi * j / nv
+            wx, wz = r * math.cos(th), r * math.sin(th)
+            wy = surf(r, th)
+            sx, sy = proj(wx, wy, wz)
+            SX[i, j], SY[i, j], DEP[i, j] = sx, sy, depth(wx, wy, wz)
+
+    # ---- z-buffer (hidden-line): rasterize the surface quads -------------
+    PXW, PXH = 240, 320
+    pad = 4.0
+    sxmin, sxmax = float(SX.min()) - pad, float(SX.max()) + pad
+    symin, symax = float(SY.min()) - pad, float(SY.max()) + pad
+    zbuf = np.full((PXH, PXW), -1e18)
+    PX = (SX - sxmin) / (sxmax - sxmin) * (PXW - 1)
+    PY = (SY - symin) / (symax - symin) * (PXH - 1)
+    dspan = float(DEP.max() - DEP.min()) or 1.0
+    bias = 0.02 * dspan
+
+    def fill_tri(p0, p1, p2, d0, d1, d2):
+        minx = int(max(0, math.floor(min(p0[0], p1[0], p2[0]))))
+        maxx = int(min(PXW - 1, math.ceil(max(p0[0], p1[0], p2[0]))))
+        miny = int(max(0, math.floor(min(p0[1], p1[1], p2[1]))))
+        maxy = int(min(PXH - 1, math.ceil(max(p0[1], p1[1], p2[1]))))
+        if maxx < minx or maxy < miny:
+            return
+        den = (p1[1] - p2[1]) * (p0[0] - p2[0]) + (p2[0] - p1[0]) * (p0[1] - p2[1])
+        if abs(den) < 1e-9:
+            return
+        X, Y = np.meshgrid(np.arange(minx, maxx + 1), np.arange(miny, maxy + 1))
+        aa = ((p1[1] - p2[1]) * (X - p2[0]) + (p2[0] - p1[0]) * (Y - p2[1])) / den
+        bb = ((p2[1] - p0[1]) * (X - p2[0]) + (p0[0] - p2[0]) * (Y - p2[1])) / den
+        cc = 1 - aa - bb
+        inside = (aa >= -1e-4) & (bb >= -1e-4) & (cc >= -1e-4)
+        d = aa * d0 + bb * d1 + cc * d2
+        sub = zbuf[miny : maxy + 1, minx : maxx + 1]
+        m = inside & (d > sub)
+        sub[m] = d[m]
+
+    for i in range(nu):
+        for j in range(nv):
+            p00 = (PX[i, j], PY[i, j])
+            p10 = (PX[i + 1, j], PY[i + 1, j])
+            p11 = (PX[i + 1, j + 1], PY[i + 1, j + 1])
+            p01 = (PX[i, j + 1], PY[i, j + 1])
+            fill_tri(p00, p10, p11, DEP[i, j], DEP[i + 1, j], DEP[i + 1, j + 1])
+            fill_tri(p00, p11, p01, DEP[i, j], DEP[i + 1, j + 1], DEP[i, j + 1])
+
+    def visible(sx, sy, dep):
+        px = int((sx - sxmin) / (sxmax - sxmin) * (PXW - 1))
+        py = int((sy - symin) / (symax - symin) * (PXH - 1))
+        if px < 0 or px >= PXW or py < 0 or py >= PXH:
+            return True  # off-surface → nothing to occlude
+        return dep >= zbuf[py, px] - bias
+
+    def emit_visible(samples):
+        # samples: list of (sx, sy, dep, pen); draw only visible runs
+        run, runpen = [], None
+        for sx, sy, dep, pen in samples:
+            if visible(sx, sy, dep):
+                if runpen is None or pen == runpen:
+                    run.append((sx, sy))
+                    runpen = pen
+                else:
+                    if len(run) >= 2:
+                        out.extend(_poly(run, color=runpen, f=feed))
+                    run, runpen = [(sx, sy)], pen
+            else:
+                if len(run) >= 2:
+                    out.extend(_poly(run, color=runpen, f=feed))
+                run, runpen = [], None
+        if len(run) >= 2:
+            out.extend(_poly(run, color=runpen, f=feed))
+
+    # ---- draw the visible surface mesh (the fold, hidden-line removed) ----
+    ridge = {0, nv // (2 * petals)}  # crease columns → red fold-ridges
+    for j in range(nv + 1):  # radial lines
+        red = (j % (nv // petals)) < 1 or ((j - nv // (2 * petals)) % (nv // petals)) < 1
+        emit_visible([(SX[i, j], SY[i, j], DEP[i, j], accent if red else black) for i in range(nu + 1)])
+    for i in range(2, nu + 1):  # rings (skip the tiny center rings)
+        emit_visible([(SX[i, j], SY[i, j], DEP[i, j], black) for j in range(nv + 1)])
+
+    # ---- streamlines: INPUT plane → through the fold → OUTPUT plane -------
+    for s_i in range(nstream):
+        th0 = 2 * math.pi * s_i / nstream
+        r0 = 0.6 + 0.4 * rng.random()
+        samples = []
+        pen = accent if s_i % 4 == 0 else black
+        STEPS = 74
+        for k in range(STEPS + 1):
+            s = k / STEPS
+            wy_lin = Hy - 2 * Hy * s
+            rr = r0 * (0.42 + 0.58 * abs(2 * s - 1))  # funnel to a ring, not a point
+            th = th0 + twist * s
+            blend = math.exp(-((s - 0.5) / 0.22) ** 2)
+            wy = wy_lin * (1 - blend) + surf(min(1.0, rr), th) * blend
+            wx, wz = rr * math.cos(th), rr * math.sin(th)
+            sx, sy = proj(wx, wy, wz)
+            samples.append((sx, sy, depth(wx, wy, wz), pen))
+        emit_visible(samples)
+
+    # ---- INPUT / OUTPUT planes: dot lattice + frame + droplines ----------
+    def plane(wy, label, above):
+        g = 11
+        for ia in range(g):
+            for ib in range(g):
+                gu, gv = -1.15 + 2.3 * ia / (g - 1), -1.15 + 2.3 * ib / (g - 1)
+                sx, sy = proj(gu, wy, gv)
+                out.extend(_dot(sx, sy, 0.45, color=black, f=feed))
+        corners = [(-1.15, -1.15), (1.15, -1.15), (1.15, 1.15), (-1.15, 1.15), (-1.15, -1.15)]
+        out.extend(_poly([proj(gu, wy, gv) for gu, gv in corners], color=black, f=feed))
+        c = proj(0, wy, 0)
+        ly = c[1] + (14 if above else -8)
+        out.extend(_stroke_text(_spaced(label), c[0] - 0.10 * W, ly, 2.3, color=black, f=feed))
+
+    plane(Hy, "INPUT SPACE", True)
+    plane(-Hy, "OUTPUT SPACE", False)
+    for dl in range(10):  # a few vertical droplines through the ambient volume
+        gu = -1.0 + 2.0 * rng.random()
+        gv = -1.0 + 2.0 * rng.random()
+        seg = []
+        for k in range(0, 21, 2):
+            wy = Hy - 2 * Hy * k / 20
+            p = proj(gu, wy, gv)
+            seg.append(p)
+        for k in range(0, len(seg) - 1, 2):
+            out += _poly([seg[k], seg[k + 1]], color=black, f=feed)
+
+    # ---- furniture -------------------------------------------------------
+    xT = x0 + 0.02 * W
+    out += type_block(["MLP"], xT, y1 - 6.0, height=3.6, pen=black, underline=False, f=feed)
+    out += _stroke_text(_spaced("NONLINEAR TRANSFORMATION"), xT, y1 - 15.0, 2.0, color=black, f=feed)
+    rx = x1 - 0.20 * W
+    out += _stroke_text(_spaced("LINEAR TRANSFORM"), rx, cy0 + 0.30 * H, 1.7, color=black, f=feed)
+    out += _stroke_text(_spaced("NONLINEAR"), rx, cy0 + 0.02 * H, 1.7, color=accent, f=feed)
+    out += _stroke_text(_spaced("ACTIVATION"), rx, cy0 - 0.03 * H, 1.7, color=accent, f=feed)
+    out += _stroke_text(_spaced("LINEAR TRANSFORM"), rx, cy0 - 0.30 * H, 1.7, color=black, f=feed)
+    return out
+
+
+
+
+# ---------------------------------------------------------------------------
+# LSTM — MEMORY IN TIME (descending cell-state helix; studio rework)
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_memory(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    turns: int = 13,
+    k_spiral: float = 1.15,
+    lobe: float = 0.58,
+    gate_strengths: Tuple[float, float, float] = (0.90, 0.55, 0.85),
+    jitter: float = 0.05,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """MEMORY IN TIME — an LSTM as a DESCENDING CELL-STATE HELIX: a 3D spiral
+    staircase of recurrence (one turn = one time step) rendered with hidden-line
+    occlusion, so near turns hide far turns and time reads as real depth. Each
+    turn lands somewhere new (log-spiral radius + seeded per-turn transform),
+    and three GATES warp the coil sideways as flow attractors (FORGET pinches,
+    INPUT/OUTPUT bulge) — gates warp, they do not annotate. Black = carried cell
+    state; crimson = the gates + the one traced 'now' step."""
+    import numpy as np
+
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    accent, black = _pen(PINK, colors), _pen(BLACK, colors)
+    out: List[GCodeCommand] = []
+
+    cx0, cy0 = x0 + 0.42 * W, y0 + 0.50 * H
+    a, bwy, cd = 0.26 * W, 0.235 * H, 0.055 * H
+
+    def proj(wx, wy, wz):
+        return (cx0 + (wx - wz) * a, cy0 + wy * bwy - (wx + wz) * cd)
+
+    def depth(wx, wy, wz):
+        return (wx + wz) + 0.12 * wy
+
+    N = turns
+    Hy = 1.35
+    R0, R_MIN, A_MAX = 0.95, 0.16, 0.42
+    gy = (0.85 * Hy, 0.0, -0.85 * Hy)  # FORGET(low/near-input), INPUT(waist), OUTPUT(high)
+    gsig = (0.30, 0.18, 0.30)
+    gsign = (-1.0, 1.0, 1.0)  # forget contracts, input/output bulge
+
+    def gate_warp(wy):
+        return sum(
+            gsign[g] * gate_strengths[g] * A_MAX * math.exp(-((wy - gy[g]) / gsig[g]) ** 2)
+            for g in range(3)
+        )
+
+    # per-turn seeded transformation (different path each iteration)
+    tj = [1.0 + jitter * rng.gauss(0, 1) for _ in range(N + 1)]
+
+    def coil_pt(t):
+        phi = 2 * math.pi * N * t
+        wy = Hy - 2 * Hy * t
+        R = max(R0 * math.exp(-k_spiral * t), R_MIN)
+        jr = tj[min(N, int(t * N))]
+        rad = R * (1 - lobe * math.cos(phi)) * jr
+        wx = rad * math.cos(phi) + gate_warp(wy)
+        wz = rad * math.sin(phi)
+        return wx, wy, wz
+
+    M = N * 170
+    world = [coil_pt(i / M) for i in range(M + 1)]
+    scr = [proj(*p) for p in world]
+    dps = [depth(*p) for p in world]
+
+    # inline z-buffer: sweep a thin ribbon (+/-0.5mm screen normal) to occlude
+    PXW, PXH = 240, 360
+    sxs = [s[0] for s in scr]
+    sys = [s[1] for s in scr]
+    sxmin, sxmax = min(sxs) - 3, max(sxs) + 3
+    symin, symax = min(sys) - 3, max(sys) + 3
+    zb = np.full((PXH, PXW), -1e18)
+
+    def topx(sx, sy):
+        return ((sx - sxmin) / (sxmax - sxmin) * (PXW - 1), (sy - symin) / (symax - symin) * (PXH - 1))
+
+    def rails(i):
+        j0, j1 = max(0, i - 1), min(M, i + 1)
+        tx, ty = scr[j1][0] - scr[j0][0], scr[j1][1] - scr[j0][1]
+        L = math.hypot(tx, ty) or 1.0
+        nx, ny = -ty / L * 0.5, tx / L * 0.5
+        return (scr[i][0] + nx, scr[i][1] + ny), (scr[i][0] - nx, scr[i][1] - ny)
+
+    def fill_tri(p0, p1, p2, d):
+        pp = [topx(*p0), topx(*p1), topx(*p2)]
+        minx = int(max(0, math.floor(min(q[0] for q in pp))))
+        maxx = int(min(PXW - 1, math.ceil(max(q[0] for q in pp))))
+        miny = int(max(0, math.floor(min(q[1] for q in pp))))
+        maxy = int(min(PXH - 1, math.ceil(max(q[1] for q in pp))))
+        if maxx < minx or maxy < miny:
+            return
+        (x0p, y0p), (x1p, y1p), (x2p, y2p) = pp
+        den = (y1p - y2p) * (x0p - x2p) + (x2p - x1p) * (y0p - y2p)
+        if abs(den) < 1e-9:
+            return
+        X, Y = np.meshgrid(np.arange(minx, maxx + 1), np.arange(miny, maxy + 1))
+        aa = ((y1p - y2p) * (X - x2p) + (x2p - x1p) * (Y - y2p)) / den
+        bb = ((y2p - y0p) * (X - x2p) + (x0p - x2p) * (Y - y2p)) / den
+        cc = 1 - aa - bb
+        ins = (aa >= -1e-3) & (bb >= -1e-3) & (cc >= -1e-3)
+        sub = zb[miny : maxy + 1, minx : maxx + 1]
+        m = ins & (d > sub)
+        sub[m] = d
+
+    ra = [rails(i) for i in range(M + 1)]
+    for i in range(M):
+        (a0, b0), (a1, b1) = ra[i], ra[i + 1]
+        d = max(dps[i], dps[i + 1])
+        fill_tri(a0, b0, b1, d)
+        fill_tri(a0, b1, a1, d)
+
+    dmax = max(dps)
+    dmin = min(dps)
+    dmid = 0.5 * (dmax + dmin)
+    bias = 0.02 * (dmax - dmin or 1.0)
+
+    def vis(i):
+        px, py = topx(*scr[i])
+        ix, iy = int(px), int(py)
+        if ix < 0 or ix >= PXW or iy < 0 or iy >= PXH:
+            return True
+        return dps[i] >= zb[iy, ix] - bias
+
+    # emit visible coil runs (near turns double-pass for weight)
+    run = []
+    for i in range(M + 1):
+        if vis(i):
+            run.append((scr[i], dps[i]))
+        elif len(run) >= 2:
+            pts = [p for p, _ in run]
+            out += _poly(pts, color=black, f=feed)
+            if run[len(run) // 2][1] > dmid:
+                out += _poly(pts, color=black, f=feed)
+            run = []
+        else:
+            run = []
+    if len(run) >= 2:
+        pts = [p for p, _ in run]
+        out += _poly(pts, color=black, f=feed)
+
+    # faint background: orbit-ghosts + starfield (top-right void)
+    for e in range(2):
+        ea, eb = (0.30 + 0.06 * e) * W, (0.34 + 0.05 * e) * H
+        seg = []
+        for kk in range(181):
+            ang = 2 * math.pi * kk / 180
+            pt = (cx0 + ea * 0.5 * math.cos(ang), cy0 + eb * 0.5 * math.sin(ang))
+            if kk % 7 < 3:
+                seg.append(pt)
+            elif len(seg) >= 2:
+                out += _poly(seg, color=black, f=feed)
+                seg = []
+            else:
+                seg = []
+    for _ in range(14):
+        out += _dot(rng.uniform(x0 + 0.55 * W, x1 - 4), rng.uniform(y0 + 0.55 * H, y1 - 4), rng.uniform(0.3, 0.8), color=black, f=feed)
+
+    # carried-state axis: full-height, UN-TAPERED (tightening = foreshortening, not decay)
+    at, ab = proj(0, -Hy, 0), proj(0, Hy, 0)
+    out += _poly([ab, at], color=black, f=feed)
+    out += _poly([(at[0] - 1.6, at[1] + 4), at, (at[0] + 1.6, at[1] + 4)], color=black, f=feed)
+
+    # gates: red warp glyphs (dot + equipotential arcs + a streamline merging into the coil)
+    for g in range(3):
+        gp = proj(0.0, gy[g], 0.0)
+        # nearest coil point at this height → the deflected turn
+        best_i = min(range(M + 1), key=lambda i: abs(world[i][1] - gy[g]) + 0.001 * abs(world[i][2]))
+        cp = scr[best_i]
+        strength = gate_strengths[g]
+        gx = gp[0] + (18 if gsign[g] > 0 else -18)
+        out += _dot(gx, gp[1], 1.4 + strength, color=accent, f=feed)
+        for r in range(2 + int(strength * 2)):
+            rr = 3.0 + r * 2.2
+            arc = [(gx + rr * math.cos(math.radians(th)), gp[1] + rr * math.sin(math.radians(th))) for th in range(-70, 71, 12)]
+            out += _poly(arc, color=accent, f=feed)
+        out += _poly([(gx, gp[1]), (0.5 * (gx + cp[0]), 0.5 * (gp[1] + cp[1])), cp], color=accent, f=feed)
+
+    # the 'now' turn — one outermost early turn traced in red, offset outward
+    t_now = 0.06
+    nowpts = []
+    for k in range(171):
+        wx, wy, wz = coil_pt(t_now + k / 170 / N)
+        s = proj(wx, wy, wz)
+        nowpts.append((s[0] + 0.8, s[1]))
+    out += _poly(nowpts, color=accent, f=feed)
+    out += _poly(nowpts, color=accent, f=feed)
+
+    # three axis nodes (LATENT drawn last, on top)
+    out += fill_disc(ab[0], ab[1], 2.0, spacing=0.5, pen=black, f=feed)
+    out += fill_disc(at[0], at[1], 2.0, spacing=0.5, pen=black, f=feed)
+    lat = proj(0, 0, 0)
+    out += circle(lat[0], lat[1], 2.6, pen=accent, f=feed)
+    out += _stroke_text(_spaced("INPUT"), ab[0] + 5, ab[1] - 1, 2.0, color=black, f=feed)
+    out += _stroke_text(_spaced("LATENT"), lat[0] + 5, lat[1] - 1, 2.0, color=accent, f=feed)
+    out += _stroke_text(_spaced("OUTPUT"), at[0] + 5, at[1] - 1, 2.0, color=black, f=feed)
+
+    # furniture (flush-left margin)
+    xT = x0 + 0.03 * W
+    out += type_block(["LSTM"], xT, y1 - 6.0, height=3.4, pen=black, underline=False, f=feed)
+    out += _stroke_text(_spaced("MEMORY IN TIME"), xT, y1 - 15.0, 2.0, color=black, f=feed)
+    out += swatch_bar(xT, y0 + 26.0, [black, accent], size=2.6, f=feed)
+    out += scale_footer(bounds, text="M 1:80", pen=black, height=2.4, f=feed)
+    return _fit_out(out, bounds)
+
+
+
+
+# ---------------------------------------------------------------------------
+# CNN — FROM PIXELS TO MEANING (rising valley + receptive-field frustum; rework)
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_locality(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 2,
+    layers: int = 5,
+    nx: int = 42,
+    ny: int = 42,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """FROM PIXELS TO MEANING — a CNN as a rising valley of feature terrains
+    (hidden-line occluded), each layer changing MORPHOLOGY with depth via a
+    depth-varying box-blur: crunchy PIXELS → smooth OBJECT peaks. One crimson
+    RECEPTIVE-FIELD frustum climbs from a small input patch to the tallest
+    high-level peak — the single thread of data being abstracted. Diagonal
+    recession so 'resolution down / abstraction up' is the reading axis."""
+    import numpy as np
+
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    accent, black = _pen(PINK, colors), _pen(BLACK, colors)
+    out: List[GCodeCommand] = []
+
+    LW, DX, DY = 0.50 * W, 0.24 * W, 0.065 * H
+    gap, STAGGER_X = 0.150 * H, 0.045 * W
+    base_x, base_y0 = x0 + 0.085 * W, y0 + 0.135 * H
+    freqs = [11.0, 6.5, 3.8, 2.4, 1.6]
+    amps = [0.004, 0.028, 0.075, 0.140, 0.190]
+    uc, vc = 0.46, 0.42
+
+    def proj(i, u, v, z):
+        return (base_x + u * LW + v * DX + i * STAGGER_X, base_y0 + i * gap + v * DY + z * amps[min(i, 4)] * H)
+
+    def dep(i, v, z):
+        return -v + 0.28 * z + 0.6 * i
+
+    def box_blur(Z):
+        B = Z.copy()
+        B[1:-1, 1:-1] = 0.2 * (Z[1:-1, 1:-1] + Z[:-2, 1:-1] + Z[2:, 1:-1] + Z[1:-1, :-2] + Z[1:-1, 2:])
+        return B
+
+    def layer_z(i):
+        fr = freqs[min(i, 4)]
+        Z = np.array([[rng.fbm(iu / nx * fr + i * 11.3, jv / ny * fr + i * 5.7) for jv in range(ny + 1)] for iu in range(nx + 1)])
+        for _ in range(i):
+            Z = box_blur(Z)
+        lo, hi = float(Z.min()), float(Z.max())
+        return (Z - lo) / ((hi - lo) or 1.0)
+
+    Zs = []
+    for i in range(layers):
+        Z = layer_z(i)
+        top = i == layers - 1
+        pun = pvn = 0.5
+        if top:
+            bi, bj = np.unravel_index(int(np.argmax(Z)), Z.shape)
+            gg = np.array([[math.exp(-(((iu - bi) ** 2 + (jv - bj) ** 2) / (2 * (0.28 * nx) ** 2))) for jv in range(ny + 1)] for iu in range(nx + 1)])
+            Z = Z * (0.35 + 0.65 * gg)
+            Z = (Z - float(Z.min())) / ((float(Z.max()) - float(Z.min())) or 1.0)
+            pun, pvn = bi / nx, bj / ny
+        Zs.append(Z)
+        SX = np.zeros((nx + 1, ny + 1))
+        SY = np.zeros((nx + 1, ny + 1))
+        DEP = np.zeros((nx + 1, ny + 1))
+        PENV = np.full((nx + 1, ny + 1), black if black is not None else 0)
+        for iu in range(nx + 1):
+            u = iu / nx
+            for jv in range(ny + 1):
+                v = jv / ny
+                z = Z[iu, jv]
+                p = proj(i, u, v, z)
+                SX[iu, jv], SY[iu, jv], DEP[iu, jv] = p[0], p[1], dep(i, v, z)
+                if top and math.hypot(u - pun, v - pvn) < 0.16:
+                    PENV[iu, jv] = accent if accent is not None else 0
+        _zbuf_terrain(out, SX, SY, DEP, feed=feed, PENV=PENV, PXW=230, PXH=180)
+
+    # top-layer object contours (faint black, skip the crimson cap)
+    top = layers - 1
+    Zt = Zs[top]
+    xs = [proj(top, iu / nx, 0.5, 0)[0] for iu in range(nx + 1)]
+    ys = [proj(top, 0.5, jv / ny, 0)[1] for jv in range(ny + 1)]
+    # (contours drawn in surface space below via marching squares over index grid)
+    F = [[float(Zt[iu, jv]) for iu in range(nx + 1)] for jv in range(ny + 1)]
+    gi = list(range(nx + 1))
+    gj = list(range(ny + 1))
+    bi2, bj2 = np.unravel_index(int(np.argmax(Zt)), Zt.shape)
+    for lv in range(1, 6):
+        iso = 0.45 + 0.5 * lv / 6.0
+        for ch in _chain_segments(_marching_squares(F, gi, gj, iso)):
+            if len(ch) < 5:
+                continue
+            pts = []
+            for (ii, jj) in ch:
+                if math.hypot(ii / nx - pun, jj / ny - pvn) < 0.16:
+                    continue
+                z = Zt[int(min(nx, max(0, ii)))][int(min(ny, max(0, jj)))]
+                pts.append(proj(top, ii / nx, jj / ny, z))
+            if len(pts) >= 2:
+                out += _poly(pts, color=black, f=feed)
+
+    # receptive-field frustum (crimson): growing draped window + 4 rails + centre dots
+    def surf_z(i, u, v):
+        return float(Zs[i][int(min(nx, max(0, round(u * nx))))][int(min(ny, max(0, round(v * ny))))])
+
+    corner_paths = [[], [], [], []]
+    for i in range(layers):
+        hw = 0.045 + 0.052 * i
+        cs = [(uc - hw, vc - hw), (uc + hw, vc - hw), (uc + hw, vc + hw), (uc - hw, vc + hw)]
+        sq = [proj(i, cu, cv, surf_z(i, cu, cv)) for (cu, cv) in cs]
+        out += _poly(sq + [sq[0]], color=accent, f=feed)
+        for k, (cu, cv) in enumerate(cs):
+            corner_paths[k].append(proj(i, cu, cv, surf_z(i, cu, cv)))
+        out += _dot(*proj(i, uc, vc, surf_z(i, uc, vc)), 1.1, color=accent, f=feed)
+    for path in corner_paths:
+        out += _poly(path, color=accent, f=feed)
+
+    # left abstraction/resolution axis (one honest rule, not a schematic)
+    ax = x0 + 0.05 * W
+    ay0, ay1 = base_y0, base_y0 + (layers - 1) * gap + 0.12 * H
+    out += _poly([(ax, ay0), (ax, ay1)], color=black, f=feed)
+    out += _poly([(ax - 1.4, ay1 - 3), (ax, ay1), (ax + 1.4, ay1 - 3)], color=black, f=feed)
+    out += _poly([(ax - 1.4, ay0 + 3), (ax, ay0), (ax + 1.4, ay0 + 3)], color=black, f=feed)
+    out += _stroke_text(_spaced("MORE ABSTRACTION"), ax - 2, ay1 + 4, 1.7, color=black, f=feed)
+    out += _stroke_text(_spaced("SPATIAL RESOLUTION"), ax - 2, ay0 - 5, 1.7, color=black, f=feed)
+
+    lbls = ["PIXELS", "EDGES", "TEXTURES", "PARTS", "OBJECTS"]
+    for i in range(layers):
+        p = proj(i, 1.0, 0.5, 0.5)
+        out += _stroke_text(_spaced(lbls[min(i, 4)]), p[0] + 5, p[1], 1.6, color=black, f=feed)
+
+    xT = x0 + 0.03 * W
+    out += type_block(["CNN"], xT, y1 - 6.0, height=4.2, pen=black, underline=False, f=feed)
+    out += _stroke_text(_spaced("FROM PIXELS TO MEANING"), xT, y1 - 16.0, 2.4, color=black, f=feed)
+    out += scale_footer(bounds, text="M 1:80", pen=black, height=2.4, f=feed)
+    return _fit_out(out, bounds)
+
+
+
+
+# ---------------------------------------------------------------------------
+# TRANSFORMER — ATTENTION AS TOPOGRAPHY (single-query basin; studio rework)
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_relevance(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 4,
+    tokens: int = 28,
+    n_keys: int = 34,
+    nu: int = 56,
+    nv: int = 56,
+    head: int = 0,
+    tau: float = 0.55,
+    sigma_k: float = 0.10,
+    sigma_q: float = 0.30,
+    basin_depth: float = 1.8,
+    lean: float = 0.28,
+    topk: int = 5,
+    weights: str = "",
+    block: int = 0,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """ATTENTION AS TOPOGRAPHY — one query's attention as a gravitational BASIN
+    carved into a field of key-hills. The most-resonant query bends the key field:
+    high-weight keys lean/stretch into the sink, softmax rings ride the pit wall
+    (green), and a value→output ribbon plunges through the basin and rises out the
+    far side (content reshaped by the gravity of context). Blue = the captured
+    attention mass, red = key crests, green = probability + value flow."""
+    import numpy as np
+
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    blue, red, green, blk = 0, 1, 2, 3
+    out: List[GCodeCommand] = []
+
+    # 1. real attention (single source of truth)
+    S = np.asarray(_attention_matrix(rng, tokens, head, temp=tau, causal=False, weights=weights, block=block, return_scores=True), dtype=float)
+    S = (S - S.min()) / (S.max() - S.min() + 1e-9)
+    qi = int(np.argmax(S.max(axis=1)))
+    sim = S[qi]
+    w = np.exp(sim / tau)
+    w = w / w.sum()
+
+    # 2. key field — scattered hills; high-weight keys placed near basin site
+    order = list(np.argsort(-w))
+    kx = [rng.uniform(-0.85, 0.85) for _ in range(n_keys)]
+    kz = [rng.uniform(-0.85, 0.85) for _ in range(n_keys)]
+    q_site = (0.35 + rng.uniform(-0.05, 0.05), -0.15 + rng.uniform(-0.05, 0.05))
+    slots = sorted(range(n_keys), key=lambda m: math.hypot(kx[m] - q_site[0], kz[m] - q_site[1]))
+    wk = [0.02] * n_keys
+    amp = [0.55 + 0.45 * rng.random() for _ in range(n_keys)]
+    for rank, tok in enumerate(order[:n_keys]):
+        m = slots[rank]
+        wk[m] = float(w[tok])
+    # lean high-weight keys toward the sink
+    for m in range(n_keys):
+        kx[m] += lean * wk[m] * (q_site[0] - kx[m])
+        kz[m] += lean * wk[m] * (q_site[1] - kz[m])
+
+    sigma_b = 0.22
+
+    def Bfield(wx, wz):
+        return math.exp(-(((wx - q_site[0]) ** 2 + (wz - q_site[1]) ** 2) / (2 * sigma_b ** 2)))
+
+    def Kfield(wx, wz):
+        tot = 0.0
+        for m in range(n_keys):
+            # sigma_k is a std-dev in world units: crisp separate hills, not one
+            # fused range (2·σ² in the denominator — the σ-not-squared bug made
+            # every hill blur into a mountain massif).
+            tot += amp[m] * math.exp(-(((wx - kx[m]) ** 2 + (wz - kz[m]) ** 2) / (2 * sigma_k ** 2)))
+        # carve the crater clean: suppress key mass inside the basin footprint
+        core = math.hypot(wx - q_site[0], wz - q_site[1])
+        if core < 0.30:
+            tot *= 0.10 + 0.90 * (core / 0.30)
+        return tot
+
+    def Zf(wx, wz):
+        return Kfield(wx, wz) - basin_depth * Bfield(wx, wz)
+
+    # 4. project + z-buffer
+    cx, cy = x0 + 0.52 * W, y0 + 0.50 * H
+    a, cd, bwy = 0.29 * W, 0.070 * H, 0.20 * H
+    hs = 0.9
+
+    def proj(wx, wy, wz):
+        return (cx + (wx - wz) * a, cy + wy * bwy - (wx + wz) * cd)
+
+    def dep(wx, wy, wz):
+        return (wx + wz) + 0.12 * wy
+
+    SX = np.zeros((nu + 1, nv + 1))
+    SY = np.zeros((nu + 1, nv + 1))
+    DEP = np.zeros((nu + 1, nv + 1))
+    Zg = np.zeros((nu + 1, nv + 1))
+    Bg = np.zeros((nu + 1, nv + 1))
+    for i in range(nu + 1):
+        wx = -1 + 2 * i / nu
+        for j in range(nv + 1):
+            wz = -1 + 2 * j / nv
+            z = Zf(wx, wz)
+            Zg[i, j] = z
+            Bg[i, j] = Bfield(wx, wz)
+            p = proj(wx, z * hs, wz)
+            SX[i, j], SY[i, j], DEP[i, j] = p[0], p[1], dep(wx, z * hs, wz)
+    # pen law: BLACK = structure (dominant); RED = only the highest key crests;
+    # BLUE = only the basin bowl (the captured attention mass, scarce + loud).
+    crest = float(np.percentile(Zg, 93))  # red = only the truly top crests (scarce + loud)
+    PV = np.full((nu + 1, nv + 1), blk)
+    PV[(Zg > crest) & (Bg < 0.30)] = red
+    PV[Bg > 0.42] = blue
+    if float((PV == blue).mean()) > 0.15:
+        PV[(PV == blue) & (Bg < 0.55)] = blk
+    _zbuf_terrain(out, SX, SY, DEP, feed=feed, PENV=PV, PXW=230, PXH=310)
+
+    # 6. softmax rings on the basin wall (green, inside the footprint)
+    gN = 90
+    xs = [-1 + 2 * i / gN for i in range(gN + 1)]
+    ys = [-1 + 2 * j / gN for j in range(gN + 1)]
+    sigma_p = 0.10 + 0.30 * tau
+    P = [[math.exp(-(((xs[i] - q_site[0]) ** 2 + (ys[j] - q_site[1]) ** 2) / (2 * sigma_p ** 2))) for i in range(gN + 1)] for j in range(gN + 1)]
+    for lv in range(1, 7):
+        iso = lv / 7.0
+        for ch in _chain_segments(_marching_squares(P, xs, ys, iso)):
+            if len(ch) < 5:
+                continue
+            pts = [proj(wx, Zf(wx, wz) * hs, wz) for (wx, wz) in ch if Bfield(wx, wz) > 0.20]
+            if len(pts) >= 2:
+                out += _poly(pts, color=green, f=feed)
+
+    # 7. value→output ribbon — gradient descent into the basin, rising out
+    def gradZ(wx, wz):
+        e = 0.01
+        return ((Zf(wx + e, wz) - Zf(wx - e, wz)) / (2 * e), (Zf(wx, wz + e) - Zf(wx, wz - e)) / (2 * e))
+
+    px, pz = -0.9, q_site[1] + 0.05
+    path = []
+    for _ in range(220):
+        path.append((px, pz))
+        gx, gz = gradZ(px, pz)
+        if px < q_site[0] - 0.02:  # descend toward basin from the left
+            px += 0.012
+            pz += -0.02 * gz
+        else:  # climb out the far side
+            px += 0.012
+            pz += 0.01 * gz
+        if px > 0.95:
+            break
+    rib = [proj(wx, (Zf(wx, wz) + 0.03) * hs, wz) for (wx, wz) in path]
+    rib, _ = _catmull_subdivide(rib)
+    out += _poly(rib, color=green, f=feed)
+    # emphasise the plunge (inside basin) with a second pass
+    inb = [proj(wx, (Zf(wx, wz) + 0.03) * hs, wz) for (wx, wz) in path if Bfield(wx, wz) > 0.3]
+    if len(inb) >= 2:
+        out += _poly(inb, color=green, f=feed)
+
+    # 8. query arrival ticks (scarce red) on the flat-left approach
+    for t in range(3):
+        e = proj(-0.95 + 0.05 * t, 0.02 * hs, q_site[1] + 0.05)
+        out += _poly([(e[0] - 3, e[1]), (e[0] + 3, e[1])], color=red, f=feed)
+        out += _poly([(e[0], e[1] - 3), (e[0], e[1] + 3)], color=red, f=feed)
+
+    # 9. softmax sparkline (lower-left quiet zone) — confirms Σw=1
+    sw = sorted(w, reverse=True)[:16]
+    bx, by = x0 + 0.04 * W, y0 + 0.08 * H
+    mw = max(sw) or 1.0
+    for i, val in enumerate(sw):
+        out += _poly([(bx + i * 2.2, by), (bx + i * 2.2, by + 16 * val / mw)], color=blk, f=feed)
+
+    # 10. furniture (left type axis; no numbered stages)
+    xL = x0 + 0.02 * W
+    out += type_block(["ATTENTION"], xL, y1 - 6.0, height=3.6, pen=blk, underline=False, f=feed)
+    out += _stroke_text(_spaced("AS TOPOGRAPHY"), xL, y1 - 15.0, 3.0, color=blk, f=feed)
+    out += _stroke_text(_spaced("ONE QUERY BENDS THE FIELD OF KEYS"), xL, y1 - 21.0, 1.6, color=blk, f=feed)
+    out += swatch_bar(xL, y1 - 27.0, [blue, red, green, blk], size=2.4, f=feed)
+    out += scale_footer(bounds, text="A = SOFTMAX(QK T)", pen=blk, height=2.4, f=feed)
+    return _fit_out(out, bounds)
+

@@ -224,7 +224,7 @@ class DrawingSession:
         # Provider
         self.provider: str = config.llm.default_provider
         self.model: str = getattr(config.llm, f"{config.llm.default_provider}_model", "?")
-        self.paper: str = f"{config.paper.width:.0f}x{config.paper.height:.0f}mm"
+        self.paper: str = f"{config.paper.x_extent:.0f}x{config.paper.y_extent:.0f}mm"
         # Command log
         self.commands: deque = deque(maxlen=200)
         self.sent: int = 0
