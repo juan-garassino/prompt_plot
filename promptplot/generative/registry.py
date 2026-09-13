@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import generators as _g
 from . import bauhaus as _b
+from . import physics as _p
 from .rng import SeededRNG
 
 GENERATOR_REGISTRY = {
@@ -61,6 +62,7 @@ GENERATOR_REGISTRY = {
     "bauhaus_perceptron": _b.bauhaus_perceptron,
     "bauhaus_gradient": _b.bauhaus_gradient,
     "bauhaus_resonance": _b.bauhaus_resonance,
+    "gw150914": _p.gw150914,
 }
 
 _SKIP_PARAMS = {"rng", "bounds"}
@@ -78,6 +80,7 @@ COMPOSITIONS = {
     "bauhaus_perceptron",
     "bauhaus_gradient",
     "bauhaus_resonance",
+    "gw150914",
 }
 
 

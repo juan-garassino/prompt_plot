@@ -70,6 +70,7 @@ def test_all_generators_registered():
         "bauhaus_perceptron",
         "bauhaus_gradient",
         "bauhaus_resonance",
+        "gw150914",
     ]:
         assert expected in gens
 
