@@ -4,7 +4,7 @@ Two-role adversarial loop: a DESIGNER (edits generator code/params, renders) and
 CRITIC (sees ONLY the rendered png, fresh eyes). A piece ships when the critic
 scores **avg ≥ 8/10 with no dimension below 7** (all seven dimensions; a declared-flat piece is scored on how well the flatness serves it), over at most 5 rounds.
 
-## The six dimensions (1–10 each)
+## The seven dimensions (1–10 each)
 
 1. **Hierarchy** — one element dominates at 3 meters; a clear second and third read
    at 1 meter; details reward 30 cm. If everything is mid-sized, score ≤ 4.
@@ -26,6 +26,22 @@ scores **avg ≥ 8/10 with no dimension below 7** (all seven dimensions; a decla
    assigned style canon is flat by nature (Swiss, Pop Ben-Day, classic Bauhaus)
    and the designer says so in the report, or the concept demands it. Undeclared
    flatness scores ≤ 4.
+
+## The designer's expressive levers (play them consciously, every round)
+
+- **Proportion** — scale ratios of at least 3:1 between dominant and secondary
+  masses; try extreme formats (a tiny subject on a vast field, or a subject
+  that swallows the frame).
+- **Fill vs. void** — compose the empty space as deliberately as the ink;
+  alternate packed and silent zones with rhythm.
+- **Density gradients** — line/dash spacing ramps ARE the plotter's gradient:
+  use them for tone, depth, motion, and emphasis (spacing 0.8→6 mm across a
+  form reads as light).
+- **Color play** — sequence pens as gradients across zones (blue→purple→pink),
+  let two pens interleave to mix optically, keep one pen scarce and loud;
+  color = compositional weight, not category labels.
+- **Texture direction** — hatch/dash direction can follow form (contours),
+  fight it (cross-grain tension), or stay neutral; choose, don't default.
 
 ## Known failure modes of this codebase (critic: check these first)
 
