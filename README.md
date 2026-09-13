@@ -49,6 +49,27 @@ promptplot draw "a dense ocean of waves" --orchestrate --regions 8 --simulate
 
 ## Quick start
 
+**Compose a lamina (a finished plottable sheet — single or multi-panel):**
+
+```bash
+# one science piece as a styled poster
+promptplot plate bauhaus_relevance:7 --style bauhaus --paper a4 --preview plate.png
+
+# a 3-panel plate (CNN | LSTM | MLP) in the science-poster style on A3
+promptplot plate bauhaus_locality:7 bauhaus_memory:7 bauhaus_manifold:7 \
+    --style science_poster --paper a3 --orientation landscape --preview plate3.png
+# styles: bauhaus | swiss | deco | pop | radial_viz | science_poster
+```
+
+**Browse the science-illustration briefs and run the native design loop:**
+
+```bash
+promptplot studio list                 # all briefs (studio/<domain>/*.md)
+promptplot studio brief transformer    # one brief, rendered
+promptplot studio design diffusion --style bauhaus --rounds 2 --provider nvidia
+# designer → render → vision critic → synth; artifacts in studio/<slug>/
+```
+
 **Draw something (simulated, no hardware needed):**
 
 ```bash

@@ -195,6 +195,28 @@ async def save_to_library(gcode_path: str, name: str, confirm: bool = False) -> 
         ctx.yes_plot = False
 
 
+# -- framework layer: studio briefs + lamina plates -----------------------------
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def studio_list_briefs(domain: Optional[str] = None) -> dict:
+    """List the science-illustration design briefs (studio/<domain>/*.md)."""
+    return await _run("studio_list_briefs", {"domain": domain})
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def studio_get_brief(slug: str, domain: Optional[str] = None) -> dict:
+    """Get one design brief (essence, status, sections) as markdown."""
+    return await _run("studio_get_brief", {"slug": slug, "domain": domain})
+
+
+@mcp.tool(annotations=RENDERS)
+async def compose_plate(spec_json: dict) -> dict:
+    """Compose a lamina (finished plottable sheet): panels of registry pieces +
+    a style preset -> gcode + png + pen-layer plan. Plot via stream_to_plotter."""
+    return await _run("compose_plate", {"spec_json": spec_json})
+
+
 # -- resources ------------------------------------------------------------------
 
 

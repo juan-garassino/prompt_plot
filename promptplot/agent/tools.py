@@ -230,6 +230,86 @@ def _t_save_to_library(ctx: ToolContext, gcode_path: str, name: str) -> Dict[str
     return {"saved": str(dest)}
 
 
+# --- framework layer: studio briefs + lamina plates ------------------------
+
+
+def _t_studio_list_briefs(ctx: ToolContext, domain: Optional[str] = None) -> Dict[str, Any]:
+    from ..studio.briefs import list_briefs
+
+    return {"briefs": list_briefs(domain=domain)}
+
+
+def _t_studio_get_brief(ctx: ToolContext, slug: str, domain: Optional[str] = None) -> Dict[str, Any]:
+    from ..studio.briefs import get_brief
+
+    try:
+        b = get_brief(slug, domain=domain)
+    except KeyError as e:
+        return {"error": str(e)}
+    return {
+        "slug": b.slug,
+        "domain": b.domain,
+        "title": b.title,
+        "tagline": b.tagline,
+        "essence": b.essence,
+        "status": b.status,
+        "markdown": b.to_context(),
+    }
+
+
+async def _t_studio_design(
+    ctx: ToolContext,
+    slug: str,
+    style: str = "bauhaus",
+    mode: str = "params",
+    rounds: int = 2,
+) -> Dict[str, Any]:
+    """Run the native designer→render→critic→synth loop (needs an LLM provider)."""
+    from ..studio.loop import run_design_loop
+
+    if ctx.provider is None:
+        return {"error": "no LLM provider in this session; start the agent with a provider"}
+    out_dir = ctx.session.session_dir / "studio" / slug
+    res = await run_design_loop(
+        slug, ctx.provider, style=style, mode=mode, rounds=rounds,
+        out_dir=out_dir, config=ctx.config,
+    )
+    best = res.best
+    return {
+        "slug": res.slug,
+        "rounds": [
+            {"index": r.index, "verdict": r.verdict,
+             "one_line": r.critique.get("one_line", ""), "render": str(r.render_path or "")}
+            for r in res.rounds
+        ],
+        "best_round": best.index if best else None,
+        "proposal": str(res.out_dir / "final" / "PROPOSAL.md"),
+    }
+
+
+def _t_compose_plate(ctx: ToolContext, spec_json: Dict[str, Any]) -> Dict[str, Any]:
+    """Compose a lamina (single or multi-panel plate) and save gcode + png into
+    the session. Hardware goes through stream_to_plotter on the returned path."""
+    import json as _json
+
+    from ..lamina import compose_plate, spec_from_json
+    from ..visualizer import GCodeVisualizer
+
+    spec = spec_from_json(_json.dumps(spec_json) if isinstance(spec_json, dict) else str(spec_json))
+    program, pen_plan = compose_plate(spec, ctx.config)
+    stem = f"plate_{spec.style}_{len(spec.panels)}p"
+    gcode_path = ctx.session.render_path(stem, "gcode")
+    gcode_path.write_text("\n".join(c.to_gcode() for c in program.commands))
+    png_path = ctx.session.render_path(stem, "png")
+    GCodeVisualizer(ctx.config).preview(program, str(png_path))
+    return {
+        "png_path": str(png_path),
+        "gcode_path": str(gcode_path),
+        "commands": len(program.commands),
+        "pen_plan": pen_plan,
+    }
+
+
 TOOLBOX: List[Tool] = [
     Tool("list_generators", "List all seeded art generator names.", {}, _t_list_generators),
     Tool(
@@ -317,6 +397,40 @@ TOOLBOX: List[Tool] = [
         {"gcode_path": {"type": "string"}, "name": {"type": "string"}},
         _t_save_to_library,
         tier="confirm",
+    ),
+    Tool(
+        "studio_list_briefs",
+        "List the science-illustration design briefs (studio/<domain>/*.md).",
+        {"domain": {"type": "string"}},
+        _t_studio_list_briefs,
+    ),
+    Tool(
+        "studio_get_brief",
+        "Get one design brief (essence, status, sections) as markdown.",
+        {"slug": {"type": "string"}, "domain": {"type": "string"}},
+        _t_studio_get_brief,
+    ),
+    Tool(
+        "studio_design",
+        "Run the native studio design loop for a brief: designer proposes, the "
+        "harness renders, the vision critic scores against the rubric, synth "
+        "feeds the next round. Returns per-round verdicts + the proposal path.",
+        {
+            "slug": {"type": "string"},
+            "style": {"type": "string"},
+            "mode": {"type": "string", "enum": ["params", "code"]},
+            "rounds": {"type": "integer"},
+        },
+        _t_studio_design,
+    ),
+    Tool(
+        "compose_plate",
+        "Compose a lamina (finished plottable sheet): panels of registry pieces "
+        "+ a style preset -> gcode + png + pen-layer plan. spec_json: "
+        '{"panels": [{"generator", "seed", "params", "label"}], "style", '
+        '"title", "paper", "orientation"}. Plot via stream_to_plotter.',
+        {"spec_json": {"type": "object"}},
+        _t_compose_plate,
     ),
 ]
 

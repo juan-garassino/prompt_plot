@@ -51,3 +51,35 @@ want a guaranteed-immutable snapshot.
   compositions with their one canonical seed + studio link.
 - `bauhaus.py` + `physics.py` ARE the compositions home already; they just need
   the label and the tag.
+
+## The four-layer framework (2026-09-13)
+
+The system is now one pipeline — science illustration as art, natively:
+
+```
+ENGINE   promptplot/generative/engine3d.py + kit.py
+         the from-scratch 3D pen-plotter renderer (z-buffer hidden-line
+         terrains/ribbons) + the 2D design kit (fills, type, furniture).
+   ↓
+PIECES   promptplot/generative/pieces/{ml,abstract,physics}.py
+         seeded compositions by science domain (neural nets today; quantum,
+         astro, relativity to come). Style-NEUTRAL: `bauhaus_*` names are
+         legacy compat (shimmed via bauhaus.py); new pieces get subject-based
+         names. Registered in registry.py like any generator.
+   ↓
+LAMINA   promptplot/lamina/  →  `promptplot plate`
+         a finished plottable sheet: one piece as a poster or several as
+         panels, style preset (bauhaus/swiss/deco/pop/radial_viz/
+         science_poster) mapping semantic pens → physical pens + furniture,
+         postprocessed, split into pen layers, previewed, streamed to Leo.
+   ↓
+STUDIO   promptplot/studio/  →  `promptplot studio`
+         briefs (studio/<domain>/*.md) + the native designer → render →
+         vision-critic → synth loop on any LLM provider. The near-mandatory
+         path for NEW pieces; code-mode candidates live under
+         studio/<slug>/rounds/ until a human promotes them into pieces/.
+```
+
+Agents reach every layer: the built-in agent + MCP expose `studio_list_briefs`,
+`studio_get_brief`, `studio_design`, `compose_plate`, and hardware always goes
+through `stream_to_plotter` (pen-up limits trace + confirm).

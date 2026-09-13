@@ -148,7 +148,9 @@ PromptPlot can be driven three ways, sharing the same postprocess/scoring/plotte
 - **PromptPlot Agent** — the built-in agentic controller (`promptplot agent`, package
   `promptplot/agent/`): an LLM-agnostic chat loop (any of the 7 providers via a strict JSON
   tool-call envelope in `agent/protocol.py`) over a typed toolbox (`agent/tools.py`:
-  list/render generators, render DSL blocks, score, validate, import, memory search).
+  list/render generators, render DSL blocks, score, validate, import, memory search, plus the
+  framework tools: `studio_list_briefs`/`studio_get_brief`/`studio_design` (the native design
+  loop) and `compose_plate` (lamina → gcode+png+pen plan; plot via `stream_to_plotter`)).
   Sessions persist to `~/.promptplot/agent_sessions/<id>/` (transcript.json + trace.jsonl +
   renders/ + report.md); resume with `--session <id>`. Headless: `promptplot agent -p "..."`.
   Tools are tiered safe/confirm: `critique_render` sends a png to the provider's vision model
@@ -160,7 +162,7 @@ PromptPlot can be driven three ways, sharing the same postprocess/scoring/plotte
   no keys/hardware). Proven live: the agent on NVIDIA rendered, vision-critiqued its own png,
   adjusted a param and re-rendered autonomously.
   MCP surface: `promptplot mcp` serves the same toolbox over stdio (`agent/mcp_server.py`,
-  FastMCP; optional extra `pip install -e ".[agent]"`): 12 tools with ToolAnnotations
+  FastMCP; optional extra `pip install -e ".[agent]"`): 15 tools with ToolAnnotations
   (readOnlyHint / destructiveHint), error envelope with `remediation`, inline `Image`
   previews via `preview_image`, `plot://renders` + `plot://render/{file}` resources, and
   hardware gated behind an explicit `confirm=true` argument — any MCP client can drive
@@ -300,8 +302,10 @@ All source lives in `promptplot/`. Three formerly-monolithic modules are now **s
 - `llm/` — `base.py` (LLMProvider ABC, errors), `providers.py` (7 providers + `create_llm_provider`/`get_llm_provider`), `prompts.py` (all `build_*_prompt`, `classify_creative_mode`, presets, few-shot, palette color block).
 - `workflow/` — `events.py`, `_shared.py` (helpers + `diagnose_failure` + console/logger), `batch.py`, `supervisor.py`, `streaming.py`, `livedraw.py`.
 - `cli/` — `_group.py` (the `cli` click group + `main` + `_get_config`/`_print_score`), `draw.py`, `generate.py`, `art.py`, `import_cmd.py`, `manage.py` (config/plotter/interactive/ui/library). `__main__.py` enables `python -m promptplot`.
-- `generative/` — **NEW.** `rng.py` (`SeededRNG`: seeded Random + numpy + value/fbm noise), `generators.py` (8 generators), `registry.py` (`GENERATOR_REGISTRY` + signature-introspected schemas + `run_generator`). See "Generative art".
-- `importers/` — **NEW.** `svg_import.py`, `dxf_import.py`, `layers.py` (fit-to-paper + color/layer grouping), `__init__.py` (`import_file`, `parse_file`). See "File import".
+- `generative/` — `rng.py` (`SeededRNG`: seeded Random + numpy + value/fbm noise), `generators.py` (30+ parametric generators), `registry.py` (`GENERATOR_REGISTRY` + signature-introspected schemas + `run_generator`), **`engine3d.py`** (the from-scratch 3D pen-plotter engine: `_zbuf_terrain` numpy z-buffer hidden-line renderer + `_fit_out`), **`kit.py`** (the 2D design kit: fills, type, furniture, clipping — one import site incl. generators low-level helpers), **`pieces/{ml,abstract,physics}.py`** (the science compositions by domain; `bauhaus.py` + `physics.py` are compat shims re-exporting every historical name — the framework is style-NEUTRAL, style is chosen at the lamina level; new pieces get subject-based names, `bauhaus_*` is legacy). See "Generative art".
+- `lamina/` — **the finished-sheet layer.** `styles.py` (6 `StylePreset`s from STYLES.md: bauhaus, swiss, deco, pop, radial_viz, science_poster; semantic-pen → physical-pen mapping), `layout.py` (`reserve_bands`, `split_panels`, gutter rules, number chips), `plate.py` (`Panel`, `PlateSpec` + JSON round-trip, `compose_plate(spec, config) -> (GCodeProgram, pen_plan)`). CLI: `promptplot plate cnn:7 lstm:7 mlp:7 --style science_poster --paper a3` (single- or multi-panel; `--preview/--save/--simulate/--port` with the mandatory limits trace).
+- `studio/` (package) — **the native design layer.** `briefs.py` (parses `studio/<domain>/*.md` briefs: title—tagline, Essence/Status, sections), `prompts.py` (designer/critic/synth templates inlining the STYLES.md canon + DESIGN_RUBRIC.md), `loop.py` (`run_design_loop`: designer → render → vision-critic → synth on any of the 7 LLM providers; `params` mode renders existing pieces, `code` mode writes candidate piece source under `studio/<slug>/rounds/` — never inside the package). CLI: `promptplot studio list | brief <slug> | design <slug> --style --mode --rounds --provider`. **New pieces should go through this loop** — it consistently outperforms one-shot design.
+- `importers/` — `svg_import.py`, `dxf_import.py`, `layers.py` (fit-to-paper + color/layer grouping), `__init__.py` (`import_file`, `parse_file`). See "File import".
 
 Core flat modules:
 - `config.py` — **Dataclass** config tree (paper, pen, brush, **color**, bounds, vision, serial, LLM, workflow). `ColorConfig` (palette, park_position, pause_for_swap, assign_mode) and `PaperConfig.from_size("a4")`. Not pydantic-BaseSettings and not `PROMPTPLOT_`-prefixed — LLM keys read direct env vars: `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `ANTHROPIC_API_KEY`, `GPT4_API_KEY`/`GPT4_ENDPOINT`/`GPT4_API_VERSION` (Azure). Don't "modernize" to the workspace env_prefix convention without being asked.
