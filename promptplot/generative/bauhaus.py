@@ -213,6 +213,80 @@ def _emit_runs(runs, pen: Optional[int], f: int = 2200) -> List[GCodeCommand]:
     return out
 
 
+def _zbuf_terrain(out, SX, SY, DEP, feed=2200, PENV=None, pen=None, PXW=210, PXH=160):
+    """Shared 3D hidden-line terrain engine. Rasterize the surface quads into a
+    numpy z-buffer, then draw only the visible parts of each grid line so near
+    folds occlude far ones (a solid surface, not a transparent wireframe).
+    SX/SY/DEP are (R+1,C+1) arrays of screen coords + view-depth (larger=nearer);
+    PENV optional per-vertex pen index, else the single `pen`. Appends to `out`."""
+    import numpy as np
+
+    R, C = SX.shape[0] - 1, SX.shape[1] - 1
+    sxmin, sxmax = float(SX.min()) - 3, float(SX.max()) + 3
+    symin, symax = float(SY.min()) - 3, float(SY.max()) + 3
+    zb = np.full((PXH, PXW), -1e18)
+    PX = (SX - sxmin) / (sxmax - sxmin) * (PXW - 1)
+    PY = (SY - symin) / (symax - symin) * (PXH - 1)
+    dspan = float(DEP.max() - DEP.min()) or 1.0
+    bias = 0.02 * dspan
+
+    def tri(p0, p1, p2, d0, d1, d2):
+        minx = int(max(0, math.floor(min(p0[0], p1[0], p2[0]))))
+        maxx = int(min(PXW - 1, math.ceil(max(p0[0], p1[0], p2[0]))))
+        miny = int(max(0, math.floor(min(p0[1], p1[1], p2[1]))))
+        maxy = int(min(PXH - 1, math.ceil(max(p0[1], p1[1], p2[1]))))
+        if maxx < minx or maxy < miny:
+            return
+        den = (p1[1] - p2[1]) * (p0[0] - p2[0]) + (p2[0] - p1[0]) * (p0[1] - p2[1])
+        if abs(den) < 1e-9:
+            return
+        X, Y = np.meshgrid(np.arange(minx, maxx + 1), np.arange(miny, maxy + 1))
+        aa = ((p1[1] - p2[1]) * (X - p2[0]) + (p2[0] - p1[0]) * (Y - p2[1])) / den
+        bb = ((p2[1] - p0[1]) * (X - p2[0]) + (p0[0] - p2[0]) * (Y - p2[1])) / den
+        cc = 1 - aa - bb
+        ins = (aa >= -1e-4) & (bb >= -1e-4) & (cc >= -1e-4)
+        d = aa * d0 + bb * d1 + cc * d2
+        sub = zb[miny : maxy + 1, minx : maxx + 1]
+        m = ins & (d > sub)
+        sub[m] = d[m]
+
+    for i in range(R):
+        for j in range(C):
+            tri((PX[i, j], PY[i, j]), (PX[i + 1, j], PY[i + 1, j]), (PX[i + 1, j + 1], PY[i + 1, j + 1]), DEP[i, j], DEP[i + 1, j], DEP[i + 1, j + 1])
+            tri((PX[i, j], PY[i, j]), (PX[i + 1, j + 1], PY[i + 1, j + 1]), (PX[i, j + 1], PY[i, j + 1]), DEP[i, j], DEP[i + 1, j + 1], DEP[i, j + 1])
+
+    def vis(sx, sy, d):
+        px = int((sx - sxmin) / (sxmax - sxmin) * (PXW - 1))
+        py = int((sy - symin) / (symax - symin) * (PXH - 1))
+        if px < 0 or px >= PXW or py < 0 or py >= PXH:
+            return True
+        return d >= zb[py, px] - bias
+
+    def draw(idx):
+        run, cur = [], None
+        for (i, j) in idx:
+            if vis(SX[i, j], SY[i, j], DEP[i, j]):
+                pp = int(PENV[i, j]) if PENV is not None else pen
+                if cur is None or pp == cur:
+                    run.append((SX[i, j], SY[i, j]))
+                    cur = pp
+                else:
+                    if len(run) >= 2:
+                        out.extend(_poly(run, color=cur, f=feed))
+                    run, cur = [(SX[i, j], SY[i, j])], pp
+            else:
+                if len(run) >= 2:
+                    out.extend(_poly(run, color=cur, f=feed))
+                run, cur = [], None
+        if len(run) >= 2:
+            out.extend(_poly(run, color=cur, f=feed))
+
+    for i in range(R + 1):
+        draw([(i, j) for j in range(C + 1)])
+    for j in range(C + 1):
+        draw([(i, j) for i in range(R + 1)])
+
+
 # ---------------------------------------------------------------------------
 # furniture
 # ---------------------------------------------------------------------------
@@ -2292,85 +2366,74 @@ def bauhaus_locality(
     bounds: Bounds,
     colors: int = 3,
     layers: int = 4,
-    nx: int = 26,
-    ny: int = 26,
+    nx: int = 38,
+    ny: int = 38,
     feed: int = 2200,
 ) -> List[GCodeCommand]:
-    """LOCALITY IN SPACE — a CNN as a stack of feature-map TERRAINS, from PIXELS
-    to MEANING. Each layer varies in character: a nearly-flat fine PIXEL grid,
-    then small-bump LOW-level, rounded-hill MID-level, up to a few big smooth
-    HIGH-level peaks (the tallest in red). Smooth Catmull wireframes in oblique
-    projection; a red receptive-field window is tracked up the growing stack."""
+    """LOCALITY IN SPACE — a CNN as a stack of feature-map TERRAINS, rendered by
+    the shared 3D pen-plotter engine (z-buffer hidden-line, so each surface reads
+    solid). The layers VARY with depth: a nearly-flat fine PIXEL grid, small-bump
+    LOW-level, rounded-hill MID-level, up to a few big smooth HIGH-level peaks
+    (the tallest in red). A red receptive-field window is tracked up the stack."""
     x0, y0, x1, y1 = bounds
     W, H = x1 - x0, y1 - y0
-    accent, black = _pen(PINK, colors), _pen(BLACK, colors)  # PINK slot rendered crimson
+    accent, black = _pen(PINK, colors), _pen(BLACK, colors)  # PINK slot → crimson
     out: List[GCodeCommand] = []
 
     LW, DX, DY = 0.52 * W, 0.27 * W, 0.075 * H
     base_x = x0 + 0.11 * W
     base_y0 = y0 + 0.15 * H
     gap = 0.185 * H
-    freqs = [9.0, 6.0, 3.6, 2.2, 1.8]  # fine pixels → few big features
-    amps = [0.004, 0.030, 0.078, 0.150, 0.170]  # flat → tall
+    freqs = [9.0, 6.0, 3.6, 2.2, 1.8]
+    amps = [0.004, 0.030, 0.078, 0.150, 0.170]
 
     def layer_z(i):
         fr = freqs[min(i, len(freqs) - 1)]
-        Z = [[rng.fbm(u / (nx - 1) * fr + i * 11.3, v / (ny - 1) * fr + i * 5.7) for u in range(nx)] for v in range(ny)]
+        Z = [[rng.fbm(iu / nx * fr + i * 11.3, jv / ny * fr + i * 5.7) for jv in range(ny + 1)] for iu in range(nx + 1)]
         lo = min(min(r) for r in Z)
         hi = max(max(r) for r in Z)
         rr = (hi - lo) or 1.0
-        return [[(Z[v][u] - lo) / rr for u in range(nx)] for v in range(ny)]
+        return [[(Z[iu][jv] - lo) / rr for jv in range(ny + 1)] for iu in range(nx + 1)]
 
     def proj(i, u, v, z):
         zh = amps[min(i, len(amps) - 1)] * H
         return (base_x + u * LW + v * DX, base_y0 + i * gap + v * DY + z * zh)
 
-    def emit_by_pen(sm, smp):
-        segs, run, cur = [], [sm[0]], smp[0]
-        for p, pen in zip(sm[1:], smp[1:]):
-            run.append(p)
-            if pen != cur:
-                segs.append((run, cur))
-                run, cur = [p], pen
-        segs.append((run, cur))
-        res: List[GCodeCommand] = []
-        for r, pen in segs:
-            if len(r) >= 2:
-                res += _poly(r, color=pen, f=feed)
-        return res
+    import numpy as np
 
     centers = []
     for i in range(layers):
         Z = layer_z(i)
         top = i == layers - 1
         pun = pvn = 0.5
-        if top:  # the tallest peak → drawn red
-            pv = max(range(ny), key=lambda v: max(Z[v]))
-            pu = max(range(nx), key=lambda u: Z[pv][u])
-            pun, pvn = pu / (nx - 1), pv / (ny - 1)
-
-        def penf(u, v):
-            if top and math.hypot(u - pun, v - pvn) < 0.20:
-                return accent
-            return black
-
-        for jv in range(ny):
-            v = jv / (ny - 1)
-            pts = [proj(i, iu / (nx - 1), v, Z[jv][iu]) for iu in range(nx)]
-            pens = [penf(iu / (nx - 1), v) for iu in range(nx)]
-            sm, smp = _catmull_subdivide(pts, pens, subdiv=2)
-            out += emit_by_pen(sm, smp)
-        for iu in range(nx):
-            u = iu / (nx - 1)
-            pts = [proj(i, u, jv / (ny - 1), Z[jv][iu]) for jv in range(ny)]
-            pens = [penf(u, jv / (ny - 1)) for jv in range(ny)]
-            sm, smp = _catmull_subdivide(pts, pens, subdiv=2)
-            out += emit_by_pen(sm, smp)
+        if top:  # tallest peak → red
+            bi = bj = 0
+            bz = -1e9
+            for iu in range(nx + 1):
+                for jv in range(ny + 1):
+                    if Z[iu][jv] > bz:
+                        bz, bi, bj = Z[iu][jv], iu, jv
+            pun, pvn = bi / nx, bj / ny
+        SX = np.zeros((nx + 1, ny + 1))
+        SY = np.zeros((nx + 1, ny + 1))
+        DEP = np.zeros((nx + 1, ny + 1))
+        PENV = np.full((nx + 1, ny + 1), black if black is not None else 0)
+        for iu in range(nx + 1):
+            u = iu / nx
+            for jv in range(ny + 1):
+                v = jv / ny
+                z = Z[iu][jv]
+                p = proj(i, u, v, z)
+                SX[iu, jv], SY[iu, jv] = p[0], p[1]
+                DEP[iu, jv] = -v + 0.2 * z
+                if top and math.hypot(u - pun, v - pvn) < 0.20:
+                    PENV[iu, jv] = accent if accent is not None else 0
+        _zbuf_terrain(out, SX, SY, DEP, feed=feed, PENV=PENV, PXW=220, PXH=170)
 
         # receptive-field window (red), larger toward the input (bottom)
         uc, vc = 0.52, 0.46
         hw = 0.13 - i * 0.02
-        zc = Z[int(vc * (ny - 1))][int(uc * (nx - 1))]
+        zc = Z[int(uc * nx)][int(vc * ny)]
         sq = [
             proj(i, uc - hw, vc - hw, zc),
             proj(i, uc + hw, vc - hw, zc),
@@ -2415,7 +2478,7 @@ def bauhaus_locality(
     out += _stroke_text(_spaced("DEEPER PATTERNS"), cxp, y0 + 15.0, 1.9, color=black, f=feed)
     out += _stroke_text(_spaced("A LARGER PICTURE"), cxp, y0 + 10.0, 1.9, color=black, f=feed)
 
-    # bottom mini-diagram: the receptive field shrinking grid → window → cell
+    # bottom mini-diagram: receptive field shrinking grid → window → cell
     mgx, mgy, celln, cs = x0 + 0.10 * W, y0 + 10.0, 6, 2.2
     stages = [(celln, 3), (celln, 2), (celln, 1)]
     sx = mgx
