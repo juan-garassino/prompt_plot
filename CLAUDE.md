@@ -198,8 +198,13 @@ orbits, plus marks, swatch bars, crosshair rules, spaced-caps `type_block`/`scal
 from the trained checkpoint), `bauhaus_gradient`
 (GRADIENT DESCENT — contour bowls + descent path), `bauhaus_resonance` (harmonograph),
 `bauhaus_loom` (FORWARD PASS — the perceptron rethought as an Anni-Albers weaving: a real
-weight matrix woven warp/weft, over/under by sign, float by magnitude; APPROVED). Retired:
-`bauhaus_perceptron` (kept in-file for version history, deregistered — superseded by the loom).
+weight matrix woven warp/weft, over/under by sign, float by magnitude; APPROVED),
+`bauhaus_decision` (DECISION SURFACE — the network drawn as its FUNCTION not its wiring: the
+exact iso-0 marching-squares knife through input space, ±margin shoulders opening a corridor,
+support-vector discs on the shoulders, point clouds coloured by the true sign of f; trained
+query directions from the checkpoint drive the readout when `weights=` is given; APPROVED).
+Retired: `bauhaus_perceptron` (kept in-file for version history, deregistered — superseded by
+the loom + decision pieces).
 Related one-off: `black_hole_bauhaus`. Renders go to ~/Downloads for voting; winners move
 to `leo/bauhaus/`.
 

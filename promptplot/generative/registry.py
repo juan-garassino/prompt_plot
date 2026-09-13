@@ -62,6 +62,7 @@ GENERATOR_REGISTRY = {
     "bauhaus_gradient": _b.bauhaus_gradient,
     "bauhaus_resonance": _b.bauhaus_resonance,
     "bauhaus_loom": _b.bauhaus_loom,
+    "bauhaus_decision": _b.bauhaus_decision,
     "gw150914": _p.gw150914,
 }
 
@@ -80,6 +81,7 @@ COMPOSITIONS = {
     "bauhaus_gradient",
     "bauhaus_resonance",
     "bauhaus_loom",
+    "bauhaus_decision",
     "gw150914",
 }
 

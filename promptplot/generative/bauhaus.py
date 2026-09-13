@@ -17,6 +17,8 @@ from typing import List, Optional, Sequence, Tuple
 from ..models import GCodeCommand
 from .generators import (
     _attention_matrix,
+    _chain_segments,
+    _marching_squares,
     _poly,
     _stroke_text,
     _text_width,
@@ -1019,4 +1021,242 @@ def bauhaus_loom(
     out += scale_footer(
         bounds, text="LAYER Q  52x34  WARP=IN WEFT=OUT", pen=black, height=2.2, f=feed
     )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# piece 08 — DECISION SURFACE (the network as its function, not its wiring)
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_decision(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    weights: str = "",
+    block: int = 0,
+    hidden: int = 6,
+    n_points: int = 120,
+    margin: float = 0.22,
+    boundary_passes: int = 3,
+    grid: int = 140,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """DECISION SURFACE — a neural network drawn as its decision FUNCTION, not
+    its wiring. A small readout f(u,v)=Σ aᵢ·tanh(Wᵢ·[u,v]+bᵢ) scores the input
+    plane; the bold black knife is the EXACT iso-0 contour (marching squares),
+    flanked by ±margin shoulders and the hidden-unit hyperplane creases the cut
+    visibly kinks on (the fingerprint of composition — no neuron drawn). Every
+    dot is coloured by the TRUE sign of f: blue = class +1, pink = class −1.
+    Trained query directions drive the readout when a checkpoint is given."""
+    import numpy as np
+
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    blue, pink, black = _pen(BLUE, colors), _pen(PINK, colors), _pen(BLACK, colors)
+    out: List[GCodeCommand] = []
+
+    # bands: title on top, field in the middle, footer below → the corner→corner
+    # cut lives in the field and never fights the type.
+    title_h, foot_h = 24.0, 12.0
+    fx0, fx1 = x0 + 6.0, x1 - 6.0
+    fy0, fy1 = y0 + foot_h, y1 - title_h
+    fw, fh = fx1 - fx0, fy1 - fy0
+    keep = _rect_keep((fx0, fy0, fx1, fy1))
+
+    def px2u(px: float) -> float:
+        return (px - fx0) / fw * 2.0 - 1.0
+
+    def py2v(py: float) -> float:
+        return (py - fy0) / fh * 2.0 - 1.0
+
+    def u2px(u: float) -> float:
+        return fx0 + (u + 1.0) / 2.0 * fw
+
+    def v2py(v: float) -> float:
+        return fy0 + (v + 1.0) / 2.0 * fh
+
+    # ---- the readout f(u,v) = Σ aᵢ tanh(Wᵢ·[u,v] + bᵢ) --------------------
+    Wq = None
+    if weights:
+        try:
+            Wq = _load_qkv(weights, block)[0]  # trained query matrix (~96×96)
+        except Exception:
+            Wq = None
+
+    def build_field(attempt: int):
+        """Return (W1, b1, a). Real path rotates which trained columns feed the
+        2D readout; fallback re-draws seeded gaussians at a shrinking scale."""
+        if Wq is not None:
+            C = Wq.shape[1]
+            c = (attempt * 2) % max(1, C - 3)
+            W1 = np.array(Wq[:hidden, c : c + 2], dtype=float)
+            b1 = np.array([float(Wq[i, (c + 2) % C]) for i in range(hidden)])
+            a = np.array(
+                [
+                    float(np.linalg.norm(Wq[i, :hidden]))
+                    * (1.0 if float(Wq[i].mean()) >= 0 else -1.0)
+                    for i in range(hidden)
+                ]
+            )
+        else:
+            sc = 1.6 * (0.82**attempt)
+            W1 = np.array([[rng.gauss(0, sc) for _ in range(2)] for _ in range(hidden)])
+            b1 = np.array([rng.gauss(0, 0.55) for _ in range(hidden)])
+            a = np.array([rng.gauss(0, 1.0) for _ in range(hidden)])
+        # normalise input scale so tanh isn't saturated flat
+        s = float(np.abs(W1).mean()) or 1.0
+        W1 = W1 / s * 1.7
+        return W1, b1, a
+
+    def eval_grid(W1, b1, a, us, vs):
+        U, V = np.meshgrid(us, vs)  # (ny, nx) → F[j][i], j indexes vs/ys
+        F = np.zeros_like(U)
+        for i in range(hidden):
+            F += a[i] * np.tanh(W1[i, 0] * U + W1[i, 1] * V + b1[i])
+        return F
+
+    def chains_at(F_list, xs, ys, iso, minlen=6):
+        segs = _marching_squares(F_list, xs, ys, iso)
+        return [c for c in _chain_segments(segs) if len(c) >= minlen]
+
+    def span(ch):
+        xs_ = [p[0] for p in ch]
+        ys_ = [p[1] for p in ch]
+        return math.hypot(max(xs_) - min(xs_), max(ys_) - min(ys_))
+
+    # ---- boundary-quality gate: pick the cleanest single folded knife -------
+    cxs = [fx0 + i * (fw / 44) for i in range(45)]
+    cys = [fy0 + j * (fh / 44) for j in range(45)]
+    cus = np.array([px2u(x) for x in cxs])
+    cvs = np.array([py2v(y) for y in cys])
+    best = None
+    for attempt in range(8):
+        W1, b1, a = build_field(attempt)
+        Fc = eval_grid(W1, b1, a, cus, cvs).tolist()
+        chs = chains_at(Fc, cxs, cys, 0.0)
+        if not chs:
+            continue
+        dom = max(chs, key=span)
+
+        def diag_score(ch):
+            xs_ = [p[0] for p in ch]
+            ys_ = [p[1] for p in ch]
+            dx, dy = max(xs_) - min(xs_), max(ys_) - min(ys_)
+            aspect = min(dx, dy) / (max(dx, dy) + 1e-9)  # 1 → true diagonal
+            return span(ch) * (0.35 + 0.65 * aspect)
+
+        # fewest components, then the longest chain that best spans the diagonal
+        score = (len(chs), -diag_score(dom))
+        if best is None or score < best[0]:
+            best = (score, (W1, b1, a))
+    if best is None:
+        W1, b1, a = build_field(0)
+    else:
+        W1, b1, a = best[1]
+
+    # ---- fine field, reused for boundary + both margins --------------------
+    xs = [fx0 + i * (fw / grid) for i in range(grid + 1)]
+    ys = [fy0 + j * (fh / grid) for j in range(grid + 1)]
+    us = np.array([px2u(x) for x in xs])
+    vs = np.array([py2v(y) for y in ys])
+    Fnp = eval_grid(W1, b1, a, us, vs)
+    # normalise field magnitude so `margin` is a consistent fraction of the
+    # range whatever the weight source (the iso-0 cut is scale-invariant, so
+    # only the shoulders + point classification depend on this).
+    fscale = float(np.percentile(np.abs(Fnp), 88)) or 1.0
+    a = a / fscale
+    F_list = (Fnp / fscale).tolist()
+
+    def offset_poly(pts, d):
+        n = len(pts)
+        res = []
+        for i, (px, py) in enumerate(pts):
+            ax, ay = pts[max(0, i - 1)]
+            bx, by = pts[min(n - 1, i + 1)]
+            tx, ty = bx - ax, by - ay
+            L = math.hypot(tx, ty) or 1.0
+            res.append((px - ty / L * d, py + tx / L * d))
+        return res
+
+    # ---- MARGIN SHOULDERS first (thin, so the knife overprints them) -------
+    for iso in (margin, -margin):
+        for ch in chains_at(F_list, xs, ys, iso):
+            for r in _clip_runs([ch], keep):
+                out += _poly(r, color=black, f=feed)
+
+    # ---- THE DECISION CUT: iso-0, the hero. The curve is already piecewise-
+    # bent (a NETWORK's boundary, not one perceptron's straight line); drawn as
+    # a solid multi-line knife. Secondary components stay a single quiet stroke.
+    b_chains = sorted(chains_at(F_list, xs, ys, 0.0), key=span, reverse=True)
+    for ci, ch in enumerate(b_chains):
+        for r in _clip_runs([ch], keep):
+            if len(r) < 2:
+                continue
+            offs = [-0.5, -0.25, 0.0, 0.25, 0.5] if ci == 0 else [0.0]
+            for d in offs:
+                out += _poly(offset_poly(r, d) if d else r, color=black, f=feed)
+
+    # ---- POINT CLOUDS labelled by the true sign of f ----------------------
+    def fval(u, v):
+        return sum(
+            float(a[i]) * math.tanh(float(W1[i, 0]) * u + float(W1[i, 1]) * v + float(b1[i]))
+            for i in range(hidden)
+        )
+
+    def dot(cx, cy, r, pen):
+        turns = max(1, int(r / 0.55))
+        n = max(10, int(r * 16))
+        pts = []
+        for k in range(n + 1):
+            t = k / n
+            ang = 2 * math.pi * turns * t
+            pts.append((cx + r * t * math.cos(ang), cy + r * t * math.sin(ang)))
+        return _poly(pts, color=pen, f=feed)
+
+    # 1:2 blue:pink mass — pink is the dense, loud field. A CLEAR corridor
+    # (|f|<0.7·margin) hugs the cut; a few big "support vector" discs sit on the
+    # shoulders (0.7·margin ≤ |f| < 1.5·margin); the rest is the small field.
+    n_blue = n_points // 3
+    n_pink = n_points - n_blue
+    want = {"b": n_blue, "p": n_pink}
+    got = {"b": [], "p": []}
+    sup = {"b": 0, "p": 0}
+    SUPMAX = 5
+    typebox = lambda px, py: px < fx0 + 0.30 * fw and py > fy1 - 0.14 * fh
+    tries = 0
+    while (len(got["b"]) < n_blue or len(got["p"]) < n_pink) and tries < 12000:
+        tries += 1
+        px = rng.uniform(fx0 + 2, fx1 - 2)
+        py = rng.uniform(fy0 + 2, fy1 - 2)
+        if typebox(px, py):
+            continue
+        val = fval(px2u(px), py2v(py))
+        key = "b" if val >= 0 else "p"
+        if len(got[key]) >= want[key]:
+            continue
+        av = abs(val)
+        if av < 0.7 * margin:  # the spine corridor stays a clean void
+            continue
+        if av < 1.5 * margin:  # support shoulder — a few big discs only
+            if sup[key] >= SUPMAX:
+                continue
+            sup[key] += 1
+            got[key].append((px, py, True))
+        else:
+            got[key].append((px, py, False))
+    for px, py, is_sup in got["b"]:
+        out += dot(px, py, 2.1 if is_sup else 1.0, blue)
+    for px, py, is_sup in got["p"]:
+        out += dot(px, py, 2.1 if is_sup else 1.0, pink)
+
+    # ---- FURNITURE on a shared left axis ----------------------------------
+    xT = x0 + 0.02 * W
+    out += type_block(["DECISION", "SURFACE"], xT, y1 - 5.0, height=3.2, pen=black, f=feed)
+    out += _stroke_text(
+        _spaced("THE CUT THROUGH INPUT SPACE"), xT, y1 - 19.0, 2.0, color=black, f=feed
+    )
+    out += swatch_bar(x1 - 9.0, y1 - 4.0, [black, blue, pink], size=2.6, f=feed)
+    out += plus_mark(fx1 - 0.16 * fw, fy0 + 0.12 * fh, s=1.4, pen=black, f=feed)
+    out += scale_footer(bounds, text="F(X)=SIGN(W.X+B)", pen=black, height=2.4, f=feed)
     return out

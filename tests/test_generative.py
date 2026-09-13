@@ -70,6 +70,7 @@ def test_all_generators_registered():
         "bauhaus_gradient",
         "bauhaus_resonance",
         "bauhaus_loom",
+        "bauhaus_decision",
         "gw150914",
     ]:
         assert expected in gens
@@ -217,6 +218,19 @@ def test_generator_within_bounds(name):
             assert x0 - 0.5 <= c.x <= x1 + 0.5, f"{name} x={c.x} out of bounds"
         if c.y is not None:
             assert y0 - 0.5 <= c.y <= y1 + 0.5, f"{name} y={c.y} out of bounds"
+
+
+def test_bauhaus_decision_deterministic_in_bounds():
+    x0, y0, x1, y1 = BOUNDS
+    a = run_generator("bauhaus_decision", BOUNDS, seed=7, colors=3)
+    b = run_generator("bauhaus_decision", BOUNDS, seed=7, colors=3)
+    assert a and b, "bauhaus_decision produced no commands"
+    assert [c.to_gcode() for c in a] == [c.to_gcode() for c in b], "bauhaus_decision not deterministic"
+    for c in a:
+        if c.x is not None:
+            assert x0 - 0.5 <= c.x <= x1 + 0.5, f"x={c.x} out of bounds"
+        if c.y is not None:
+            assert y0 - 0.5 <= c.y <= y1 + 0.5, f"y={c.y} out of bounds"
 
 
 def test_colors_produce_layers():
