@@ -3023,9 +3023,9 @@ def bauhaus_relevance(
     nv: int = 56,
     head: int = 0,
     tau: float = 0.55,
-    sigma_k: float = 0.052,
+    sigma_k: float = 0.10,
     sigma_q: float = 0.30,
-    basin_depth: float = 2.6,
+    basin_depth: float = 1.8,
     lean: float = 0.28,
     topk: int = 5,
     weights: str = "",
@@ -3077,11 +3077,14 @@ def bauhaus_relevance(
     def Kfield(wx, wz):
         tot = 0.0
         for m in range(n_keys):
-            tot += amp[m] * math.exp(-(((wx - kx[m]) ** 2 + (wz - kz[m]) ** 2) / (2 * sigma_k)))
+            # sigma_k is a std-dev in world units: crisp separate hills, not one
+            # fused range (2·σ² in the denominator — the σ-not-squared bug made
+            # every hill blur into a mountain massif).
+            tot += amp[m] * math.exp(-(((wx - kx[m]) ** 2 + (wz - kz[m]) ** 2) / (2 * sigma_k ** 2)))
         # carve the crater clean: suppress key mass inside the basin footprint
         core = math.hypot(wx - q_site[0], wz - q_site[1])
-        if core < 0.26:
-            tot *= 0.15 + 0.85 * (core / 0.26)
+        if core < 0.30:
+            tot *= 0.10 + 0.90 * (core / 0.30)
         return tot
 
     def Zf(wx, wz):
@@ -3114,7 +3117,7 @@ def bauhaus_relevance(
             SX[i, j], SY[i, j], DEP[i, j] = p[0], p[1], dep(wx, z * hs, wz)
     # pen law: BLACK = structure (dominant); RED = only the highest key crests;
     # BLUE = only the basin bowl (the captured attention mass, scarce + loud).
-    crest = float(np.percentile(Zg, 86))
+    crest = float(np.percentile(Zg, 93))  # red = only the truly top crests (scarce + loud)
     PV = np.full((nu + 1, nv + 1), blk)
     PV[(Zg > crest) & (Bg < 0.30)] = red
     PV[Bg > 0.42] = blue
