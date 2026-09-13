@@ -673,6 +673,9 @@ def bauhaus_weights(
 # ---------------------------------------------------------------------------
 
 
+# RETIRED (curation, no-schematics rule): a wiring diagram cannot be art. The
+# 'forward pass' concept is superseded by the ml-01 space-warping piece. Kept
+# for version history; deregistered from GENERATOR_REGISTRY.
 def bauhaus_perceptron(
     rng: SeededRNG,
     bounds: Bounds,

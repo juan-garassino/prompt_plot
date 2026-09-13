@@ -3608,27 +3608,18 @@ def black_hole(
         ey = ex * (y1 - y0) / max(1.0, (x1 - x0))
 
         def trace_stream(px_, py_, hdg, max_steps=900):
-            """Integrate one streamline through the blended field with dash duty."""
-            stroke = []
+            """One SMOOTH continuous streamline. Far from the disk (k small) it
+            relaxes to pure horizontal so nothing escapes diagonally to a
+            corner; it stops at the first occupancy collision (thinning without
+            dashes); the whole path is Catmull-Rom smoothed on emit."""
+            stroke = [(px_, py_)]
             s_cells: set = set()
             k_acc, k_n = 0.0, 1
-            acc = 0.0
-            nxt = dash_u
-            drawing = True
-
-            def emit():
-                nonlocal stroke, s_cells, k_acc, k_n
-                if len(stroke) >= 2:
-                    mean = min(1.0, k_acc / max(1, k_n))
-                    wv = 10.0 ** (lw_lo + mean * (lw_hi - lw_lo) * 0.85)
-                    curves.append((stroke, [wv] * len(stroke)))
-                    occ.update(s_cells)
-                stroke, s_cells = [], set()
-                k_acc, k_n = 0.0, 1
-
-            max_turn = 0.22
+            max_turn = 0.15
             for _ in range(max_steps):
                 vx, vy, k, tv = field(px_, py_, math.cos(hdg), math.sin(hdg))
+                if k < 0.14:  # no disk influence -> flatten, never ray out
+                    vx, vy = (1.0 if math.cos(hdg) >= 0 else -1.0), 0.0
                 des = math.atan2(vy, vx)
                 dlt = (des - hdg + math.pi) % (2 * math.pi) - math.pi
                 hdg += max(-max_turn, min(max_turn, dlt))
@@ -3636,28 +3627,19 @@ def black_hole(
                 py_ += 0.8 * math.sin(hdg)
                 if abs(px_) > ex or abs(py_) > ey or math.hypot(px_, py_) < 5.5:
                     break
-                acc += 0.8
-                if acc >= nxt:
-                    acc = 0.0
-                    duty = (1.0 - k) + k * (0.12 + 0.88 * tv**1.3)
-                    nxt = dash_u * (0.5 + 1.8 * duty)
-                    want = rng.random() < duty
-                    if not want and drawing:
-                        emit()
-                        drawing = False
-                    elif want:
-                        drawing = True
-                if drawing:
-                    cell = (int(px_ / u_sp), int(py_ / u_sp))
-                    if cell in occ and cell not in s_cells:
-                        emit()
-                        drawing = False
-                        continue
-                    s_cells.add(cell)
-                    stroke.append((px_, py_))
-                    k_acc += k * tv
-                    k_n += 1
-            emit()
+                cell = (int(px_ / u_sp), int(py_ / u_sp))
+                if cell in occ and cell not in s_cells:
+                    break  # merge into a denser neighbour; do not fragment
+                s_cells.add(cell)
+                stroke.append((px_, py_))
+                k_acc += k * tv
+                k_n += 1
+            if len(stroke) >= 3:
+                mean = min(1.0, k_acc / max(1, k_n))
+                wv = 10.0 ** (lw_lo + mean * (lw_hi - lw_lo) * 0.85)
+                sm, _ = _catmull_subdivide(stroke)
+                curves.append((sm, [wv] * len(sm)))
+                occ.update(s_cells)
 
         if bg_lines and backdrop == "mixed":
             # poster composition: scanline field sky + perspective floor fan
