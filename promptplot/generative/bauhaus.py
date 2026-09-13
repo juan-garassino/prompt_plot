@@ -1625,3 +1625,669 @@ def bauhaus_warped_frame(
     out += swatch_bar(x1 - 9.0, y0 + 22.0, [black, blue, pink], size=2.6, f=feed)
     out += scale_footer(bounds, text="B = 3 SQRT3 M", pen=black, height=2.4, f=feed)
     return out
+
+
+# ---------------------------------------------------------------------------
+# piece 10 — THE LONG NOW (LSTM cell state as one modulated memory band)
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_conveyor(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    weights: str = "",
+    block: int = 0,
+    steps: int = 64,
+    forget_events: int = 2,
+    write_events: int = 4,
+    band_max_frac: float = 0.20,
+    full_pitch: float = 0.9,
+    void_pitch: float = 5.0,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """THE LONG NOW — an LSTM's memory carried through time. The exact cell
+    update cₜ = fₜ·cₜ₋₁ + iₜ·gₜ runs across `steps`; the black conveyor band's
+    thickness AND ink density are |cₜ| (dense = strong memory, near-void where it
+    decays). Forget gates pinch the band to a thread; pink write-stitches inject
+    new information into one selvage; a thin blue ghost shows the prior value
+    being overwritten. Time is the horizontal axis."""
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    blue, pink, black = _pen(BLUE, colors), _pen(PINK, colors), _pen(BLACK, colors)
+    out: List[GCodeCommand] = []
+
+    dt = (0.78 * W) / steps
+    A = band_max_frac * H
+    yb = y0 + 0.46 * H
+    xL = x0 + 0.20 * W
+
+    # gate schedule — the fallback runs the SAME true recurrence as a real ckpt
+    f = [0.80 + 0.19 * rng.fbm(t * 0.11, 7.3) for t in range(steps)]
+    ig = [(0.15 + 0.10 * rng.fbm(t * 0.09, 2.1)) * (2.0 * rng.fbm(t * 0.07, 9.9) - 1.0) for t in range(steps)]
+
+    def scatter(nev):
+        idx = []
+        for k in range(nev):
+            base = (k + 1) / (nev + 1)
+            idx.append(int(min(steps - 2, max(1, (base + rng.uniform(-0.05, 0.05)) * steps))))
+        return sorted(set(idx))
+
+    forgets = scatter(forget_events)
+    writes = scatter(write_events)
+    for t in forgets:
+        f[t] = 0.06  # a scripted pinch-to-thread
+    deepest = forgets[len(forgets) // 2] if forgets else 0
+    for w in writes:
+        ig[w] = rng.choice([-1, 1]) * 0.9  # a strong signed injection
+    # the write just after the deepest forget is the loudest (cause & effect)
+    after = min([w for w in writes if w > deepest], default=None)
+    if after is not None:
+        ig[after] = math.copysign(1.15, ig[after])
+
+    c = 0.0
+    c_now, c_prev = [], []
+    for t in range(steps):
+        c_prev.append(c)
+        c = f[t] * c + ig[t]
+        c_now.append(c)
+    cmax = max(1e-6, max(abs(v) for v in c_now))
+    h = [max(0.6, A * abs(v) / cmax) for v in c_now]
+
+    xc = [xL + (t + 0.5) * dt for t in range(steps)]
+
+    # body — aligned horizontal striations clipped to the tube envelope: the
+    # number of lines at each column IS |cₜ|, so the ribbon swells with memory
+    # and collapses toward the baseline through a forget (density = tone).
+    nlev = int(A / full_pitch) + 1
+    for k in range(nlev + 1):
+        off = k * full_pitch
+        if off > A + 1e-6:
+            break
+        for sgn in ((1, -1) if k > 0 else (1,)):
+            run: List[Tuple[float, float]] = []
+            for t in range(steps):
+                if h[t] >= off:
+                    run.append((xc[t], yb + sgn * off))
+                elif len(run) >= 2:
+                    out += _poly(run, color=black, f=feed)
+                    run = []
+                else:
+                    run = []
+            if len(run) >= 2:
+                out += _poly(run, color=black, f=feed)
+
+    # smooth tube selvages (the rounded memory ribbon) + through-baseline
+    out += _poly([(xc[t], yb + h[t]) for t in range(steps)], color=black, f=feed)
+    out += _poly([(xc[t], yb - h[t]) for t in range(steps)], color=black, f=feed)
+    out += _poly([(xL, yb), (xc[-1], yb)], color=black, f=feed)
+
+    # blue prior-memory ghost in a clear lane below the band
+    yg = yb - A - 4.0
+    out += _poly([(xc[t], yg - A * 0.35 * abs(c_prev[t]) / cmax) for t in range(steps)], color=blue, f=feed)
+
+    # pink write-stitches into one selvage (sign of c picks top/bottom)
+    for w in writes:
+        top = c_now[w] >= 0
+        y_from = yb + h[w] if top else yb - h[w]
+        length = min(0.9 * h[w], A * abs(ig[w]) / cmax * 1.4)
+        length *= 1.3 if w == after else 1.0
+        y_to = y_from - length if top else y_from + length
+        out += _poly([(xc[w], y_from), (xc[w], y_to)], color=pink, f=feed)
+
+    # forget anchor — the singularity of forgetting, on the baseline
+    out += plus_mark(xc[deepest], yb, s=1.4, pen=black, f=feed)
+
+    xT = x0 + 0.02 * W
+    out += type_block(["THE LONG", "NOW"], xT, yb + 0.24 * H, height=3.2, pen=black, f=feed)
+    out += _stroke_text(_spaced("FORGET . WRITE . CARRY"), xT, yb + 0.10 * H, 2.0, color=black, f=feed)
+    out += swatch_bar(xT, yb - 0.02 * H, [black, blue, pink], size=2.6, f=feed)
+    real = bool(weights)
+    out += scale_footer(
+        bounds,
+        text=("GATES REAL RECURRENCE EXACT" if real else "GATES SYNTHETIC RECURRENCE EXACT"),
+        pen=black,
+        height=2.2,
+        f=feed,
+    )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# piece 11 — SETTLING (the perceptron boundary as a rotating sweep of errors)
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_settling(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    weights: str = "",
+    block: int = 0,
+    n_points: int = 90,
+    margin_gap: float = 0.14,
+    eta: float = 1.0,
+    max_epochs: int = 40,
+    ghost_lines: int = 16,
+    final_passes: int = 3,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """SETTLING — a perceptron's decision boundary drawn as MOTION: the line
+    that its own errors pushed into place. Real online Rosenblatt updates on a
+    seeded separable cloud leave a fan of successive boundary positions (black,
+    ghosting from wild to settled); the converged cut is the loud pink knife; the
+    2-3 misclassified points that rotated the boundary most are the scarce large
+    discs — the CAUSE of the cut. Time here is the learning."""
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    blue, pink, black = _pen(BLUE, colors), _pen(PINK, colors), _pen(BLACK, colors)
+    out: List[GCodeCommand] = []
+
+    fx0, fy0, fx1, fy1 = x0 + 0.24 * W, y0 + 8, x1 - 6, y1 - 8
+    fw, fh = fx1 - fx0, fy1 - fy0
+    fieldkeep = _rect_keep((fx0, fy0, fx1, fy1))
+
+    def dx2px(x):
+        return fx0 + (x + 1) / 2 * fw
+
+    def dy2py(y):
+        return fy0 + (y + 1) / 2 * fh
+
+    def make_data(phi, theta):
+        ws = (math.cos(phi), math.sin(phi))
+        pts, lab = [], []
+        tries = 0
+        while len(pts) < n_points and tries < n_points * 25:
+            tries += 1
+            x = (rng.uniform(-1, 1), rng.uniform(-1, 1))
+            s = ws[0] * x[0] + ws[1] * x[1] - theta
+            if abs(s) < margin_gap:
+                continue
+            pts.append(x)
+            lab.append(1 if s > 0 else -1)
+        return pts, lab
+
+    def train(pts, lab):
+        w = [0.0, 0.0]
+        b = 0.0
+        hist = []
+        for _ in range(max_epochs):
+            updated = False
+            for x, y in zip(pts, lab):
+                if (1 if (w[0] * x[0] + w[1] * x[1] + b) > 0 else -1) != y:
+                    w[0] += eta * y * x[0]
+                    w[1] += eta * y * x[1]
+                    b += eta * y
+                    hist.append((w[0], w[1], b, x, y))
+                    updated = True
+            if not updated:
+                break
+        return w, b, hist
+
+    # resample until the trajectory is long enough to read as a sweep
+    best = None
+    for _ in range(20):
+        phi = rng.uniform(0.35, 0.75) * math.pi
+        theta = rng.uniform(-0.15, 0.15)
+        pts, lab = make_data(phi, theta)
+        w, b, hist = train(pts, lab)
+        if best is None or len(hist) > len(best[4]):
+            best = (pts, lab, w, b, hist)
+        if len(hist) >= ghost_lines:
+            break
+    pts, lab, wf, bf, hist = best
+
+    def boundary_seg(wx, wy, bb):
+        n2 = wx * wx + wy * wy
+        if n2 < 1e-9:
+            return [(fx0, fy0), (fx0, fy0)]
+        ox, oy = -bb * wx / n2, -bb * wy / n2
+        dx, dy = -wy, wx
+        dl = math.hypot(dx, dy) or 1.0
+        dx, dy = dx / dl, dy / dl
+        L, N = 4.0, 48  # densify so _clip_runs keeps the in-rect portion
+        p0 = (ox - L * dx, oy - L * dy)
+        p1 = (ox + L * dx, oy + L * dy)
+        return [
+            (dx2px(p0[0] + (p1[0] - p0[0]) * t / N), dy2py(p0[1] + (p1[1] - p0[1]) * t / N))
+            for t in range(N + 1)
+        ]
+
+    def offset_poly(p, d):
+        n = len(p)
+        res = []
+        for i, (px, py) in enumerate(p):
+            ax, ay = p[max(0, i - 1)]
+            bx, by = p[min(n - 1, i + 1)]
+            tx, ty = bx - ax, by - ay
+            ln = math.hypot(tx, ty) or 1.0
+            res.append((px - ty / ln * d, py + tx / ln * d))
+        return res
+
+    # thinned scatter — quiet context so the sweep dominates
+    keepn = max(10, int(0.6 * len(pts)))
+    for (x, y) in list(zip(pts, lab))[:keepn]:
+        px, py = dx2px(x[0]), dy2py(x[1])
+        if y > 0:
+            out += fill_disc(px, py, 0.8, spacing=0.5, pen=blue, f=feed)
+        else:
+            out += circle(px, py, 0.9, pen=pink, f=feed)
+
+    # the fan of past-guess boundaries — subsample by EVEN ANGLE of the normal
+    # so it reads as one clean rotating sweep (a fan closing), not random sticks.
+    ang_all = [math.atan2(h[1], h[0]) for h in hist]
+    order = sorted(range(len(hist)), key=lambda i: ang_all[i])
+    if len(order) <= ghost_lines:
+        sel = order
+    else:
+        sel = [order[int(round(k * (len(order) - 1) / (ghost_lines - 1)))] for k in range(ghost_lines)]
+    final_ang = math.atan2(wf[1], wf[0])
+    for si in sel:
+        wx, wy, bb, _, _ = hist[si]
+        near = abs(math.atan2(math.sin(ang_all[si] - final_ang), math.cos(ang_all[si] - final_ang)))
+        for r in _clip_runs([boundary_seg(wx, wy, bb)], fieldkeep):
+            out += _poly(r, color=black, f=feed)
+            if near < 0.12:  # the ghosts nearest the settled angle gain weight
+                out += _poly(offset_poly(r, 0.3), color=black, f=feed)
+
+    # the hero: the converged cut, a bold pink knife that dominates at 3m
+    for r in _clip_runs([boundary_seg(wf[0], wf[1], bf)], fieldkeep):
+        for d in (-0.7, -0.42, -0.14, 0.14, 0.42, 0.7):
+            out += _poly(offset_poly(r, d), color=pink, f=feed)
+
+    # the scarce accent — the culprit points that rotated the boundary most
+    def angdiff(a, b):
+        return math.atan2(math.sin(a - b), math.cos(a - b))
+
+    angs = [math.atan2(h[1], h[0]) for h in hist]
+    rot = [0.0] + [abs(angdiff(angs[i], angs[i - 1])) for i in range(1, len(hist))]
+    top = sorted(range(len(hist)), key=lambda i: -rot[i])[:3]
+    for i in top:
+        _, _, _, cx, cy = hist[i]
+        px, py = dx2px(cx[0]), dy2py(cx[1])
+        _, _, _, _, yv = hist[i]
+        out += fill_disc(px, py, 2.2, spacing=0.5, pen=(blue if yv > 0 else pink), f=feed)
+        out += circle(px, py, 3.0, pen=black, f=feed)
+    if top:
+        _, _, _, c0, _ = hist[top[0]]
+        out += plus_mark(dx2px(c0[0]), dy2py(c0[1]), s=1.2, pen=black, f=feed)
+
+    xT = x0 + 0.02 * W
+    out += type_block(["SETTLING"], xT, y1 - 6.0, height=3.2, pen=black, f=feed)
+    out += _stroke_text(_spaced("THE LINE THAT ERRORS BUILT"), xT, y1 - 20.0, 2.0, color=black, f=feed)
+    out += swatch_bar(xT, y1 - 26.0, [black, blue, pink], size=3.0, f=feed)
+    out += scale_footer(bounds, text=f"W += Y X   {len(hist)} UPDATES", pen=black, height=2.4, f=feed)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# piece 12 — RELEVANCE TERRAIN (transformer Q·K score field as a sheared relief)
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_relevance(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    weights: str = "",
+    block: int = 0,
+    head: int = 0,
+    tokens: int = 40,
+    temp: float = 1.0,
+    levels: int = 16,
+    level_floor: float = 0.45,
+    grid: int = 110,
+    shear_deg: float = 33.0,
+    causal: bool = True,
+    min_chain: int = 8,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """RELEVANCE TERRAIN — a transformer's attention drawn as the LANDSCAPE of
+    who-is-relevant-to-whom. The raw pre-softmax compatibility field S=Q·Kᵀ/√d is
+    a relief; its marching-squares isolines (black), sheared so no framing axis
+    survives, are the terrain. A blue ridgeline of summit discs marks each query's
+    argmax key (the softmax verdict); the single global-max relevance is the one
+    scarce pink peak. Real trained Q/K when a checkpoint is given."""
+    import numpy as np
+
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    blue, pink, black = _pen(BLUE, colors), _pen(PINK, colors), _pen(BLACK, colors)
+    out: List[GCodeCommand] = []
+
+    fx0, fy0, fx1, fy1 = x0 + 0.20 * W, y0 + 8, x1 - 6, y1 - 8
+    fw, fh = fx1 - fx0, fy1 - fy0
+    frame_keep = _rect_keep((fx0, fy0, fx1, fy1))
+
+    S = _attention_matrix(rng, tokens, head, temp, causal, weights, block, return_scores=True)
+    A = _attention_matrix(rng, tokens, head, temp, causal, weights, block)  # softmax, for disc size
+    S = np.asarray(S, dtype=float)
+
+    # causal floor: the un-attendable upper triangle is a flat low plain, NOT a
+    # −1e9 cliff (which would spawn a spurious inked boundary).
+    if causal:
+        low = float(S[np.tril_indices(tokens)].min())
+        for q in range(tokens):
+            for k in range(q + 1, tokens):
+                S[q, k] = low - 0.05
+
+    # bilinear upsample S(q,k) → F[j][i] over index coords (i≡key, j≡query)
+    xs = [i * (tokens - 1) / grid for i in range(grid + 1)]
+    ys = [j * (tokens - 1) / grid for j in range(grid + 1)]
+
+    def bil(qf, kf):
+        q0, k0 = int(qf), int(kf)
+        q1, k1 = min(tokens - 1, q0 + 1), min(tokens - 1, k0 + 1)
+        tq, tk = qf - q0, kf - k0
+        return (
+            S[q0, k0] * (1 - tq) * (1 - tk)
+            + S[q0, k1] * (1 - tq) * tk
+            + S[q1, k0] * tq * (1 - tk)
+            + S[q1, k1] * tq * tk
+        )
+
+    F = [[bil(ys[j], xs[i]) for i in range(grid + 1)] for j in range(grid + 1)]
+
+    # shear+rotate map from (k,q) index space to a normalized frame so the causal
+    # diagonal becomes a mountain SPINE and no horizontal/vertical axis survives.
+    sh = math.tan(math.radians(shear_deg))
+    rot = math.radians(20.0)
+    cs, sn = math.cos(rot), math.sin(rot)
+
+    def raw(ki, qi):
+        a, c = ki / (tokens - 1) - 0.5, qi / (tokens - 1) - 0.5
+        a = a + sh * c
+        return a * cs - c * sn, a * sn + c * cs
+
+    corners = [raw(0, 0), raw(tokens - 1, 0), raw(0, tokens - 1), raw(tokens - 1, tokens - 1)]
+    rxs = [p[0] for p in corners]
+    rys = [p[1] for p in corners]
+    bcx, bcy = (min(rxs) + max(rxs)) / 2, (min(rys) + max(rys)) / 2
+    scale = 1.04 * max(fw / (max(rxs) - min(rxs)), fh / (max(rys) - min(rys)))
+    fcx, fcy = (fx0 + fx1) / 2, (fy0 + fy1) / 2
+
+    def to_paper(ki, qi):
+        rx, ry = raw(ki, qi)
+        return (fcx + (rx - bcx) * scale, fcy + (ry - bcy) * scale)
+
+    # isolevels in percentile space of the VALID (lower-tri) scores; drop the
+    # bottom ~level_floor so the low plain stays bare paper.
+    valid = np.array([S[q, k] for q in range(tokens) for k in range(q + 1)])
+    lo, hi = np.percentile(valid, 100 * level_floor), np.percentile(valid, 99)
+    isos = [lo + (hi - lo) * (t + 0.5) / levels for t in range(levels)]
+
+    for iso in isos:
+        segs = _marching_squares(F, xs, ys, iso)
+        for ch in _chain_segments(segs):
+            if len(ch) < min_chain:
+                continue
+            # causal clip in index space, then shear to paper
+            run = []
+            for (kv, qv) in ch:
+                if qv >= kv - 0.5:
+                    run.append(to_paper(kv, qv))
+                elif len(run) >= 2:
+                    for r in _clip_runs([run], frame_keep):
+                        out += _poly(r, color=black, f=feed)
+                    run = []
+                else:
+                    run = []
+            if len(run) >= 2:
+                for r in _clip_runs([run], frame_keep):
+                    out += _poly(r, color=black, f=feed)
+
+    # blue argmax summit ridgeline — each query's chosen key (the softmax verdict)
+    A = np.asarray(A, dtype=float)
+    summits = []
+    for q in range(tokens):
+        ks = A[q, : q + 1] if causal else A[q]
+        kstar = int(np.argmax(ks))
+        summits.append((q, kstar, float(A[q, kstar])))
+    rr = 0.02 * min(W, H)
+    order = sorted(range(tokens), key=lambda q: -summits[q][2])
+    big3 = set(order[:3])
+    gq, gk, gp = max(summits, key=lambda s: s[2])  # the single global max
+    for (q, kstar, p) in summits:
+        if (q, kstar) == (gq, gk):
+            continue
+        px, py = to_paper(kstar, q)
+        if not frame_keep((px, py)):
+            continue
+        r = max(1.4, rr * (0.4 + p) * 2.2)
+        out += fill_disc(px, py, r, spacing=0.5, pen=blue, f=feed)
+        if q in big3:
+            out += fill_disc(px, py, max(0.8, r - 0.6), spacing=0.5, pen=blue, f=feed)
+
+    # the one scarce pink peak — the single loudest relevance on the page
+    px, py = to_paper(gk, gq)
+    if frame_keep((px, py)):
+        out += fill_disc(px, py, max(2.2, rr * (0.4 + gp) * 2.6), spacing=0.5, pen=pink, f=feed)
+        out += circle(px, py, max(3.4, rr * (0.4 + gp) * 2.6 + 1.4), pen=pink, f=feed)
+
+    xT = x0 + 0.02 * W
+    out += type_block(["RELEVANCE", "TERRAIN"], xT, y1 - 7.0, height=3.2, pen=black, f=feed)
+    out += _stroke_text(_spaced("WHO IS RELEVANT TO WHOM"), xT, y1 - 21.0, 2.0, color=black, f=feed)
+    out += swatch_bar(x1 - 9.0, y1 - 4.0, [black, blue, pink], size=2.6, f=feed)
+    p0 = to_paper(0, 0)
+    out += plus_mark(p0[0], p0[1], s=1.4, pen=black, f=feed)
+    out += scale_footer(bounds, text="S = Q.KT / SQRT D", pen=black, height=2.4, f=feed)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# piece 13 — MEMORY IN TIME (LSTM as a vertical figure-8 of information loops)
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_memory(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    loops: int = 30,
+    steps: int = 440,
+    red_outer: int = 8,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """MEMORY IN TIME — an LSTM as a vertical figure-8 of nested INFORMATION
+    LOOPS on an INPUT→FORGET→MEMORY→UPDATE→OUTPUT gate axis. The recurrence is a
+    loop; two lobes (forget below, update above) meet at the carried MEMORY
+    waist. Black loops fill, the outer envelope is red; gate nodes mark where the
+    state is written, forgotten, and read. Fine-line, black + red."""
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    accent, black = _pen(PINK, colors), _pen(BLACK, colors)  # PINK slot rendered crimson
+    out: List[GCodeCommand] = []
+
+    cx = x0 + 0.44 * W
+    cy = y0 + 0.50 * H
+    halfH = 0.34 * H
+    Ax = 0.27 * W
+
+    # nested figure-8s: x=Ax·s·sin(2t+drift), y=Ay·s·sin(t) — crossing (MEMORY)
+    # at the center, forget lobe below, update lobe above; a slow phase drift
+    # weaves the waist so the family reads as looping information, not one curve.
+    for i in range(loops):
+        s = (i + 1) / loops
+        drift = s * 0.55
+        pts = []
+        for k in range(steps + 1):
+            t = 2 * math.pi * k / steps
+            yy = math.sin(t)
+            lobe = 1.22 if yy < 0 else 0.86  # forget lobe fuller than update lobe
+            x = cx + Ax * s * math.sin(2 * t + drift)
+            y = cy + halfH * s * math.copysign(abs(yy) ** 0.82, yy) * lobe  # rounder lobes
+            pts.append((x, y))
+        out += _poly(pts, color=(accent if i >= loops - red_outer else black), f=feed)
+
+    # the gate axis (dash-dot) INPUT (bottom) → OUTPUT (top)
+    ax_top, ax_bot = cy + halfH * 1.18 + 8, cy - halfH * 1.18 - 8
+    yv = ax_bot
+    dash = 0
+    while yv < ax_top:
+        seg = 4.0 if dash % 2 == 0 else 1.2
+        if dash % 2 == 0:
+            out += _poly([(cx, yv), (cx, min(ax_top, yv + seg))], color=black, f=feed)
+        yv += seg + 2.0
+        dash += 1
+
+    # gate nodes + labels (to the right of the axis)
+    lx = cx + Ax + 8
+    nodes = [
+        (cy + halfH * 1.18, "OUTPUT", "solid"),
+        (cy + halfH * 0.52, "UPDATE", "red"),
+        (cy, "MEMORY", "hollow"),
+        (cy - halfH * 0.52, "FORGET", "red"),
+        (cy - halfH * 1.18, "INPUT", "solid"),
+    ]
+    for ny, label, kind in nodes:
+        if kind == "solid":
+            out += fill_disc(cx, ny, 1.7, spacing=0.5, pen=black, f=feed)
+        elif kind == "red":
+            out += fill_disc(cx, ny, 1.7, spacing=0.5, pen=accent, f=feed)
+        else:  # hollow red (the carried state)
+            out += circle(cx, ny, 2.0, pen=accent, f=feed)
+        out += _stroke_text(_spaced(label), lx, ny - 1.3, 2.2, color=black, f=feed)
+
+    # title + caption (top-left / bottom-left)
+    xT = x0 + 0.03 * W
+    out += type_block(["LSTM"], xT, y1 - 6.0, height=4.2, pen=black, underline=False, f=feed)
+    out += _stroke_text(_spaced("MEMORY IN TIME"), xT, y1 - 16.0, 2.4, color=black, f=feed)
+    out += _stroke_text(_spaced("INFORMATION LOOPS"), xT, y0 + 30.0, 2.0, color=black, f=feed)
+    out += _stroke_text(_spaced("SELECT WHAT TO KEEP"), xT, y0 + 24.0, 2.0, color=black, f=feed)
+    out += _stroke_text(_spaced("LET GO . MOVE FORWARD"), xT, y0 + 18.0, 2.0, color=black, f=feed)
+
+    # bottom mini-diagram: the unrolled recurrence — loops with a gate dot + arrows
+    mx, my, mr = x0 + 0.50 * W, y0 + 12.0, 5.0
+    for c in range(3):
+        ccx = mx + c * (mr * 3.2)
+        out += circle(ccx, my, mr, pen=black, f=feed)
+        out += fill_disc(ccx - mr, my - mr * 0.2, 0.9, spacing=0.5, pen=black, f=feed)
+        if c < 2:
+            out += _poly([(ccx + mr + 1, my), (ccx + mr * 2.2 - 1, my)], color=black, f=feed)
+            out += _poly(
+                [(ccx + mr * 2.2 - 3, my + 1.2), (ccx + mr * 2.2 - 1, my), (ccx + mr * 2.2 - 3, my - 1.2)],
+                color=black,
+                f=feed,
+            )
+    out += _stroke_text("...", mx + 3 * (mr * 3.2), my - 1.5, 3.0, color=black, f=feed)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# piece 14 — LOCALITY IN SPACE (CNN as stacked wireframe feature-map terrains)
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_locality(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    layers: int = 5,
+    nx: int = 15,
+    ny: int = 15,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """LOCALITY IN SPACE — a CNN as a stack of feature-map TERRAINS. From PIXELS
+    (bottom, fine and flat) up to HIGH-ORDER FEATURES (top, few big smooth
+    mountains), each layer a wireframe relief in oblique projection. A red
+    receptive-field window is tracked up the stack, growing as depth sees a
+    larger picture. Fine-line black + red."""
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    accent, black = _pen(PINK, colors), _pen(BLACK, colors)  # PINK slot rendered crimson
+    out: List[GCodeCommand] = []
+
+    LW, DX, DY = 0.50 * W, 0.26 * W, 0.075 * H
+    base_x = x0 + 0.12 * W
+    base_y0 = y0 + 0.16 * H
+    gap = 0.132 * H
+
+    def layer_z(i):
+        freq = max(1.5, 7.5 - i * 1.4)
+        Z = [[rng.fbm(u / (nx - 1) * freq + i * 7.1, v / (ny - 1) * freq + i * 3.3) for u in range(nx)] for v in range(ny)]
+        lo = min(min(r) for r in Z)
+        hi = max(max(r) for r in Z)
+        rng_ = (hi - lo) or 1.0
+        return [[(Z[v][u] - lo) / rng_ for u in range(nx)] for v in range(ny)]
+
+    def proj(i, u, v, z):
+        zh = (0.006 + i * 0.040) * H  # pixels nearly flat → features tall
+        return (base_x + u * LW + v * DX, base_y0 + i * gap + v * DY + z * zh)
+
+    centers = []
+    for i in range(layers):
+        Z = layer_z(i)
+        for jv in range(ny):
+            v = jv / (ny - 1)
+            out += _poly([proj(i, iu / (nx - 1), v, Z[jv][iu]) for iu in range(nx)], color=black, f=feed)
+        for iu in range(nx):
+            u = iu / (nx - 1)
+            out += _poly([proj(i, u, jv / (ny - 1), Z[jv][iu]) for jv in range(ny)], color=black, f=feed)
+        # receptive-field window (red), larger toward the input (bottom)
+        uc, vc = 0.52, 0.46
+        hw = 0.13 - i * 0.014
+        zc = Z[int(vc * (ny - 1))][int(uc * (nx - 1))]
+        sq = [
+            proj(i, uc - hw, vc - hw, zc),
+            proj(i, uc + hw, vc - hw, zc),
+            proj(i, uc + hw, vc + hw, zc),
+            proj(i, uc - hw, vc + hw, zc),
+            proj(i, uc - hw, vc - hw, zc),
+        ]
+        out += _poly(sq, color=accent, f=feed)
+        centers.append(proj(i, uc, vc, zc))
+
+    # dashed red connectors up the receptive-field column
+    for i in range(layers - 1):
+        a, b = centers[i], centers[i + 1]
+        n = 9
+        for s in range(0, n, 2):
+            p0 = (a[0] + (b[0] - a[0]) * s / n, a[1] + (b[1] - a[1]) * s / n)
+            p1 = (a[0] + (b[0] - a[0]) * (s + 1) / n, a[1] + (b[1] - a[1]) * (s + 1) / n)
+            out += _poly([p0, p1], color=accent, f=feed)
+
+    # left depth arrow: PIXELS (bottom) ↔ HIGH-ORDER FEATURES (top)
+    ax = x0 + 0.05 * W
+    ay0, ay1 = base_y0, base_y0 + (layers - 1) * gap + 0.10 * H
+    out += _poly([(ax, ay0), (ax, ay1)], color=black, f=feed)
+    out += _poly([(ax - 1.4, ay1 - 3), (ax, ay1), (ax + 1.4, ay1 - 3)], color=black, f=feed)
+    out += _poly([(ax - 1.4, ay0 + 3), (ax, ay0), (ax + 1.4, ay0 + 3)], color=black, f=feed)
+    out += _stroke_text(_spaced("PIXELS"), ax - 2, ay0 - 5, 1.9, color=black, f=feed)
+    out += _stroke_text(_spaced("HIGH-ORDER"), ax - 2, ay1 + 6.5, 1.9, color=black, f=feed)
+    out += _stroke_text(_spaced("FEATURES"), ax - 2, ay1 + 2.0, 1.9, color=black, f=feed)
+
+    # title + caption
+    xT = x0 + 0.03 * W
+    out += type_block(["CNN"], xT, y1 - 6.0, height=4.2, pen=black, underline=False, f=feed)
+    out += _stroke_text(_spaced("LOCALITY IN SPACE"), xT, y1 - 16.0, 2.4, color=black, f=feed)
+    cxp = x0 + 0.58 * W
+    out += _stroke_text(_spaced("SMALL WINDOWS"), cxp, y0 + 20.0, 1.9, color=black, f=feed)
+    out += _stroke_text(_spaced("DEEPER PATTERNS"), cxp, y0 + 15.0, 1.9, color=black, f=feed)
+    out += _stroke_text(_spaced("A LARGER PICTURE"), cxp, y0 + 10.0, 1.9, color=black, f=feed)
+
+    # bottom mini-diagram: the receptive field shrinking grid → window → cell
+    mgx, mgy, celln, cs = x0 + 0.10 * W, y0 + 10.0, 6, 2.2
+    stages = [(celln, 3), (celln, 2), (celln, 1)]
+    sx = mgx
+    for si, (gn, winr) in enumerate(stages):
+        for r in range(gn + 1):
+            out += _poly([(sx, mgy + r * cs), (sx + gn * cs, mgy + r * cs)], color=black, f=feed)
+        for c in range(gn + 1):
+            out += _poly([(sx + c * cs, mgy), (sx + c * cs, mgy + gn * cs)], color=black, f=feed)
+        cc = gn / 2.0
+        out += _poly(
+            [
+                (sx + (cc - winr) * cs, mgy + (cc - winr) * cs),
+                (sx + (cc + winr) * cs, mgy + (cc - winr) * cs),
+                (sx + (cc + winr) * cs, mgy + (cc + winr) * cs),
+                (sx + (cc - winr) * cs, mgy + (cc + winr) * cs),
+                (sx + (cc - winr) * cs, mgy + (cc - winr) * cs),
+            ],
+            color=accent,
+            f=feed,
+        )
+        nxt = sx + gn * cs + 5
+        if si < len(stages) - 1:
+            out += _poly([(sx + gn * cs + 1, mgy + gn * cs / 2), (nxt - 1, mgy + gn * cs / 2)], color=black, f=feed)
+        sx = nxt + 4
+    return out

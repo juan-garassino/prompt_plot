@@ -64,6 +64,11 @@ GENERATOR_REGISTRY = {
     "bauhaus_loom": _b.bauhaus_loom,
     "bauhaus_decision": _b.bauhaus_decision,
     "bauhaus_warped_frame": _b.bauhaus_warped_frame,
+    "bauhaus_conveyor": _b.bauhaus_conveyor,
+    "bauhaus_settling": _b.bauhaus_settling,
+    "bauhaus_relevance": _b.bauhaus_relevance,
+    "bauhaus_memory": _b.bauhaus_memory,
+    "bauhaus_locality": _b.bauhaus_locality,
     "gw150914": _p.gw150914,
 }
 
@@ -84,6 +89,11 @@ COMPOSITIONS = {
     "bauhaus_loom",
     "bauhaus_decision",
     "bauhaus_warped_frame",
+    "bauhaus_conveyor",
+    "bauhaus_settling",
+    "bauhaus_relevance",
+    "bauhaus_memory",
+    "bauhaus_locality",
     "gw150914",
 }
 

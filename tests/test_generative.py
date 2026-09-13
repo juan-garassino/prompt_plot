@@ -71,6 +71,11 @@ def test_all_generators_registered():
         "bauhaus_resonance",
         "bauhaus_loom",
         "bauhaus_decision",
+        "bauhaus_conveyor",
+        "bauhaus_settling",
+        "bauhaus_relevance",
+        "bauhaus_memory",
+        "bauhaus_locality",
         "gw150914",
     ]:
         assert expected in gens

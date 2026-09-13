@@ -4062,11 +4062,20 @@ def pe_carpet(
 
 
 def _attention_matrix(
-    rng: SeededRNG, tokens: int, head: int, temp: float, causal: bool, weights: str, block: int
+    rng: SeededRNG,
+    tokens: int,
+    head: int,
+    temp: float,
+    causal: bool,
+    weights: str,
+    block: int,
+    return_scores: bool = False,
 ):
     """Per-head attention pattern: real trained Q/K when a .keras path is
     given (pure numpy, no TF), else a seeded synthetic head (diagonal band +
-    anchor columns). Rows softmax to 1 at temperature ``temp``."""
+    anchor columns). Rows softmax to 1 at temperature ``temp``. With
+    ``return_scores`` the RAW pre-softmax compatibility field S=(Q·Kᵀ)/√d is
+    returned (before any causal mask) — the honest score terrain."""
     import numpy as np
 
     X = np.zeros((tokens, 96))
@@ -4101,6 +4110,8 @@ def _attention_matrix(
                 if kk in anchors:
                     scores[q, kk] += 1.1
                 scores[q, kk] += 0.35 * rng.random()
+    if return_scores:
+        return scores.copy()  # raw pre-softmax, pre-mask
     if causal:
         for q in range(tokens):
             scores[q, q + 1 :] = -1e9
