@@ -2075,70 +2075,7 @@ def bauhaus_relevance(
                 SX[i, j], SY[i, j], DE[i, j] = p[0], p[1], dep(wx, wy, wz)
                 if penfn is not None:
                     PV[i, j] = penfn(wx, wz)
-        PXW, PXH = 210, 150
-        sxmin, sxmax = float(SX.min()) - 3, float(SX.max()) + 3
-        symin, symax = float(SY.min()) - 3, float(SY.max()) + 3
-        zb = np.full((PXH, PXW), -1e18)
-        PX = (SX - sxmin) / (sxmax - sxmin) * (PXW - 1)
-        PY = (SY - symin) / (symax - symin) * (PXH - 1)
-        dspan = float(DE.max() - DE.min()) or 1.0
-        bias = 0.02 * dspan
-
-        def tri(p0, p1, p2, d0, d1, d2):
-            minx = int(max(0, math.floor(min(p0[0], p1[0], p2[0]))))
-            maxx = int(min(PXW - 1, math.ceil(max(p0[0], p1[0], p2[0]))))
-            miny = int(max(0, math.floor(min(p0[1], p1[1], p2[1]))))
-            maxy = int(min(PXH - 1, math.ceil(max(p0[1], p1[1], p2[1]))))
-            if maxx < minx or maxy < miny:
-                return
-            den = (p1[1] - p2[1]) * (p0[0] - p2[0]) + (p2[0] - p1[0]) * (p0[1] - p2[1])
-            if abs(den) < 1e-9:
-                return
-            X, Y = np.meshgrid(np.arange(minx, maxx + 1), np.arange(miny, maxy + 1))
-            aa = ((p1[1] - p2[1]) * (X - p2[0]) + (p2[0] - p1[0]) * (Y - p2[1])) / den
-            bb = ((p2[1] - p0[1]) * (X - p2[0]) + (p0[0] - p2[0]) * (Y - p2[1])) / den
-            cc = 1 - aa - bb
-            ins = (aa >= -1e-4) & (bb >= -1e-4) & (cc >= -1e-4)
-            d = aa * d0 + bb * d1 + cc * d2
-            sub = zb[miny : maxy + 1, minx : maxx + 1]
-            m = ins & (d > sub)
-            sub[m] = d[m]
-
-        for i in range(nu):
-            for j in range(nv):
-                tri((PX[i, j], PY[i, j]), (PX[i + 1, j], PY[i + 1, j]), (PX[i + 1, j + 1], PY[i + 1, j + 1]), DE[i, j], DE[i + 1, j], DE[i + 1, j + 1])
-                tri((PX[i, j], PY[i, j]), (PX[i + 1, j + 1], PY[i + 1, j + 1]), (PX[i, j + 1], PY[i, j + 1]), DE[i, j], DE[i + 1, j + 1], DE[i, j + 1])
-
-        def vis(sx, sy, d):
-            px = int((sx - sxmin) / (sxmax - sxmin) * (PXW - 1))
-            py = int((sy - symin) / (symax - symin) * (PXH - 1))
-            if px < 0 or px >= PXW or py < 0 or py >= PXH:
-                return True
-            return d >= zb[py, px] - bias
-
-        def draw(idx):
-            run, cur = [], None
-            for (i, j) in idx:
-                if vis(SX[i, j], SY[i, j], DE[i, j]):
-                    pp = int(PV[i, j])
-                    if cur is None or pp == cur:
-                        run.append((SX[i, j], SY[i, j]))
-                        cur = pp
-                    else:
-                        if len(run) >= 2:
-                            out.extend(_poly(run, color=cur, f=feed))
-                        run, cur = [(SX[i, j], SY[i, j])], pp
-                else:
-                    if len(run) >= 2:
-                        out.extend(_poly(run, color=cur, f=feed))
-                    run, cur = [], None
-            if len(run) >= 2:
-                out.extend(_poly(run, color=cur, f=feed))
-
-        for i in range(nu + 1):
-            draw([(i, j) for j in range(nv + 1)])
-        for j in range(nv + 1):
-            draw([(i, j) for i in range(nu + 1)])
+        _zbuf_terrain(out, SX, SY, DE, feed=feed, PENV=PV)
 
     def near_anchor(wx, wz, r=0.24):
         for k, (px, py, _a) in enumerate(peaks):
