@@ -67,8 +67,11 @@ GENERATOR_REGISTRY = {
     "bauhaus_conveyor": _b.bauhaus_conveyor,
     "bauhaus_settling": _b.bauhaus_settling,
     "bauhaus_relevance": _b.bauhaus_relevance,
+    "bauhaus_relevance_v1": _b.bauhaus_relevance_v1,
     "bauhaus_memory": _b.bauhaus_memory,
+    "bauhaus_memory_v1": _b.bauhaus_memory_v1,
     "bauhaus_locality": _b.bauhaus_locality,
+    "bauhaus_locality_v1": _b.bauhaus_locality_v1,
     "bauhaus_manifold": _b.bauhaus_manifold,
     "gw150914": _p.gw150914,
 }
@@ -93,8 +96,11 @@ COMPOSITIONS = {
     "bauhaus_conveyor",
     "bauhaus_settling",
     "bauhaus_relevance",
+    "bauhaus_relevance_v1",
     "bauhaus_memory",
+    "bauhaus_memory_v1",
     "bauhaus_locality",
+    "bauhaus_locality_v1",
     "bauhaus_manifold",
     "gw150914",
 }

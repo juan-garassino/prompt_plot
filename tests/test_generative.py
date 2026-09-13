@@ -76,6 +76,9 @@ def test_all_generators_registered():
         "bauhaus_relevance",
         "bauhaus_memory",
         "bauhaus_locality",
+        "bauhaus_memory_v1",
+        "bauhaus_locality_v1",
+        "bauhaus_relevance_v1",
         "gw150914",
     ]:
         assert expected in gens

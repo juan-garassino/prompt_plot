@@ -20,6 +20,7 @@ from .generators import (
     _catmull_subdivide,
     _chain_segments,
     _dot,
+    _limit_overdraw,
     _marching_squares,
     _poly,
     _stroke_text,
@@ -285,6 +286,30 @@ def _zbuf_terrain(out, SX, SY, DEP, feed=2200, PENV=None, pen=None, PXW=210, PXH
         draw([(i, j) for j in range(C + 1)])
     for j in range(C + 1):
         draw([(i, j) for i in range(R + 1)])
+
+def _fit_out(out, bounds, inset=4.0):
+    """Safety net: if the emitted geometry spills the drawable, uniformly
+    shrink + centre ALL commands so the whole composition lands on paper."""
+    xs = [c.x for c in out if c.x is not None]
+    ys = [c.y for c in out if c.y is not None]
+    if not xs:
+        return out
+    x0, y0, x1, y1 = bounds
+    bx0, bx1, by0, by1 = min(xs), max(xs), min(ys), max(ys)
+    if bx0 >= x0 and bx1 <= x1 and by0 >= y0 and by1 <= y1:
+        return out
+    tw, th = (x1 - x0 - 2 * inset), (y1 - y0 - 2 * inset)
+    s = min(tw / max(1e-6, bx1 - bx0), th / max(1e-6, by1 - by0), 1.0)
+    cxs, cys = (bx0 + bx1) / 2, (by0 + by1) / 2
+    tcx, tcy = (x0 + x1) / 2, (y0 + y1) / 2
+    fitted = []
+    for c in out:
+        nx = tcx + (c.x - cxs) * s if c.x is not None else None
+        ny = tcy + (c.y - cys) * s if c.y is not None else None
+        fitted.append(c.model_copy(update={"x": (round(nx, 3) if nx is not None else None),
+                                           "y": (round(ny, 3) if ny is not None else None)}))
+    return fitted
+
 
 
 # ---------------------------------------------------------------------------
@@ -2001,7 +2026,7 @@ def bauhaus_settling(
 # ---------------------------------------------------------------------------
 
 
-def bauhaus_relevance(
+def bauhaus_relevance_v1(
     rng: SeededRNG,
     bounds: Bounds,
     colors: int = 4,
@@ -2185,7 +2210,7 @@ def bauhaus_relevance(
 # ---------------------------------------------------------------------------
 
 
-def bauhaus_memory(
+def bauhaus_memory_v1(
     rng: SeededRNG,
     bounds: Bounds,
     colors: int = 3,
@@ -2298,7 +2323,7 @@ def bauhaus_memory(
 # ---------------------------------------------------------------------------
 
 
-def bauhaus_locality(
+def bauhaus_locality_v1(
     rng: SeededRNG,
     bounds: Bounds,
     colors: int = 3,
@@ -2630,3 +2655,532 @@ def bauhaus_manifold(
     out += _stroke_text(_spaced("ACTIVATION"), rx, cy0 - 0.03 * H, 1.7, color=accent, f=feed)
     out += _stroke_text(_spaced("LINEAR TRANSFORM"), rx, cy0 - 0.30 * H, 1.7, color=black, f=feed)
     return out
+
+
+# ---------------------------------------------------------------------------
+# LSTM — MEMORY IN TIME (descending cell-state helix; studio rework)
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_memory(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 3,
+    turns: int = 13,
+    k_spiral: float = 1.15,
+    lobe: float = 0.58,
+    gate_strengths: Tuple[float, float, float] = (0.90, 0.55, 0.85),
+    jitter: float = 0.05,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """MEMORY IN TIME — an LSTM as a DESCENDING CELL-STATE HELIX: a 3D spiral
+    staircase of recurrence (one turn = one time step) rendered with hidden-line
+    occlusion, so near turns hide far turns and time reads as real depth. Each
+    turn lands somewhere new (log-spiral radius + seeded per-turn transform),
+    and three GATES warp the coil sideways as flow attractors (FORGET pinches,
+    INPUT/OUTPUT bulge) — gates warp, they do not annotate. Black = carried cell
+    state; crimson = the gates + the one traced 'now' step."""
+    import numpy as np
+
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    accent, black = _pen(PINK, colors), _pen(BLACK, colors)
+    out: List[GCodeCommand] = []
+
+    cx0, cy0 = x0 + 0.42 * W, y0 + 0.50 * H
+    a, bwy, cd = 0.26 * W, 0.235 * H, 0.055 * H
+
+    def proj(wx, wy, wz):
+        return (cx0 + (wx - wz) * a, cy0 + wy * bwy - (wx + wz) * cd)
+
+    def depth(wx, wy, wz):
+        return (wx + wz) + 0.12 * wy
+
+    N = turns
+    Hy = 1.35
+    R0, R_MIN, A_MAX = 0.95, 0.16, 0.42
+    gy = (0.85 * Hy, 0.0, -0.85 * Hy)  # FORGET(low/near-input), INPUT(waist), OUTPUT(high)
+    gsig = (0.30, 0.18, 0.30)
+    gsign = (-1.0, 1.0, 1.0)  # forget contracts, input/output bulge
+
+    def gate_warp(wy):
+        return sum(
+            gsign[g] * gate_strengths[g] * A_MAX * math.exp(-((wy - gy[g]) / gsig[g]) ** 2)
+            for g in range(3)
+        )
+
+    # per-turn seeded transformation (different path each iteration)
+    tj = [1.0 + jitter * rng.gauss(0, 1) for _ in range(N + 1)]
+
+    def coil_pt(t):
+        phi = 2 * math.pi * N * t
+        wy = Hy - 2 * Hy * t
+        R = max(R0 * math.exp(-k_spiral * t), R_MIN)
+        jr = tj[min(N, int(t * N))]
+        rad = R * (1 - lobe * math.cos(phi)) * jr
+        wx = rad * math.cos(phi) + gate_warp(wy)
+        wz = rad * math.sin(phi)
+        return wx, wy, wz
+
+    M = N * 170
+    world = [coil_pt(i / M) for i in range(M + 1)]
+    scr = [proj(*p) for p in world]
+    dps = [depth(*p) for p in world]
+
+    # inline z-buffer: sweep a thin ribbon (+/-0.5mm screen normal) to occlude
+    PXW, PXH = 240, 360
+    sxs = [s[0] for s in scr]
+    sys = [s[1] for s in scr]
+    sxmin, sxmax = min(sxs) - 3, max(sxs) + 3
+    symin, symax = min(sys) - 3, max(sys) + 3
+    zb = np.full((PXH, PXW), -1e18)
+
+    def topx(sx, sy):
+        return ((sx - sxmin) / (sxmax - sxmin) * (PXW - 1), (sy - symin) / (symax - symin) * (PXH - 1))
+
+    def rails(i):
+        j0, j1 = max(0, i - 1), min(M, i + 1)
+        tx, ty = scr[j1][0] - scr[j0][0], scr[j1][1] - scr[j0][1]
+        L = math.hypot(tx, ty) or 1.0
+        nx, ny = -ty / L * 0.5, tx / L * 0.5
+        return (scr[i][0] + nx, scr[i][1] + ny), (scr[i][0] - nx, scr[i][1] - ny)
+
+    def fill_tri(p0, p1, p2, d):
+        pp = [topx(*p0), topx(*p1), topx(*p2)]
+        minx = int(max(0, math.floor(min(q[0] for q in pp))))
+        maxx = int(min(PXW - 1, math.ceil(max(q[0] for q in pp))))
+        miny = int(max(0, math.floor(min(q[1] for q in pp))))
+        maxy = int(min(PXH - 1, math.ceil(max(q[1] for q in pp))))
+        if maxx < minx or maxy < miny:
+            return
+        (x0p, y0p), (x1p, y1p), (x2p, y2p) = pp
+        den = (y1p - y2p) * (x0p - x2p) + (x2p - x1p) * (y0p - y2p)
+        if abs(den) < 1e-9:
+            return
+        X, Y = np.meshgrid(np.arange(minx, maxx + 1), np.arange(miny, maxy + 1))
+        aa = ((y1p - y2p) * (X - x2p) + (x2p - x1p) * (Y - y2p)) / den
+        bb = ((y2p - y0p) * (X - x2p) + (x0p - x2p) * (Y - y2p)) / den
+        cc = 1 - aa - bb
+        ins = (aa >= -1e-3) & (bb >= -1e-3) & (cc >= -1e-3)
+        sub = zb[miny : maxy + 1, minx : maxx + 1]
+        m = ins & (d > sub)
+        sub[m] = d
+
+    ra = [rails(i) for i in range(M + 1)]
+    for i in range(M):
+        (a0, b0), (a1, b1) = ra[i], ra[i + 1]
+        d = max(dps[i], dps[i + 1])
+        fill_tri(a0, b0, b1, d)
+        fill_tri(a0, b1, a1, d)
+
+    dmax = max(dps)
+    dmin = min(dps)
+    dmid = 0.5 * (dmax + dmin)
+    bias = 0.02 * (dmax - dmin or 1.0)
+
+    def vis(i):
+        px, py = topx(*scr[i])
+        ix, iy = int(px), int(py)
+        if ix < 0 or ix >= PXW or iy < 0 or iy >= PXH:
+            return True
+        return dps[i] >= zb[iy, ix] - bias
+
+    # emit visible coil runs (near turns double-pass for weight)
+    run = []
+    for i in range(M + 1):
+        if vis(i):
+            run.append((scr[i], dps[i]))
+        elif len(run) >= 2:
+            pts = [p for p, _ in run]
+            out += _poly(pts, color=black, f=feed)
+            if run[len(run) // 2][1] > dmid:
+                out += _poly(pts, color=black, f=feed)
+            run = []
+        else:
+            run = []
+    if len(run) >= 2:
+        pts = [p for p, _ in run]
+        out += _poly(pts, color=black, f=feed)
+
+    # faint background: orbit-ghosts + starfield (top-right void)
+    for e in range(2):
+        ea, eb = (0.30 + 0.06 * e) * W, (0.34 + 0.05 * e) * H
+        seg = []
+        for kk in range(181):
+            ang = 2 * math.pi * kk / 180
+            pt = (cx0 + ea * 0.5 * math.cos(ang), cy0 + eb * 0.5 * math.sin(ang))
+            if kk % 7 < 3:
+                seg.append(pt)
+            elif len(seg) >= 2:
+                out += _poly(seg, color=black, f=feed)
+                seg = []
+            else:
+                seg = []
+    for _ in range(14):
+        out += _dot(rng.uniform(x0 + 0.55 * W, x1 - 4), rng.uniform(y0 + 0.55 * H, y1 - 4), rng.uniform(0.3, 0.8), color=black, f=feed)
+
+    # carried-state axis: full-height, UN-TAPERED (tightening = foreshortening, not decay)
+    at, ab = proj(0, -Hy, 0), proj(0, Hy, 0)
+    out += _poly([ab, at], color=black, f=feed)
+    out += _poly([(at[0] - 1.6, at[1] + 4), at, (at[0] + 1.6, at[1] + 4)], color=black, f=feed)
+
+    # gates: red warp glyphs (dot + equipotential arcs + a streamline merging into the coil)
+    for g in range(3):
+        gp = proj(0.0, gy[g], 0.0)
+        # nearest coil point at this height → the deflected turn
+        best_i = min(range(M + 1), key=lambda i: abs(world[i][1] - gy[g]) + 0.001 * abs(world[i][2]))
+        cp = scr[best_i]
+        strength = gate_strengths[g]
+        gx = gp[0] + (18 if gsign[g] > 0 else -18)
+        out += _dot(gx, gp[1], 1.4 + strength, color=accent, f=feed)
+        for r in range(2 + int(strength * 2)):
+            rr = 3.0 + r * 2.2
+            arc = [(gx + rr * math.cos(math.radians(th)), gp[1] + rr * math.sin(math.radians(th))) for th in range(-70, 71, 12)]
+            out += _poly(arc, color=accent, f=feed)
+        out += _poly([(gx, gp[1]), (0.5 * (gx + cp[0]), 0.5 * (gp[1] + cp[1])), cp], color=accent, f=feed)
+
+    # the 'now' turn — one outermost early turn traced in red, offset outward
+    t_now = 0.06
+    nowpts = []
+    for k in range(171):
+        wx, wy, wz = coil_pt(t_now + k / 170 / N)
+        s = proj(wx, wy, wz)
+        nowpts.append((s[0] + 0.8, s[1]))
+    out += _poly(nowpts, color=accent, f=feed)
+    out += _poly(nowpts, color=accent, f=feed)
+
+    # three axis nodes (LATENT drawn last, on top)
+    out += fill_disc(ab[0], ab[1], 2.0, spacing=0.5, pen=black, f=feed)
+    out += fill_disc(at[0], at[1], 2.0, spacing=0.5, pen=black, f=feed)
+    lat = proj(0, 0, 0)
+    out += circle(lat[0], lat[1], 2.6, pen=accent, f=feed)
+    out += _stroke_text(_spaced("INPUT"), ab[0] + 5, ab[1] - 1, 2.0, color=black, f=feed)
+    out += _stroke_text(_spaced("LATENT"), lat[0] + 5, lat[1] - 1, 2.0, color=accent, f=feed)
+    out += _stroke_text(_spaced("OUTPUT"), at[0] + 5, at[1] - 1, 2.0, color=black, f=feed)
+
+    # furniture (flush-left margin)
+    xT = x0 + 0.03 * W
+    out += type_block(["LSTM"], xT, y1 - 6.0, height=3.4, pen=black, underline=False, f=feed)
+    out += _stroke_text(_spaced("MEMORY IN TIME"), xT, y1 - 15.0, 2.0, color=black, f=feed)
+    out += swatch_bar(xT, y0 + 26.0, [black, accent], size=2.6, f=feed)
+    out += scale_footer(bounds, text="M 1:80", pen=black, height=2.4, f=feed)
+    return _fit_out(out, bounds)
+
+
+# ---------------------------------------------------------------------------
+# CNN — FROM PIXELS TO MEANING (rising valley + receptive-field frustum; rework)
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_locality(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 2,
+    layers: int = 5,
+    nx: int = 42,
+    ny: int = 42,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """FROM PIXELS TO MEANING — a CNN as a rising valley of feature terrains
+    (hidden-line occluded), each layer changing MORPHOLOGY with depth via a
+    depth-varying box-blur: crunchy PIXELS → smooth OBJECT peaks. One crimson
+    RECEPTIVE-FIELD frustum climbs from a small input patch to the tallest
+    high-level peak — the single thread of data being abstracted. Diagonal
+    recession so 'resolution down / abstraction up' is the reading axis."""
+    import numpy as np
+
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    accent, black = _pen(PINK, colors), _pen(BLACK, colors)
+    out: List[GCodeCommand] = []
+
+    LW, DX, DY = 0.50 * W, 0.24 * W, 0.065 * H
+    gap, STAGGER_X = 0.150 * H, 0.045 * W
+    base_x, base_y0 = x0 + 0.085 * W, y0 + 0.135 * H
+    freqs = [11.0, 6.5, 3.8, 2.4, 1.6]
+    amps = [0.004, 0.028, 0.075, 0.140, 0.190]
+    uc, vc = 0.46, 0.42
+
+    def proj(i, u, v, z):
+        return (base_x + u * LW + v * DX + i * STAGGER_X, base_y0 + i * gap + v * DY + z * amps[min(i, 4)] * H)
+
+    def dep(i, v, z):
+        return -v + 0.28 * z + 0.6 * i
+
+    def box_blur(Z):
+        B = Z.copy()
+        B[1:-1, 1:-1] = 0.2 * (Z[1:-1, 1:-1] + Z[:-2, 1:-1] + Z[2:, 1:-1] + Z[1:-1, :-2] + Z[1:-1, 2:])
+        return B
+
+    def layer_z(i):
+        fr = freqs[min(i, 4)]
+        Z = np.array([[rng.fbm(iu / nx * fr + i * 11.3, jv / ny * fr + i * 5.7) for jv in range(ny + 1)] for iu in range(nx + 1)])
+        for _ in range(i):
+            Z = box_blur(Z)
+        lo, hi = float(Z.min()), float(Z.max())
+        return (Z - lo) / ((hi - lo) or 1.0)
+
+    Zs = []
+    for i in range(layers):
+        Z = layer_z(i)
+        top = i == layers - 1
+        pun = pvn = 0.5
+        if top:
+            bi, bj = np.unravel_index(int(np.argmax(Z)), Z.shape)
+            gg = np.array([[math.exp(-(((iu - bi) ** 2 + (jv - bj) ** 2) / (2 * (0.28 * nx) ** 2))) for jv in range(ny + 1)] for iu in range(nx + 1)])
+            Z = Z * (0.35 + 0.65 * gg)
+            Z = (Z - float(Z.min())) / ((float(Z.max()) - float(Z.min())) or 1.0)
+            pun, pvn = bi / nx, bj / ny
+        Zs.append(Z)
+        SX = np.zeros((nx + 1, ny + 1))
+        SY = np.zeros((nx + 1, ny + 1))
+        DEP = np.zeros((nx + 1, ny + 1))
+        PENV = np.full((nx + 1, ny + 1), black if black is not None else 0)
+        for iu in range(nx + 1):
+            u = iu / nx
+            for jv in range(ny + 1):
+                v = jv / ny
+                z = Z[iu, jv]
+                p = proj(i, u, v, z)
+                SX[iu, jv], SY[iu, jv], DEP[iu, jv] = p[0], p[1], dep(i, v, z)
+                if top and math.hypot(u - pun, v - pvn) < 0.16:
+                    PENV[iu, jv] = accent if accent is not None else 0
+        _zbuf_terrain(out, SX, SY, DEP, feed=feed, PENV=PENV, PXW=230, PXH=180)
+
+    # top-layer object contours (faint black, skip the crimson cap)
+    top = layers - 1
+    Zt = Zs[top]
+    xs = [proj(top, iu / nx, 0.5, 0)[0] for iu in range(nx + 1)]
+    ys = [proj(top, 0.5, jv / ny, 0)[1] for jv in range(ny + 1)]
+    # (contours drawn in surface space below via marching squares over index grid)
+    F = [[float(Zt[iu, jv]) for iu in range(nx + 1)] for jv in range(ny + 1)]
+    gi = list(range(nx + 1))
+    gj = list(range(ny + 1))
+    bi2, bj2 = np.unravel_index(int(np.argmax(Zt)), Zt.shape)
+    for lv in range(1, 6):
+        iso = 0.45 + 0.5 * lv / 6.0
+        for ch in _chain_segments(_marching_squares(F, gi, gj, iso)):
+            if len(ch) < 5:
+                continue
+            pts = []
+            for (ii, jj) in ch:
+                if math.hypot(ii / nx - pun, jj / ny - pvn) < 0.16:
+                    continue
+                z = Zt[int(min(nx, max(0, ii)))][int(min(ny, max(0, jj)))]
+                pts.append(proj(top, ii / nx, jj / ny, z))
+            if len(pts) >= 2:
+                out += _poly(pts, color=black, f=feed)
+
+    # receptive-field frustum (crimson): growing draped window + 4 rails + centre dots
+    def surf_z(i, u, v):
+        return float(Zs[i][int(min(nx, max(0, round(u * nx))))][int(min(ny, max(0, round(v * ny))))])
+
+    corner_paths = [[], [], [], []]
+    for i in range(layers):
+        hw = 0.045 + 0.052 * i
+        cs = [(uc - hw, vc - hw), (uc + hw, vc - hw), (uc + hw, vc + hw), (uc - hw, vc + hw)]
+        sq = [proj(i, cu, cv, surf_z(i, cu, cv)) for (cu, cv) in cs]
+        out += _poly(sq + [sq[0]], color=accent, f=feed)
+        for k, (cu, cv) in enumerate(cs):
+            corner_paths[k].append(proj(i, cu, cv, surf_z(i, cu, cv)))
+        out += _dot(*proj(i, uc, vc, surf_z(i, uc, vc)), 1.1, color=accent, f=feed)
+    for path in corner_paths:
+        out += _poly(path, color=accent, f=feed)
+
+    # left abstraction/resolution axis (one honest rule, not a schematic)
+    ax = x0 + 0.05 * W
+    ay0, ay1 = base_y0, base_y0 + (layers - 1) * gap + 0.12 * H
+    out += _poly([(ax, ay0), (ax, ay1)], color=black, f=feed)
+    out += _poly([(ax - 1.4, ay1 - 3), (ax, ay1), (ax + 1.4, ay1 - 3)], color=black, f=feed)
+    out += _poly([(ax - 1.4, ay0 + 3), (ax, ay0), (ax + 1.4, ay0 + 3)], color=black, f=feed)
+    out += _stroke_text(_spaced("MORE ABSTRACTION"), ax - 2, ay1 + 4, 1.7, color=black, f=feed)
+    out += _stroke_text(_spaced("SPATIAL RESOLUTION"), ax - 2, ay0 - 5, 1.7, color=black, f=feed)
+
+    lbls = ["PIXELS", "EDGES", "TEXTURES", "PARTS", "OBJECTS"]
+    for i in range(layers):
+        p = proj(i, 1.0, 0.5, 0.5)
+        out += _stroke_text(_spaced(lbls[min(i, 4)]), p[0] + 5, p[1], 1.6, color=black, f=feed)
+
+    xT = x0 + 0.03 * W
+    out += type_block(["CNN"], xT, y1 - 6.0, height=4.2, pen=black, underline=False, f=feed)
+    out += _stroke_text(_spaced("FROM PIXELS TO MEANING"), xT, y1 - 16.0, 2.4, color=black, f=feed)
+    out += scale_footer(bounds, text="M 1:80", pen=black, height=2.4, f=feed)
+    return _fit_out(out, bounds)
+
+
+# ---------------------------------------------------------------------------
+# TRANSFORMER — ATTENTION AS TOPOGRAPHY (single-query basin; studio rework)
+# ---------------------------------------------------------------------------
+
+
+def bauhaus_relevance(
+    rng: SeededRNG,
+    bounds: Bounds,
+    colors: int = 4,
+    tokens: int = 28,
+    n_keys: int = 34,
+    nu: int = 56,
+    nv: int = 56,
+    head: int = 0,
+    tau: float = 0.55,
+    sigma_k: float = 0.052,
+    sigma_q: float = 0.30,
+    basin_depth: float = 2.6,
+    lean: float = 0.28,
+    topk: int = 5,
+    weights: str = "",
+    block: int = 0,
+    feed: int = 2200,
+) -> List[GCodeCommand]:
+    """ATTENTION AS TOPOGRAPHY — one query's attention as a gravitational BASIN
+    carved into a field of key-hills. The most-resonant query bends the key field:
+    high-weight keys lean/stretch into the sink, softmax rings ride the pit wall
+    (green), and a value→output ribbon plunges through the basin and rises out the
+    far side (content reshaped by the gravity of context). Blue = the captured
+    attention mass, red = key crests, green = probability + value flow."""
+    import numpy as np
+
+    x0, y0, x1, y1 = bounds
+    W, H = x1 - x0, y1 - y0
+    blue, red, green, blk = 0, 1, 2, 3
+    out: List[GCodeCommand] = []
+
+    # 1. real attention (single source of truth)
+    S = np.asarray(_attention_matrix(rng, tokens, head, temp=tau, causal=False, weights=weights, block=block, return_scores=True), dtype=float)
+    S = (S - S.min()) / (S.max() - S.min() + 1e-9)
+    qi = int(np.argmax(S.max(axis=1)))
+    sim = S[qi]
+    w = np.exp(sim / tau)
+    w = w / w.sum()
+
+    # 2. key field — scattered hills; high-weight keys placed near basin site
+    order = list(np.argsort(-w))
+    kx = [rng.uniform(-0.85, 0.85) for _ in range(n_keys)]
+    kz = [rng.uniform(-0.85, 0.85) for _ in range(n_keys)]
+    q_site = (0.35 + rng.uniform(-0.05, 0.05), -0.15 + rng.uniform(-0.05, 0.05))
+    slots = sorted(range(n_keys), key=lambda m: math.hypot(kx[m] - q_site[0], kz[m] - q_site[1]))
+    wk = [0.02] * n_keys
+    amp = [0.55 + 0.45 * rng.random() for _ in range(n_keys)]
+    for rank, tok in enumerate(order[:n_keys]):
+        m = slots[rank]
+        wk[m] = float(w[tok])
+    # lean high-weight keys toward the sink
+    for m in range(n_keys):
+        kx[m] += lean * wk[m] * (q_site[0] - kx[m])
+        kz[m] += lean * wk[m] * (q_site[1] - kz[m])
+
+    sigma_b = 0.22
+
+    def Bfield(wx, wz):
+        return math.exp(-(((wx - q_site[0]) ** 2 + (wz - q_site[1]) ** 2) / (2 * sigma_b ** 2)))
+
+    def Kfield(wx, wz):
+        tot = 0.0
+        for m in range(n_keys):
+            tot += amp[m] * math.exp(-(((wx - kx[m]) ** 2 + (wz - kz[m]) ** 2) / (2 * sigma_k)))
+        # carve the crater clean: suppress key mass inside the basin footprint
+        core = math.hypot(wx - q_site[0], wz - q_site[1])
+        if core < 0.26:
+            tot *= 0.15 + 0.85 * (core / 0.26)
+        return tot
+
+    def Zf(wx, wz):
+        return Kfield(wx, wz) - basin_depth * Bfield(wx, wz)
+
+    # 4. project + z-buffer
+    cx, cy = x0 + 0.52 * W, y0 + 0.50 * H
+    a, cd, bwy = 0.29 * W, 0.070 * H, 0.20 * H
+    hs = 0.9
+
+    def proj(wx, wy, wz):
+        return (cx + (wx - wz) * a, cy + wy * bwy - (wx + wz) * cd)
+
+    def dep(wx, wy, wz):
+        return (wx + wz) + 0.12 * wy
+
+    SX = np.zeros((nu + 1, nv + 1))
+    SY = np.zeros((nu + 1, nv + 1))
+    DEP = np.zeros((nu + 1, nv + 1))
+    Zg = np.zeros((nu + 1, nv + 1))
+    Bg = np.zeros((nu + 1, nv + 1))
+    for i in range(nu + 1):
+        wx = -1 + 2 * i / nu
+        for j in range(nv + 1):
+            wz = -1 + 2 * j / nv
+            z = Zf(wx, wz)
+            Zg[i, j] = z
+            Bg[i, j] = Bfield(wx, wz)
+            p = proj(wx, z * hs, wz)
+            SX[i, j], SY[i, j], DEP[i, j] = p[0], p[1], dep(wx, z * hs, wz)
+    # pen law: BLACK = structure (dominant); RED = only the highest key crests;
+    # BLUE = only the basin bowl (the captured attention mass, scarce + loud).
+    crest = float(np.percentile(Zg, 86))
+    PV = np.full((nu + 1, nv + 1), blk)
+    PV[(Zg > crest) & (Bg < 0.30)] = red
+    PV[Bg > 0.42] = blue
+    if float((PV == blue).mean()) > 0.15:
+        PV[(PV == blue) & (Bg < 0.55)] = blk
+    _zbuf_terrain(out, SX, SY, DEP, feed=feed, PENV=PV, PXW=230, PXH=310)
+
+    # 6. softmax rings on the basin wall (green, inside the footprint)
+    gN = 90
+    xs = [-1 + 2 * i / gN for i in range(gN + 1)]
+    ys = [-1 + 2 * j / gN for j in range(gN + 1)]
+    sigma_p = 0.10 + 0.30 * tau
+    P = [[math.exp(-(((xs[i] - q_site[0]) ** 2 + (ys[j] - q_site[1]) ** 2) / (2 * sigma_p ** 2))) for i in range(gN + 1)] for j in range(gN + 1)]
+    for lv in range(1, 7):
+        iso = lv / 7.0
+        for ch in _chain_segments(_marching_squares(P, xs, ys, iso)):
+            if len(ch) < 5:
+                continue
+            pts = [proj(wx, Zf(wx, wz) * hs, wz) for (wx, wz) in ch if Bfield(wx, wz) > 0.20]
+            if len(pts) >= 2:
+                out += _poly(pts, color=green, f=feed)
+
+    # 7. value→output ribbon — gradient descent into the basin, rising out
+    def gradZ(wx, wz):
+        e = 0.01
+        return ((Zf(wx + e, wz) - Zf(wx - e, wz)) / (2 * e), (Zf(wx, wz + e) - Zf(wx, wz - e)) / (2 * e))
+
+    px, pz = -0.9, q_site[1] + 0.05
+    path = []
+    for _ in range(220):
+        path.append((px, pz))
+        gx, gz = gradZ(px, pz)
+        if px < q_site[0] - 0.02:  # descend toward basin from the left
+            px += 0.012
+            pz += -0.02 * gz
+        else:  # climb out the far side
+            px += 0.012
+            pz += 0.01 * gz
+        if px > 0.95:
+            break
+    rib = [proj(wx, (Zf(wx, wz) + 0.03) * hs, wz) for (wx, wz) in path]
+    rib, _ = _catmull_subdivide(rib)
+    out += _poly(rib, color=green, f=feed)
+    # emphasise the plunge (inside basin) with a second pass
+    inb = [proj(wx, (Zf(wx, wz) + 0.03) * hs, wz) for (wx, wz) in path if Bfield(wx, wz) > 0.3]
+    if len(inb) >= 2:
+        out += _poly(inb, color=green, f=feed)
+
+    # 8. query arrival ticks (scarce red) on the flat-left approach
+    for t in range(3):
+        e = proj(-0.95 + 0.05 * t, 0.02 * hs, q_site[1] + 0.05)
+        out += _poly([(e[0] - 3, e[1]), (e[0] + 3, e[1])], color=red, f=feed)
+        out += _poly([(e[0], e[1] - 3), (e[0], e[1] + 3)], color=red, f=feed)
+
+    # 9. softmax sparkline (lower-left quiet zone) — confirms Σw=1
+    sw = sorted(w, reverse=True)[:16]
+    bx, by = x0 + 0.04 * W, y0 + 0.08 * H
+    mw = max(sw) or 1.0
+    for i, val in enumerate(sw):
+        out += _poly([(bx + i * 2.2, by), (bx + i * 2.2, by + 16 * val / mw)], color=blk, f=feed)
+
+    # 10. furniture (left type axis; no numbered stages)
+    xL = x0 + 0.02 * W
+    out += type_block(["ATTENTION"], xL, y1 - 6.0, height=3.6, pen=blk, underline=False, f=feed)
+    out += _stroke_text(_spaced("AS TOPOGRAPHY"), xL, y1 - 15.0, 3.0, color=blk, f=feed)
+    out += _stroke_text(_spaced("ONE QUERY BENDS THE FIELD OF KEYS"), xL, y1 - 21.0, 1.6, color=blk, f=feed)
+    out += swatch_bar(xL, y1 - 27.0, [blue, red, green, blk], size=2.4, f=feed)
+    out += scale_footer(bounds, text="A = SOFTMAX(QK T)", pen=blk, height=2.4, f=feed)
+    return _fit_out(out, bounds)
